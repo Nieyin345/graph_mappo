@@ -1,0 +1,25 @@
+model:
+  name: graph_mappo
+  encoder:
+    gnn_type: graphsage
+    node_dim: auto
+    edge_dim: auto
+    hidden_dim: 128
+    num_layers: 3
+    activation: relu
+    dropout: 0.0
+    layer_norm: true
+    residual: true
+    share_actor_critic_encoder: false
+  actor:
+    share_actor_across_node_types: true
+    edge_scorer_hidden_dims: [128, 128]
+    idle_scorer_hidden_dims: [128]
+    temperature: 1.0
+  critic:
+    pooling: mean
+    hidden_dims: [128, 128]
+  distribution:
+    type: masked_categorical
+    invalid_logit_value: -1000000000.0
+

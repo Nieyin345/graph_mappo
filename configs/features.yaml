@@ -1,0 +1,56 @@
+features:
+  node:
+    include_node_type_one_hot: true
+    node_type_dim: 3
+    include_qkp_level: true
+    include_qkp_capacity_left: true
+    include_qkp_utilization: true
+    include_demand_in: true
+    include_demand_out: true
+    include_queue_pressure: true
+    include_recent_demand: true
+    recent_demand_windows: [15, 60, 240]
+    include_is_available: true
+    include_time_features: true
+    time_features:
+      minute_of_day_sin_cos: true
+      day_of_year_sin_cos: true
+    include_position: false
+    position_dim: 3
+  edge:
+    include_link_type_one_hot: true
+    link_type_dim: 4
+    include_available_now: true
+    include_rate_now: true
+    include_rate_future_window: true
+    prediction_horizon: 6
+    include_available_future_window: true
+    include_rate_delta: true
+    include_rate_mean: true
+    include_rate_max: true
+    include_last_activated: true
+    include_switch_cost: false
+  demand_edge:
+    enabled: true
+    build_mode: active_or_recent_pairs
+    include_pending_amount: true
+    include_pending_count: true
+    include_min_deadline_left: true
+    include_mean_deadline_left: true
+    include_priority_sum: true
+    include_arrival_history: true
+    include_served_history: true
+    include_failed_history: true
+    history_windows: [15, 60, 240, 1440]
+    normalize_amount_by: 1000.0
+    normalize_count_by: 10.0
+    normalize_deadline_by: 60.0
+  action:
+    include_idle_action: true
+    mask_unavailable_edges: true
+    mask_below_min_rate: true
+    mask_full_qkp_edges: false
+    mask_disallowed_link_types: true
+  dims:
+    node_dim: auto
+    edge_dim: auto

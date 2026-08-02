@@ -1,0 +1,20 @@
+train:
+  num_updates: 10000
+  rollout_steps: 400
+  episodes_per_update: 8
+  gamma: 0.99
+  gae_lambda: 0.95
+  ppo:
+    epochs: 4
+    minibatch_size: 1024
+    clip_eps: 0.2
+    normalize_advantages: true
+    entropy_coef: 0.01
+    value_coef: 0.5
+    max_grad_norm: 0.5
+    target_kl: 0.03
+  optimizer:
+    type: adam
+    actor_lr: 0.0003
+    critic_lr: 0.001
+

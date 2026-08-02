@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# Test / tooling caches
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Runtime outputs
+outputs/
+*.log
+
+# Large generated data (H5 / weather / reference works)
+dataset/
+*.h5
+weather/
+ref_work/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

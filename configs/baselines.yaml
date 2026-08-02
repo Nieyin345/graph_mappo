@@ -1,0 +1,11 @@
+baselines:
+  random:
+    enabled: true
+  greedy_rate:
+    enabled: true
+    use_future_mean_rate: false
+  greedy_qkp:
+    enabled: true
+    low_inventory_weight: 1.0
+    rate_weight: 0.2
+

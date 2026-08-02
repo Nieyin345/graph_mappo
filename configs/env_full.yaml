@@ -1,0 +1,53 @@
+# Full-scale scenario driven by the H5 dataset (dataset/global).
+# Use with: provider: h5 in rate_provider.yaml.
+# Load order example: default.yaml -> rate_provider.yaml -> features.yaml -> env_full.yaml -> graph_mappo.yaml -> train_mappo.yaml
+env:
+  name: qkd_full
+  episode_steps: 1440
+  episode_start_mode: random_day
+  terminate_on_year_end: true
+
+action_resolver:
+  mode: priority_matching
+  score_merge: mean
+  tie_break: rate_then_edge_id
+
+scenario:
+  mode: full
+  allowed_link_types: [gs_hap, gs_sat, hap_sat, sat_sat]
+
+qkp:
+  type: link
+  initial_level: 10000.0
+  key_ttl_steps: 1440
+  overflow_policy: discard
+  capacity:
+    default: 100000.0
+    per_link_type:
+      gs_hap: 100000.0
+      gs_sat: 80000.0
+      hap_sat: 120000.0
+      sat_sat: 150000.0
+    per_edge: {}
+
+requests:
+  source: generator
+  type: bernoulli
+  arrival_rate: 2.0
+  amount_mean: 100.0
+  deadline_steps: 30
+  priority_mode: uniform
+
+routing:
+  mode: link_path
+  path_selection: shortest_available_path
+  serve_order: earliest_deadline_first
+
+reward:
+  served_weight: 1.0
+  failed_weight: 2.0
+  waiting_weight: 0.05
+  overflow_weight: 0.1
+  expired_key_weight: 0.1
+  conflict_weight: 0.01
+  normalize_by_arrived_demand: false

@@ -1,0 +1,54 @@
+env:
+  name: qkd_small
+  episode_steps: 400
+  episode_start_mode: random_window
+  terminate_on_year_end: true
+
+action_resolver:
+  mode: mutual_choice
+  score_merge: mean
+  tie_break: rate_then_edge_id
+
+scenario:
+  mode: small
+  num_gs: 4
+  num_hap: 1
+  num_sat: 1
+  allowed_link_types: [gs_hap, gs_sat, hap_sat]
+
+qkp:
+  type: link
+  initial_level: 1000.0
+  key_ttl_steps: 1440
+  overflow_policy: discard
+  capacity:
+    default: 10000.0
+    per_link_type:
+      gs_hap: 10000.0
+      gs_sat: 8000.0
+      hap_sat: 12000.0
+      sat_sat: 15000.0
+    per_edge: {}
+
+requests:
+  source: generator
+  type: bernoulli
+  arrival_rate: 0.2
+  amount_mean: 100.0
+  deadline_steps: 12
+  priority_mode: uniform
+
+routing:
+  mode: link_path
+  path_selection: shortest_available_path
+  serve_order: earliest_deadline_first
+
+reward:
+  served_weight: 1.0
+  failed_weight: 2.0
+  waiting_weight: 0.05
+  overflow_weight: 0.1
+  expired_key_weight: 0.1
+  conflict_weight: 0.01
+  normalize_by_arrived_demand: false
+

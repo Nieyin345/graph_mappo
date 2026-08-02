@@ -1,0 +1,14 @@
+project:
+  name: qkd_graph_mappo
+  output_dir: outputs
+  run_name: debug
+
+seed:
+  global_seed: 42
+  env_seed: 42
+
+runtime:
+  device: cpu
+  dtype: float32
+  deterministic: false
+

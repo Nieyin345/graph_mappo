@@ -1,0 +1,29 @@
+rate_provider:
+  provider: mock            # mock | h5
+  edge_index_path: null
+  rate_stats_path: null
+  time:
+    slot_seconds: 60
+    start_index: 0
+    end_index: 525600
+  rate:
+    min_link_rate: 0.001
+    unavailable_if_nan: true
+    negative_rate_policy: clip_to_zero
+  normalization:
+    mode: log_p99
+    p99: 10.0
+    eps: 1.0e-8
+  h5:
+    # dataset/global is the output directory of build_global_tensor.py
+    dataset_dir: dataset/global
+    link_data_path: null        # default: <dataset_dir>/link_data.h5
+    node_registry_path: null    # default: <dataset_dir>/node_registry.csv
+    link_registry_path: null    # default: <dataset_dir>/link_registry.csv
+    rate_dataset_key: k_max     # secure key rate, bits-per-second
+    los_dataset_key: los        # line-of-sight flag (int8, 1 = visible)
+    distance_dataset_key: distance
+    zenith_dataset_key: zenith
+    availability_source: los_and_rate   # los | rate | los_and_rate
+    out_of_range_policy: zero           # zero | pad_last | raise
+    node_name_map: {}                   # env node id -> H5 node name (default: identity)
