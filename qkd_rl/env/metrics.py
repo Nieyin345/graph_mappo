@@ -25,17 +25,19 @@ class MetricsTracker:
         serve_result: ServeResult,
         reward_detail: RewardDetail,
         qkp: LinkQKPPool,
+        expired_requests: list = None,
     ) -> None:
+        expired_keys = sum(req.amount for req in (expired_requests or []))
         self.steps += 1
         self.served_keys += serve_result.served_keys
-        self.failed_keys += serve_result.failed_keys
+        self.failed_keys += serve_result.failed_keys + expired_keys
         self.conflict_count += resolved_action.conflict_count
         capacity = sum(qkp.capacities.values()) or 1.0
         level = sum(qkp.levels.values())
         self.last = {
             "reward": reward_detail.total,
             "served_keys": serve_result.served_keys,
-            "failed_keys": serve_result.failed_keys,
+            "failed_keys": serve_result.failed_keys + expired_keys,
             "waiting_keys": serve_result.waiting_keys,
             "generated_keys": sum(generated_keys.values()),
             "conflict_count": resolved_action.conflict_count,
@@ -54,4 +56,5 @@ class MetricsTracker:
 
     def last_info(self, reward_detail: RewardDetail) -> dict:
         return {**self.last, "reward_detail": reward_detail}
+
 

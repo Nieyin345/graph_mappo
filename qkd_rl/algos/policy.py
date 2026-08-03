@@ -1,3 +1,5 @@
+"""MAPPO policy wrapper: environment-compatible action sampling and PPO evaluation."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -51,3 +53,31 @@ class MAPPOPolicy:
             value=output.value,
         )
 
+    def evaluate_actions(
+        self,
+        obs: GraphObservation,
+        actions: dict[str, str],
+    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], torch.Tensor]:
+        """Recompute log probs, entropies, and the global value for stored actions.
+
+        Used by the PPO update: the returned log probs / value carry gradients
+        so actor and critic losses can be back-propagated.
+
+        Returns:
+            (log_probs, entropies, value): log probs and entropies are per-node
+            0-dim tensors; value is the global critic scalar.
+        """
+        output = self.model(obs, self.device)
+        log_probs: dict[str, torch.Tensor] = {}
+        entropies: dict[str, torch.Tensor] = {}
+        for node_id, logits in output.logits.items():
+            dist = torch.distributions.Categorical(logits=logits)
+            candidates = obs.action_candidates[node_id]
+            try:
+                action_idx = candidates.index(actions[node_id])
+            except ValueError as exc:
+                raise ValueError(f"Unknown action {actions[node_id]!r} for node {node_id!r}.") from exc
+            selected = torch.tensor(action_idx, dtype=torch.long, device=self.device)
+            log_probs[node_id] = dist.log_prob(selected)
+            entropies[node_id] = dist.entropy()
+        return log_probs, entropies, output.value

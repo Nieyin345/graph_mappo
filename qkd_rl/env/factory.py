@@ -50,7 +50,12 @@ def build_env_from_config(config: dict) -> QKDEnv:
     rate_provider = build_rate_provider(config, scenario.edges, seed=int(config["seed"]["global_seed"]))
     qkp = LinkQKPPool(scenario.edges, config["qkp"])
     action_space = NodeActionSpace(scenario.node_ids, scenario.edges)
-    mask_builder = ActionMaskBuilder(action_space, config["features"]["action"])
+    mask_builder = ActionMaskBuilder(
+        action_space,
+        config["features"]["action"],
+        min_link_rate=float(config["rate_provider"]["rate"]["min_link_rate"]),
+        allowed_link_types=config["scenario"].get("allowed_link_types", []),
+    )
     action_resolver = ActionResolver(action_space, config["action_resolver"])
     normalizer = RateNormalizer(config["rate_provider"]["normalization"])
     graph_builder = GraphBuilder(
@@ -83,4 +88,5 @@ def build_env_from_config(config: dict) -> QKDEnv:
 
 def build_default_env(project_root: str | Path) -> QKDEnv:
     return build_env_from_config(load_default_config(project_root))
+
 

@@ -53,46 +53,89 @@ class GraphBuilder:
     ) -> GraphObservation:
         demand_pairs = self.build_demand_pairs(env_state, requests, request_history)
         demand_edge_ids = [demand_edge_id(pair) for pair in demand_pairs]
+        action_candidates: dict[str, list[str]] = {}
+        action_masks: dict[str, list[bool]] = {}
+        for node in self.nodes:
+            node_id = node.node_id
+            full_candidates = self.action_space.candidates_for_node(node_id)
+            legal = [action for action, ok in zip(full_candidates, masks[node_id]) if ok]
+            action_candidates[node_id] = legal
+            action_masks[node_id] = [True] * len(legal)
         return GraphObservation(
-            node_features=self.build_node_features(env_state, requests),
+            node_features=self.build_node_features(env_state, requests, request_history),
             edge_index=self.build_edge_index(demand_pairs),
             edge_features=self.build_edge_features(env_state, requests, request_history, demand_pairs),
             node_ids=[node.node_id for node in self.nodes],
             edge_ids=[edge.edge_id for edge in self.edges] + demand_edge_ids,
             physical_edge_ids=[edge.edge_id for edge in self.edges],
             demand_edge_ids=demand_edge_ids,
-            action_candidates={
-                node.node_id: self.action_space.candidates_for_node(node.node_id) for node in self.nodes
-            },
-            action_masks=masks,
+            action_candidates=action_candidates,
+            action_masks=action_masks,
             state=env_state,
         )
 
-    def build_node_features(self, env_state: EnvState, requests: RequestQueue) -> list[list[float]]:
-        demand = requests.demand_by_node()
+    def build_node_features(
+        self,
+        env_state: EnvState,
+        requests: RequestQueue,
+        request_history: RequestHistoryTracker,
+    ) -> list[list[float]]:
+        """Build node features following ``features.node`` switches.
+
+        The feature order matches ``ConfigValidator.resolve_feature_dims`` so
+        resolved dimensions stay consistent when switches are turned off.
+        """
+        node_cfg = self.config["features"]["node"]
+        node_dim = int(self.config["features"]["dims"]["node_dim_resolved"])
+        windows = [int(value) for value in node_cfg.get("recent_demand_windows", [])]
+        amount_scale = 1000.0
+        count_scale = 10.0
+        demand_in = requests.demand_in_by_node()
+        demand_out = requests.demand_out_by_node()
+        pending_count = requests.pending_count_by_node()
+
         features: list[list[float]] = []
         for node in self.nodes:
             row: list[float] = []
-            row.extend(one_hot_node_type(node.node_type))
+            if node_cfg.get("include_node_type_one_hot", True):
+                row.extend(one_hot_node_type(node.node_type))
             incident_edges = [edge for edge in self.edges if node.node_id in (edge.src, edge.dst)]
             total_level = sum(self.qkp.get_level(edge.edge_id) for edge in incident_edges)
             total_capacity = sum(self.qkp.get_capacity(edge.edge_id) for edge in incident_edges) or 1.0
-            row.extend(
-                [
-                    total_level / total_capacity,
-                    (total_capacity - total_level) / total_capacity,
-                    total_level / total_capacity,
-                    demand.get(node.node_id, 0.0) / 1000.0,
-                    demand.get(node.node_id, 0.0) / 1000.0,
-                    demand.get(node.node_id, 0.0) / 1000.0,
-                ]
-            )
-            row.extend([demand.get(node.node_id, 0.0) / 1000.0] * 3)
-            row.append(1.0)
-            minute = env_state.t % 1440
-            day = env_state.t % 525600
-            row.extend([math.sin(2 * math.pi * minute / 1440), math.cos(2 * math.pi * minute / 1440)])
-            row.extend([math.sin(2 * math.pi * day / 525600), math.cos(2 * math.pi * day / 525600)])
+            if node_cfg.get("include_qkp_level", True):
+                row.append(total_level / total_capacity)
+            if node_cfg.get("include_qkp_capacity_left", True):
+                row.append((total_capacity - total_level) / total_capacity)
+            if node_cfg.get("include_qkp_utilization", True):
+                row.append(total_level / total_capacity)
+            node_id = node.node_id
+            if node_cfg.get("include_demand_in", True):
+                row.append(demand_in.get(node_id, 0.0) / amount_scale)
+            if node_cfg.get("include_demand_out", True):
+                row.append(demand_out.get(node_id, 0.0) / amount_scale)
+            if node_cfg.get("include_queue_pressure", True):
+                row.append(pending_count.get(node_id, 0) / count_scale)
+            if node_cfg.get("include_is_available", True):
+                row.append(
+                    float(
+                        any(env_state.edge_windows[edge.edge_id].available[0] for edge in incident_edges)
+                    )
+                )
+            if node_cfg.get("include_recent_demand", False):
+                for window in windows:
+                    row.append(request_history.sum_for_node(node_id, "arrived", env_state.t, window) / amount_scale)
+            if node_cfg.get("include_time_features", False):
+                time_cfg = node_cfg.get("time_features", {})
+                minute = env_state.t % 1440
+                day = env_state.t % 525600
+                if time_cfg.get("minute_of_day_sin_cos", False):
+                    row.extend([math.sin(2 * math.pi * minute / 1440), math.cos(2 * math.pi * minute / 1440)])
+                if time_cfg.get("day_of_year_sin_cos", False):
+                    row.extend([math.sin(2 * math.pi * day / 525600), math.cos(2 * math.pi * day / 525600)])
+            if node_cfg.get("include_position", False):
+                row.extend(self._position_features(node))
+            if len(row) != node_dim:
+                raise ValueError(f"Node feature dim mismatch for {node_id}: {len(row)} != {node_dim}")
             features.append(row)
         return features
 
@@ -117,22 +160,39 @@ class GraphBuilder:
         request_history: RequestHistoryTracker,
         demand_pairs: list[tuple[str, str]],
     ) -> list[list[float]]:
-        rows: list[list[float]] = []
+        """Build physical + demand edge features following ``features.edge``
+        and ``features.demand_edge`` switches."""
+        edge_cfg = self.config["features"]["edge"]
         physical_dim = int(self.config["features"]["dims"]["physical_edge_dim_resolved"])
         demand_dim = int(self.config["features"]["dims"]["demand_edge_dim_resolved"])
+        horizon = int(edge_cfg.get("prediction_horizon", 0))
+        rows: list[list[float]] = []
         for edge in self.edges:
             window = env_state.edge_windows[edge.edge_id]
             rates_norm = [self.normalizer.transform_scalar(rate) for rate in window.rates]
             row: list[float] = []
-            row.extend(one_hot_link_type(edge.link_type))
-            row.append(float(window.available[0]))
-            row.append(rates_norm[0])
-            row.extend(rates_norm[1:])
-            row.extend(float(value) for value in window.available[1:])
-            row.append(rates_norm[-1] - rates_norm[0] if len(rates_norm) > 1 else 0.0)
-            row.append(sum(rates_norm) / len(rates_norm))
-            row.append(max(rates_norm))
-            row.append(float(edge.edge_id in env_state.last_activated_edges))
+            if edge_cfg.get("include_link_type_one_hot", True):
+                row.extend(one_hot_link_type(edge.link_type))
+            if edge_cfg.get("include_available_now", True):
+                row.append(float(window.available[0]))
+            if edge_cfg.get("include_rate_now", True):
+                row.append(rates_norm[0])
+            if edge_cfg.get("include_rate_future_window", True) and horizon > 0:
+                row.extend(rates_norm[1 : horizon + 1])
+            if edge_cfg.get("include_available_future_window", True) and horizon > 0:
+                row.extend(float(value) for value in window.available[1 : horizon + 1])
+            if edge_cfg.get("include_rate_delta", True):
+                row.append(rates_norm[-1] - rates_norm[0] if len(rates_norm) > 1 else 0.0)
+            if edge_cfg.get("include_rate_mean", True):
+                row.append(sum(rates_norm) / len(rates_norm))
+            if edge_cfg.get("include_rate_max", True):
+                row.append(max(rates_norm))
+            if edge_cfg.get("include_last_activated", True):
+                row.append(float(edge.edge_id in env_state.last_activated_edges))
+            if edge_cfg.get("include_switch_cost", False):
+                # Only the previous activation flag is available; use it so the
+                # dimension stays consistent with the config when enabled.
+                row.append(float(edge.edge_id in env_state.last_activated_edges))
             row.extend([0.0] * demand_dim)
             if len(row) != physical_dim + demand_dim:
                 raise ValueError(f"Physical edge feature dim mismatch: {len(row)} != {physical_dim + demand_dim}")
@@ -201,6 +261,12 @@ class GraphBuilder:
                 raise ValueError(f"Demand edge feature dim mismatch: {len(row)} != {demand_dim}")
             rows.append(row)
         return rows
+
+    def _position_features(self, node: Node) -> list[float]:
+        dim = int(self.config["features"]["node"].get("position_dim", 3))
+        if node.lat is None or node.lon is None:
+            return [0.0] * dim
+        return [node.lat / 90.0, node.lon / 180.0, (node.alt_m or 0.0) / 10000.0][:dim]
 
 
 def one_hot_node_type(node_type: NodeType) -> list[float]:

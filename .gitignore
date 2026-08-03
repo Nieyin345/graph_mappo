@@ -24,3 +24,4 @@ ref_work/
 .idea/
 .DS_Store
 Thumbs.db
+.pytest_tmp/

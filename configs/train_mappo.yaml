@@ -17,4 +17,10 @@ train:
     type: adam
     actor_lr: 0.0003
     critic_lr: 0.001
+  logging:
+    log_interval: 1
+    checkpoint_interval: 100
+    eval_interval: 200
+    eval_episodes: 4
+
 

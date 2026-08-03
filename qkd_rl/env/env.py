@@ -58,7 +58,13 @@ class QKDEnv:
         self.metrics.reset()
         self.steps = 0
         self.last_activated_edges = []
-        self.t = self.scenario.start_t
+        start_mode = self.config["env"].get("episode_start_mode", "fixed")
+        if start_mode == "random_window" and seed is not None:
+            episode_steps = int(self.config["env"].get("episode_steps", 400))
+            max_start = max(self.scenario.start_t, self.scenario.end_t - episode_steps)
+            self.t = self.rng.randint(self.scenario.start_t, max_start)
+        else:
+            self.t = self.scenario.start_t
         return self._build_observation()
 
     def step(
@@ -91,7 +97,7 @@ class QKDEnv:
             resolved_action=resolved,
             qkp=self.qkp,
         )
-        self.metrics.update(resolved, generated, serve_result, reward_detail, self.qkp)
+        self.metrics.update(resolved, generated, serve_result, reward_detail, self.qkp, expired_requests)
 
         self.last_activated_edges = resolved.activated_edges
         self.t += 1
@@ -120,3 +126,5 @@ class QKDEnv:
         state = self._build_state()
         masks = self.mask_builder.build(state, self.qkp, self.requests)
         return self.graph_builder.build(state, self.requests, self.request_history, masks)
+
+
