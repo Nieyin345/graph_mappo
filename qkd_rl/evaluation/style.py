@@ -7,6 +7,10 @@ fonts, compact layout and minimal chart junk.
 from __future__ import annotations
 
 import matplotlib
+
+# Headless backend: evaluation exports SVG/PDF/PNG files, no GUI needed.
+matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 
 # Color-blind safe palette (Okabe-Ito).

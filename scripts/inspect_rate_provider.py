@@ -6,7 +6,7 @@ normalization, and writes ``rate_stats.json``.
 
 Usage (run from the project root):
 
-    python scripts/inspect_rate_provider.py                 # default (mock)
+    python scripts/inspect_rate_provider.py                 # default (h5)
     python scripts/inspect_rate_provider.py --provider h5   # H5 dataset
     python scripts/inspect_rate_provider.py --samples 2000 --output stats.json
 """
@@ -30,7 +30,7 @@ from qkd_rl.link.rate_provider import build_rate_provider
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--provider", default=None, choices=["mock", "h5"], help="Override rate provider.")
+    parser.add_argument("--provider", default="h5", choices=["h5"], help="Rate provider (H5 dataset only).")
     parser.add_argument("--scenario", default=None, choices=["small", "full"], help="Override scenario mode.")
     parser.add_argument("--dataset-dir", default=None, help="H5 dataset directory (provider=h5).")
     parser.add_argument("--samples", type=int, default=1000, help="Number of sampled time slots.")

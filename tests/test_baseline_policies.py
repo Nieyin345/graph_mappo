@@ -16,7 +16,7 @@ from qkd_rl.baselines import (
 from qkd_rl.core.types import KeyRequest, LinkType
 from qkd_rl.env.graph_builder import GraphObservation
 from qkd_rl.env.state import EnvState
-from qkd_rl.env.factory import build_default_env
+from tests.helpers import build_test_env
 from qkd_rl.link.rate_provider import EdgeWindow
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -118,7 +118,7 @@ def test_greedy_qkp_ties_break_by_rate() -> None:
 def test_baseline_policies_return_legal_actions_in_real_env() -> None:
     policies = [RandomPolicy(seed=0), GreedyRatePolicy(), GreedyDemandPolicy(), GreedyQKPPolicy()]
     for policy in policies:
-        env = build_default_env(ROOT)
+        env = build_test_env(ROOT)
         obs = env.reset(seed=42)
         actions, scores = policy.act(obs)
         for node in obs.node_ids:
@@ -127,7 +127,7 @@ def test_baseline_policies_return_legal_actions_in_real_env() -> None:
 
 
 def test_baseline_policies_complete_an_episode() -> None:
-    env = build_default_env(ROOT)
+    env = build_test_env(ROOT)
     obs = env.reset(seed=7)
     for policy in [GreedyDemandPolicy(), GreedyQKPPolicy()]:
         done = False

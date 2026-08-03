@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from qkd_rl.baselines.random_policy import RandomPolicy
-from qkd_rl.env.factory import build_default_env, load_default_config
+from tests.helpers import build_test_env
 import json
 
 from qkd_rl.evaluation import Evaluator, plot_learning_curve, plot_policy_comparison, read_train_history
@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _build_env(seed: int):
-    env = build_default_env(ROOT)
+    env = build_test_env(ROOT)
     env.reset(seed=seed)
     return env
 

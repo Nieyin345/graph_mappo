@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from qkd_rl.core.types import Edge, LinkType
 from qkd_rl.env.action_space import NodeActionSpace
-from qkd_rl.env.factory import build_default_env, load_default_config
+from tests.helpers import build_test_env
 from qkd_rl.env.masks import ActionMaskBuilder
 from qkd_rl.env.state import EnvState
 from qkd_rl.link.rate_provider import EdgeWindow
@@ -87,7 +87,7 @@ def test_edge_legal_when_all_checks_pass():
 
 
 def test_graph_observation_candidates_only_contain_legal_actions():
-    env = build_default_env(".")
+    env = build_test_env(".")
     obs = env.reset()
     space = env.action_resolver.action_space
     fresh_masks = env.mask_builder.build(obs.state, env.qkp, env.requests)

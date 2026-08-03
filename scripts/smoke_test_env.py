@@ -7,14 +7,16 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from qkd_rl.baselines.greedy_rate import GreedyRatePolicy
-from qkd_rl.core.config import ConfigValidator
-from qkd_rl.env.factory import build_default_env, load_default_config
+from qkd_rl.core.config import ConfigValidator, deep_merge, load_config
+from qkd_rl.env.factory import build_env_from_config, load_default_config
 
 
 def main() -> None:
     config = load_default_config(ROOT)
+    config = deep_merge(config, load_config([ROOT / "configs" / "env_full.yaml"]))
+    config["rate_provider"]["provider"] = "h5"
     print(f"Resolved feature dims: {ConfigValidator().resolve_feature_dims(config)}")
-    env = build_default_env(ROOT)
+    env = build_env_from_config(config)
     obs = env.reset()
     policy = GreedyRatePolicy()
     total_reward = 0.0

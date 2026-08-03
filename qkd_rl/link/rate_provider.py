@@ -48,54 +48,6 @@ class RateNormalizer:
         return value
 
 
-def _stable_hash(text: str) -> int:
-    """Deterministic string hash (Python's hash() is salted per process)."""
-    return zlib.crc32(text.encode("utf-8"))
-
-
-class MockRateProvider:
-    def __init__(self, config: dict, seed: int = 0):
-        self.config = config
-        self.seed = seed
-        self.edges: dict[str, Edge] = {}
-        self.horizon = 0
-        self.min_link_rate = 0.0
-
-    def setup(self, edges: list[Edge], horizon: int, min_link_rate: float) -> None:
-        self.edges = {edge.edge_id: edge for edge in edges}
-        self.horizon = horizon
-        self.min_link_rate = min_link_rate
-
-    def get_rate(self, edge_id: str, t: int) -> float:
-        edge = self.edges[edge_id]
-        base_by_type = {
-            LinkType.GS_HAP: 1.8,
-            LinkType.GS_SAT: 1.2,
-            LinkType.HAP_SAT: 2.4,
-            LinkType.SAT_SAT: 3.0,
-        }
-        base = base_by_type[edge.link_type]
-        phase = (_stable_hash(edge_id) % 97) / 97.0
-        daily = 0.5 + 0.5 * math.sin(2 * math.pi * ((t % 1440) / 1440.0 + phase))
-        outage = 0.0 if ((t + _stable_hash(edge_id)) % 113) < 8 else 1.0
-        return max(0.0, base * (0.2 + daily) * outage)
-
-    def is_available(self, edge_id: str, t: int) -> bool:
-        return self.get_rate(edge_id, t) >= self.min_link_rate
-
-    def get_edge_window(self, edge_id: str, t: int) -> EdgeWindow:
-        rates = [self.get_rate(edge_id, t + offset) for offset in range(self.horizon + 1)]
-        return EdgeWindow(
-            edge_id=edge_id,
-            rates=rates,
-            available=[rate >= self.min_link_rate for rate in rates],
-            link_type=self.edges[edge_id].link_type,
-        )
-
-    def get_all_edge_windows(self, t: int) -> dict[str, EdgeWindow]:
-        return {edge_id: self.get_edge_window(edge_id, t) for edge_id in self.edges}
-
-
 class H5RateProvider:
     """Read link rates / LOS availability from the H5 dataset produced by
     ``build_global_tensor.py`` (``dataset/global/link_data.h5``).
@@ -310,14 +262,11 @@ class H5RateProvider:
 
 def build_rate_provider(config: dict, edges: list[Edge], seed: int) -> RateProvider:
     provider_name = config["rate_provider"]["provider"]
+    if provider_name != "h5":
+        raise ValueError(f"Rate provider {provider_name!r} is not supported; training reads the H5 dataset (use 'h5').")
     provider_cfg = config["rate_provider"]
     horizon = int(config["features"]["edge"]["prediction_horizon"])
     min_link_rate = float(provider_cfg["rate"]["min_link_rate"])
-    if provider_name == "mock":
-        provider = MockRateProvider(provider_cfg, seed=seed)
-    elif provider_name == "h5":
-        provider = H5RateProvider(provider_cfg, seed=seed)
-    else:
-        raise NotImplementedError(f"Rate provider {provider_name!r} is not implemented yet.")
+    provider = H5RateProvider(provider_cfg, seed=seed)
     provider.setup(edges, horizon=horizon, min_link_rate=min_link_rate)
     return provider

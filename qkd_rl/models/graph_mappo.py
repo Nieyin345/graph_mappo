@@ -25,10 +25,29 @@ class ActorCriticOutput:
     value: torch.Tensor
 
 
-def observation_to_tensors(obs: GraphObservation, device: torch.device | str = "cpu") -> GraphTensors:
+def observation_to_tensors(
+    obs: GraphObservation,
+    device: torch.device | str = "cpu",
+    edge_dim: int | None = None,
+) -> GraphTensors:
+    """Convert a :class:`GraphObservation` into batched tensors.
+
+    Mask-first filtering can leave a graph with zero physical links (and zero
+    demand edges), so the empty tensors are built with the correct 2-D shapes
+    ``(2, 0)`` for ``edge_index`` and ``(0, edge_dim)`` for edge features
+    instead of degenerate 1-D tensors.
+    """
     node_features = torch.tensor(obs.node_features, dtype=torch.float32, device=device)
-    edge_index = torch.tensor(obs.edge_index, dtype=torch.long, device=device).t().contiguous()
-    edge_features = torch.tensor(obs.edge_features, dtype=torch.float32, device=device)
+    if obs.edge_index:
+        edge_index = torch.tensor(obs.edge_index, dtype=torch.long, device=device).t().contiguous()
+    else:
+        edge_index = torch.zeros((2, 0), dtype=torch.long, device=device)
+    if obs.edge_features:
+        edge_features = torch.tensor(obs.edge_features, dtype=torch.float32, device=device)
+    else:
+        if edge_dim is None:
+            raise ValueError("edge_dim is required when the observation has no edge features.")
+        edge_features = torch.zeros((0, edge_dim), dtype=torch.float32, device=device)
     edge_features_directed = edge_features.repeat_interleave(2, dim=0)
     return GraphTensors(
         node_features=node_features,
@@ -73,6 +92,7 @@ class EdgeConditionedGraphLayer(nn.Module):
 class GraphEncoder(nn.Module):
     def __init__(self, node_dim: int, edge_dim: int, config: dict):
         super().__init__()
+        self.edge_dim = int(edge_dim)
         hidden_dim = int(config["hidden_dim"])
         activation = config.get("activation", "relu")
         dropout = float(config.get("dropout", 0.0))
@@ -169,7 +189,12 @@ class GlobalCritic(nn.Module):
     def forward(self, node_emb: torch.Tensor, edge_emb_directed: torch.Tensor) -> torch.Tensor:
         if self.pooling != "mean":
             raise NotImplementedError(f"Unsupported critic pooling: {self.pooling}")
-        graph_emb = torch.cat([node_emb.mean(dim=0), edge_emb_directed.mean(dim=0)], dim=-1)
+        if edge_emb_directed.shape[0] == 0:
+            # Mask-first filtering may leave the graph with no physical links.
+            edge_pool = torch.zeros(edge_emb_directed.shape[1], device=edge_emb_directed.device)
+        else:
+            edge_pool = edge_emb_directed.mean(dim=0)
+        graph_emb = torch.cat([node_emb.mean(dim=0), edge_pool], dim=-1)
         return self.value_head(graph_emb).squeeze(-1)
 
 
@@ -188,7 +213,7 @@ class GraphMAPPOActorCritic(nn.Module):
         self.critic = GlobalCritic(hidden_dim, model_cfg)
 
     def forward(self, obs: GraphObservation, device: torch.device | str = "cpu") -> ActorCriticOutput:
-        tensors = observation_to_tensors(obs, device)
+        tensors = observation_to_tensors(obs, device, edge_dim=self.encoder.edge_dim)
         node_emb, edge_emb = self.encoder(tensors)
         return ActorCriticOutput(
             logits=self.actor(obs, node_emb, edge_emb, self.action_space),

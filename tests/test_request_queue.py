@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from qkd_rl.core.types import KeyRequest
-from qkd_rl.env.factory import build_default_env, load_default_config
+from tests.helpers import build_test_env
 from qkd_rl.env.request import RequestGenerator, RequestHistoryTracker
 
 
 def test_deadline_reached_request_is_expired_not_failed_by_serve():
-    env = build_default_env(".")
+    env = build_test_env(".")
     env.reset()
     req = KeyRequest("REQ_X", "GS_001", "GS_002", 1.0e9, env.t, env.t - 1)
     env.requests.add_arrivals([req])
@@ -23,7 +23,7 @@ def test_deadline_reached_request_is_expired_not_failed_by_serve():
 
 
 def test_servable_request_is_served_and_removed():
-    env = build_default_env(".")
+    env = build_test_env(".")
     env.reset()
     # A tiny request that the initial QKP can serve immediately.
     req = KeyRequest("REQ_Y", "GS_001", "GS_002", 1.0, env.t, env.t + 12)

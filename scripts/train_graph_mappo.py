@@ -4,7 +4,7 @@ Usage (from the project root):
 
     conda run -n pytorch python scripts/train_graph_mappo.py
     conda run -n pytorch python scripts/train_graph_mappo.py --num-updates 100 --run-name exp1
-    conda run -n pytorch python scripts/train_graph_mappo.py --configs env_full.yaml --seed 7
+    conda run -n pytorch python scripts/train_graph_mappo.py --seed 7
     conda run -n pytorch python scripts/train_graph_mappo.py --checkpoint outputs/exp1/checkpoint_update_0100.pt
 """
 
@@ -46,6 +46,8 @@ def parse_args() -> argparse.Namespace:
 
 def build_config(args: argparse.Namespace) -> dict:
     config = load_default_config(ROOT)
+    # Training reads the H5 dataset only: default to the full-scale scenario.
+    config = deep_merge(config, load_config([ROOT / "configs" / "env_full.yaml"]))
     if args.configs:
         for name in args.configs:
             config = deep_merge(config, load_config([ROOT / "configs" / name]))

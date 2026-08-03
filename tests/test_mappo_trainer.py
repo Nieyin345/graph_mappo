@@ -10,11 +10,12 @@ from qkd_rl.algos.mappo_trainer import MAPPOTrainer
 from qkd_rl.algos.policy import MAPPOPolicy
 from qkd_rl.core.config import deep_merge
 from qkd_rl.env.factory import build_env_from_config, load_default_config
+from tests.helpers import point_config_to_h5
 from qkd_rl.models.graph_mappo import GraphMAPPOActorCritic
 
 
 def _tiny_config(tmp_path):
-    config = load_default_config(".")
+    config = point_config_to_h5(load_default_config("."))
     config = deep_merge(
         config,
         {
@@ -33,7 +34,7 @@ def _tiny_config(tmp_path):
 
 
 def test_evaluate_actions_matches_act_log_probs():
-    config = load_default_config(".")
+    config = point_config_to_h5(load_default_config("."))
     env = build_env_from_config(config)
     obs = env.reset()
     model = GraphMAPPOActorCritic(env.action_resolver.action_space, config)
@@ -60,10 +61,12 @@ def test_collect_rollout_and_update(tmp_path):
 
     params_before = [p.detach().clone() for p in model.parameters()]
     stats = trainer.update(buffer)
-    assert stats.actor_loss > 0.0
+    # PPO actor loss may be negative when advantages are positive; only the
+    # critic MSE and the entropy bonus are guaranteed non-negative.
     assert stats.critic_loss > 0.0
-    assert stats.entropy > 0.0
+    assert stats.entropy >= 0.0
     assert torch.isfinite(torch.tensor(stats.actor_loss))
+    assert torch.isfinite(torch.tensor(stats.critic_loss))
     assert torch.isfinite(torch.tensor(stats.kl))
 
     params_after = [p.detach().clone() for p in model.parameters()]

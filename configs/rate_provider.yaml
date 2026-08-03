@@ -1,5 +1,5 @@
 rate_provider:
-  provider: mock            # mock | h5
+  provider: h5              # training/evaluation read the H5 dataset only
   edge_index_path: null
   rate_stats_path: null
   time:

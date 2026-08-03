@@ -6,4 +6,4 @@ requires-python = ">=3.8"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "--basetemp=.pytest_tmp -p no:cacheprovider"
+addopts = "--basetemp=.pytest_tmp2 -p no:cacheprovider"

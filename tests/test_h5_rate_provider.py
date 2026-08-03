@@ -10,7 +10,7 @@ import pytest
 from qkd_rl.core.config import ConfigValidator
 from qkd_rl.core.types import Edge, LinkType
 from qkd_rl.env.factory import build_env_from_config, load_default_config
-from qkd_rl.link.rate_provider import H5RateProvider, MockRateProvider, build_rate_provider
+from qkd_rl.link.rate_provider import H5RateProvider, build_rate_provider
 
 NODES = [
     (0, "GS", "Beijing", 39.9, 116.4, 0.0),
@@ -172,15 +172,3 @@ def test_build_rate_provider_h5_from_config(tmp_path):
     windows = provider.get_all_edge_windows(0)
     assert set(windows) == set(scenario.edge_ids)
     provider.close()
-
-
-def test_mock_provider_is_reproducible_across_processes():
-    edges = _edges()
-    cfg = {"rate": {"min_link_rate": 0.001}}
-    a = MockRateProvider(cfg, seed=1)
-    a.setup(edges, horizon=6, min_link_rate=0.001)
-    b = MockRateProvider(cfg, seed=1)
-    b.setup(edges, horizon=6, min_link_rate=0.001)
-    for edge_id in edges:
-        for t in (0, 100, 1440, 525599):
-            assert a.get_rate(edge_id.edge_id, t) == b.get_rate(edge_id.edge_id, t)

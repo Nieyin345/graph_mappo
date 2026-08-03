@@ -3,13 +3,14 @@ from __future__ import annotations
 import torch
 
 from qkd_rl.algos.policy import MAPPOPolicy
-from qkd_rl.env.factory import build_default_env, load_default_config
+from qkd_rl.env.factory import load_default_config
+from tests.helpers import build_test_env
 from qkd_rl.models.graph_mappo import GraphMAPPOActorCritic
 
 
 def test_graph_mappo_actor_critic_forward_matches_action_candidates():
     config = load_default_config(".")
-    env = build_default_env(".")
+    env = build_test_env(".")
     obs = env.reset()
     model = GraphMAPPOActorCritic(env.action_resolver.action_space, config)
 
@@ -23,7 +24,7 @@ def test_graph_mappo_actor_critic_forward_matches_action_candidates():
 
 def test_mappo_policy_produces_env_compatible_actions():
     config = load_default_config(".")
-    env = build_default_env(".")
+    env = build_test_env(".")
     obs = env.reset()
     model = GraphMAPPOActorCritic(env.action_resolver.action_space, config)
     policy = MAPPOPolicy(model)

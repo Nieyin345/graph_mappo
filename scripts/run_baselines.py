@@ -17,7 +17,8 @@ sys.path.insert(0, str(ROOT))
 
 from qkd_rl.baselines.greedy_rate import GreedyRatePolicy
 from qkd_rl.baselines.random_policy import RandomPolicy
-from qkd_rl.env.factory import build_default_env
+from qkd_rl.core.config import deep_merge, load_config
+from qkd_rl.env.factory import build_env_from_config, load_default_config
 from qkd_rl.evaluation import Evaluator, plot_episode_timeline, plot_policy_comparison
 from qkd_rl.evaluation.evaluator import write_episodes_csv, write_steps_csv, write_summary_json
 
@@ -34,7 +35,10 @@ def main() -> None:
     out_dir = Path(ROOT) / args.out
 
     def env_builder(seed: int):
-        env = build_default_env(ROOT)
+        config = load_default_config(ROOT)
+        config = deep_merge(config, load_config([ROOT / "configs" / "env_full.yaml"]))
+        config["rate_provider"]["provider"] = "h5"
+        env = build_env_from_config(config)
         env.reset(seed=seed)
         return env
 

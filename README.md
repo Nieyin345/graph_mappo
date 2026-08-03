@@ -4,12 +4,12 @@ FSO-QKD link scheduling code scaffold.
 
 Current implementation target:
 
-- `RateProvider` is an interface; real H5 reading is deferred behind `H5RateProvider`.
+- Training reads link rates / LOS exclusively from the H5 dataset via `H5RateProvider` (no mock/fake data generator).
 - QKP is stored per link with YAML-configurable capacity.
 - GS-GS communication demand is encoded as non-action demand edges in the graph.
 - Request history is tracked with rolling windows for arrived, served, and failed demand.
 - `ActionResolver` supports multiple YAML-selected matching modes.
-- The first runnable check is a small mock-rate environment.
+- Tests exercise the same `H5RateProvider` code path against a small generated H5 dataset (`tests/helpers.py`).
 - `qkd_rl.env.factory` is the package-level environment assembly entry.
 - `qkd_rl.models.graph_mappo` contains the pure-PyTorch GNN actor-critic.
 - `qkd_rl.algos.policy.MAPPOPolicy` converts actor logits into env-compatible node actions and action scores.
@@ -31,17 +31,17 @@ conda run -n pytorch python -m pytest
 
 ## 训练（Graph-MAPPO）
 
-训练入口是 `scripts/train_graph_mappo.py`，默认加载 `default -> rate_provider -> features -> env_small -> graph_mappo -> train_mappo` 配置：
+训练入口是 `scripts/train_graph_mappo.py`，默认加载 `default -> rate_provider -> features -> env_full -> graph_mappo -> train_mappo` 配置（数据只从 H5 读取）：
 
 ```powershell
-# 小场景默认训练
+# 全规模场景默认训练（H5 数据）
 conda run -n pytorch python scripts/train_graph_mappo.py --num-updates 100 --run-name exp1
 
 # 覆盖配置（按顺序合并 configs/ 下文件）
 conda run -n pytorch python scripts/train_graph_mappo.py --configs env_full.yaml --run-name full_exp1 --seed 7
 
 # 从 checkpoint 续训
-conda run -n pytorch python scripts/train_graph_mappo.py --configs env_full.yaml --run-name full_exp1 --checkpoint outputs/full_exp1/checkpoint_update_0100.pt
+conda run -n pytorch python scripts/train_graph_mappo.py --run-name full_exp1 --checkpoint outputs/full_exp1/checkpoint_update_0100.pt
 ```
 
 训练循环由 `qkd_rl/algos/mappo_trainer.py` 驱动：
@@ -64,7 +64,7 @@ conda run -n pytorch python scripts/train_graph_mappo.py --configs env_full.yaml
 ```yaml
 # configs/rate_provider.yaml
 rate_provider:
-  provider: h5            # mock | h5
+  provider: h5            # training/evaluation read the H5 dataset only
   h5:
     dataset_dir: dataset/global
     availability_source: los_and_rate   # los | rate | los_and_rate
@@ -81,7 +81,7 @@ rate_provider:
 
 ```powershell
 # 检查 H5 provider 接口并统计速率分布（写 outputs/rate_stats.json）
-conda run -n pytorch python scripts/inspect_rate_provider.py --provider h5 --scenario full --samples 2000
+conda run -n pytorch python scripts/inspect_rate_provider.py --scenario full --samples 2000
 
 # 全规模场景训练（需要 dataset/global/ 已生成）
 conda run -n pytorch python scripts/train_graph_mappo.py --configs env_full.yaml --run-name full_exp1 --num-updates 500

@@ -53,6 +53,10 @@ class GraphBuilder:
     ) -> GraphObservation:
         demand_pairs = self.build_demand_pairs(env_state, requests, request_history)
         demand_edge_ids = [demand_edge_id(pair) for pair in demand_pairs]
+        # Mask-first filtering: links that are not legal for either endpoint are
+        # dropped from the graph entirely (edge_index / edge_features /
+        # physical_edge_ids), so the GNN only sees currently usable links.
+        active_edges = [edge for edge in self.edges if self._edge_active(edge, masks)]
         action_candidates: dict[str, list[str]] = {}
         action_masks: dict[str, list[bool]] = {}
         for node in self.nodes:
@@ -63,15 +67,28 @@ class GraphBuilder:
             action_masks[node_id] = [True] * len(legal)
         return GraphObservation(
             node_features=self.build_node_features(env_state, requests, request_history),
-            edge_index=self.build_edge_index(demand_pairs),
-            edge_features=self.build_edge_features(env_state, requests, request_history, demand_pairs),
+            edge_index=self.build_edge_index(active_edges, demand_pairs),
+            edge_features=self.build_edge_features(
+                active_edges, env_state, requests, request_history, demand_pairs
+            ),
             node_ids=[node.node_id for node in self.nodes],
-            edge_ids=[edge.edge_id for edge in self.edges] + demand_edge_ids,
-            physical_edge_ids=[edge.edge_id for edge in self.edges],
+            edge_ids=[edge.edge_id for edge in active_edges] + demand_edge_ids,
+            physical_edge_ids=[edge.edge_id for edge in active_edges],
             demand_edge_ids=demand_edge_ids,
             action_candidates=action_candidates,
             action_masks=action_masks,
             state=env_state,
+        )
+
+    def _edge_active(self, edge: Edge, masks: dict[str, list[bool]]) -> bool:
+        """A physical link is kept iff both endpoints may legally activate it."""
+        u_candidates = self.action_space.candidates_for_node(edge.src)
+        v_candidates = self.action_space.candidates_for_node(edge.dst)
+        if edge.dst not in u_candidates or edge.src not in v_candidates:
+            return False
+        return bool(
+            masks[edge.src][u_candidates.index(edge.dst)]
+            and masks[edge.dst][v_candidates.index(edge.src)]
         )
 
     def build_node_features(
@@ -139,9 +156,11 @@ class GraphBuilder:
             features.append(row)
         return features
 
-    def build_edge_index(self, demand_pairs: list[tuple[str, str]]) -> list[tuple[int, int]]:
+    def build_edge_index(
+        self, active_edges: list[Edge], demand_pairs: list[tuple[str, str]]
+    ) -> list[tuple[int, int]]:
         index: list[tuple[int, int]] = []
-        for edge in self.edges:
+        for edge in active_edges:
             src = self.node_index[edge.src]
             dst = self.node_index[edge.dst]
             index.append((src, dst))
@@ -155,6 +174,7 @@ class GraphBuilder:
 
     def build_edge_features(
         self,
+        active_edges: list[Edge],
         env_state: EnvState,
         requests: RequestQueue,
         request_history: RequestHistoryTracker,
@@ -167,7 +187,7 @@ class GraphBuilder:
         demand_dim = int(self.config["features"]["dims"]["demand_edge_dim_resolved"])
         horizon = int(edge_cfg.get("prediction_horizon", 0))
         rows: list[list[float]] = []
-        for edge in self.edges:
+        for edge in active_edges:
             window = env_state.edge_windows[edge.edge_id]
             rates_norm = [self.normalizer.transform_scalar(rate) for rate in window.rates]
             row: list[float] = []

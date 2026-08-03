@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from qkd_rl.core.types import KeyRequest
-from qkd_rl.env.factory import build_default_env, load_default_config
+from qkd_rl.env.factory import load_default_config
+from tests.helpers import build_test_env
 from qkd_rl.env.request import RequestHistoryTracker
 
 
 def test_active_request_creates_gs_pair_demand_edge():
     config = load_default_config(".")
-    env = build_default_env(".")
+    env = build_test_env(".")
     env.reset()
     request = KeyRequest(
         request_id="REQ_TEST",
