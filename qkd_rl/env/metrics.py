@@ -12,11 +12,14 @@ class MetricsTracker:
         self.arrived_keys = 0.0
         self.served_keys = 0.0
         self.failed_keys = 0.0
+        self.arrived_requests = 0
+        self.completed_requests = 0
         self.conflict_count = 0
         self.last: dict = {}
 
-    def add_arrivals(self, amount: float) -> None:
-        self.arrived_keys += amount
+    def add_arrivals(self, requests) -> None:
+        self.arrived_keys += sum(req.amount for req in requests)
+        self.arrived_requests += len(requests)
 
     def update(
         self,
@@ -27,10 +30,11 @@ class MetricsTracker:
         qkp: LinkQKPPool,
         expired_requests: list = None,
     ) -> None:
-        expired_keys = sum(req.amount for req in (expired_requests or []))
+        expired_keys = sum(max(0.0, req.amount - req.served_amount) for req in (expired_requests or []))
         self.steps += 1
         self.served_keys += serve_result.served_keys
         self.failed_keys += serve_result.failed_keys + expired_keys
+        self.completed_requests += len(serve_result.served_requests)
         self.conflict_count += resolved_action.conflict_count
         capacity = sum(qkp.capacities.values()) or 1.0
         level = sum(qkp.levels.values())
@@ -51,6 +55,11 @@ class MetricsTracker:
             "served_keys": self.served_keys,
             "failed_keys": self.failed_keys,
             "success_rate": self.served_keys / self.arrived_keys if self.arrived_keys > 0 else 0.0,
+            "arrived_requests": self.arrived_requests,
+            "completed_requests": self.completed_requests,
+            "request_completion_rate": (
+                self.completed_requests / self.arrived_requests if self.arrived_requests > 0 else 0.0
+            ),
             "conflict_count": self.conflict_count,
         }
 

@@ -28,8 +28,12 @@ class RolloutStep:
     reward: float
     terminated: bool
     truncated: bool
+    joint_log_prob: torch.Tensor | None = None
+    joint_entropy: torch.Tensor | None = None
     returns: torch.Tensor | None = None
     advantages: torch.Tensor | None = None
+    returns_norm: torch.Tensor | None = None
+    matched_edges: list[str] | None = None
 
 
 class RolloutBuffer:
@@ -40,10 +44,20 @@ class RolloutBuffer:
         gamma: float,
         gae_lambda: float,
         device: torch.device | str = "cpu",
+        value_target: str = "gae",
     ):
         self.gamma = float(gamma)
         self.gae_lambda = float(gae_lambda)
         self.device = torch.device(device)
+        # Critic target: "gae" stores the standard GAE return (advantages +
+        # bootstrapped value); "mc" stores bootstrap-free Monte-Carlo returns
+        # instead. "mc" breaks the positive-feedback loop where a biased
+        # value normalizer biases the bootstrap, which biases the returns that
+        # re-train the normalizer (measured drift to ~5x the true return
+        # scale). GAE advantages for the actor are unchanged in both modes.
+        if value_target not in ("gae", "mc"):
+            raise ValueError(f"value_target must be 'gae' or 'mc', got {value_target!r}")
+        self.value_target = value_target
         self.steps: list[RolloutStep] = []
         self._episode_start = 0
 
@@ -67,6 +81,19 @@ class RolloutBuffer:
             gamma=self.gamma,
             gae_lambda=self.gae_lambda,
         )
+        if self.value_target == "mc":
+            # Bootstrap-free Monte-Carlo returns: R_t = sum_k gamma^k r_{t+k}
+            # truncated at the episode end. No value bootstrap -> no feedback
+            # from the (possibly biased) critic into its own target.
+            mc_returns = torch.zeros_like(returns)
+            acc = torch.zeros((), dtype=torch.float32, device=self.device)
+            rewards_t = torch.as_tensor(
+                [step.reward for step in episode], dtype=torch.float32, device=self.device
+            )
+            for t in reversed(range(rewards_t.shape[0])):
+                acc = rewards_t[t] + self.gamma * acc
+                mc_returns[t] = acc
+            returns = mc_returns
         for step, ret, adv in zip(episode, returns, advantages):
             step.returns = ret.detach()
             step.advantages = adv.detach()

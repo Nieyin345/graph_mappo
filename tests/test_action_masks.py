@@ -62,6 +62,20 @@ def test_unavailable_edge_is_masked():
     assert builder.is_action_legal("A", "B", state, _StubQKP({}), None) is False
 
 
+def test_mask_unavailable_edges_false_keeps_unavailable_edge_legal():
+    action_space, state = _fixture(available=False)
+    builder = _builder(
+        action_space,
+        min_rate=1.0,
+        mask_unavailable_edges=False,
+        mask_below_min_rate=False,
+    )
+    masks = builder.build(state, _StubQKP({}), None)
+    assert masks["A"][1] is True
+    assert masks["B"][0] is True
+    assert builder.is_action_legal("A", "B", state, _StubQKP({}), None) is True
+
+
 def test_below_min_rate_edge_is_masked():
     action_space, state = _fixture(rate=0.5)
     builder = _builder(action_space, min_rate=1.0)

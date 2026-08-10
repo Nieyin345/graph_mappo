@@ -15,6 +15,7 @@ class CheckpointData:
     optimizer_state: dict | None
     config: dict | None
     metrics: dict | None
+    trainer_state: dict | None
 
 
 def save_checkpoint(
@@ -24,6 +25,7 @@ def save_checkpoint(
     optimizer: torch.optim.Optimizer | None = None,
     config: dict | None = None,
     metrics: dict | None = None,
+    trainer_state: dict | None = None,
 ) -> Path:
     """Save model + optimizer state to ``path`` and return the path."""
     path = Path(path)
@@ -34,6 +36,7 @@ def save_checkpoint(
         "optimizer_state": optimizer.state_dict() if optimizer is not None else None,
         "config": config,
         "metrics": metrics,
+        "trainer_state": trainer_state,
     }
     torch.save(payload, path)
     return path
@@ -48,4 +51,5 @@ def load_checkpoint(path: str | Path, device: torch.device | str = "cpu") -> Che
         optimizer_state=payload.get("optimizer_state"),
         config=payload.get("config"),
         metrics=payload.get("metrics"),
+        trainer_state=payload.get("trainer_state"),
     )

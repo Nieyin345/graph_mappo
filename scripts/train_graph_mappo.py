@@ -10,6 +10,12 @@ Usage (from the project root):
 
 from __future__ import annotations
 
+import os
+
+# Conda/matplotlib on Windows loads libiomp5md.dll twice; this documented
+# workaround prevents the OMP Error #15 crash at import/exit.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 import argparse
 import sys
 from pathlib import Path
@@ -72,7 +78,24 @@ def main() -> None:
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
+    # Auto-select CUDA when available; --device cpu still forces CPU. Only the
+    # compute backend changes, the training architecture/algorithm is untouched.
+    if args.device is None and torch.cuda.is_available():
+        config["runtime"]["device"] = "cuda"
+        print("runtime: CUDA detected, using device=cuda (use --device cpu to force CPU)")
+    # TF32 fast matmul on Ampere+ GPUs (RTX 30/40 series), no-op on CPU/older.
+    torch.set_float32_matmul_precision("high")
+    if config["runtime"].get("deterministic", False):
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    else:
+        torch.backends.cudnn.benchmark = True
+
     device = config["runtime"]["device"]
+    print(
+        f"runtime: device={device} float32_matmul_precision=high "
+        f"cudnn.benchmark={torch.backends.cudnn.benchmark}"
+    )
     env = build_env_from_config(config)
     model = GraphMAPPOActorCritic(env.action_resolver.action_space, config)
     policy = MAPPOPolicy(model, device)

@@ -20,6 +20,8 @@ def _step(reward: float, value: float, terminated: bool = False) -> RolloutStep:
         reward=reward,
         terminated=terminated,
         truncated=False,
+        joint_log_prob=torch.tensor(0.0),
+        joint_entropy=torch.tensor(0.0),
     )
 
 
@@ -87,4 +89,38 @@ def test_rollout_buffer_finishes_episodes_and_samples():
 
     buffer.clear()
     assert len(buffer) == 0
+
+
+def test_mc_value_target_removes_bootstrap_from_returns():
+    # "mc" critic target: returns are bootstrap-free Monte-Carlo sums of the
+    # rewards, so a biased value cannot feed back into its own target. The
+    # advantages (used by the actor) stay identical to the GAE mode.
+    rewards = [1.0, 2.0, 3.0]
+    values = torch.tensor([100.0, 100.0, 100.0])  # wildly biased value
+    gae_buffer = RolloutBuffer(gamma=0.9, gae_lambda=0.95, value_target="gae")
+    mc_buffer = RolloutBuffer(gamma=0.9, gae_lambda=0.95, value_target="mc")
+    for r in rewards:
+        gae_buffer.add(_step(r, 100.0))
+        mc_buffer.add(_step(r, 100.0))
+    gae_buffer.finish_episode(last_value=100.0)
+    mc_buffer.finish_episode(last_value=100.0)
+
+    gae_returns = torch.stack([s.returns for s in gae_buffer.steps])
+    mc_returns = torch.stack([s.returns for s in mc_buffer.steps])
+    gae_adv = torch.stack([s.advantages for s in gae_buffer.steps])
+    mc_adv = torch.stack([s.advantages for s in mc_buffer.steps])
+
+    # MC returns = discounted reward sums only (no +100 value offset).
+    expected = torch.tensor([1.0 + 0.9 * 2.0 + 0.81 * 3.0, 2.0 + 0.9 * 3.0, 3.0])
+    torch.testing.assert_close(mc_returns, expected)
+    torch.testing.assert_close(mc_adv, gae_adv)
+    # The GAE returns carry the biased value (+100-ish), the MC ones do not.
+    assert gae_returns.mean() > mc_returns.mean() + 50.0
+
+
+def test_mc_value_target_invalid_mode_rejected():
+    import pytest
+
+    with pytest.raises(ValueError):
+        RolloutBuffer(gamma=0.9, gae_lambda=0.95, value_target="nope")
 

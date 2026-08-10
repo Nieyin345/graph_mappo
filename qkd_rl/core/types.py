@@ -58,4 +58,7 @@ class KeyRequest:
     arrival_t: int
     deadline_t: int
     priority: float = 1.0
+    # Key amount already served in previous partial-service steps; the
+    # remaining demand is ``amount - served_amount``.
+    served_amount: float = 0.0
 

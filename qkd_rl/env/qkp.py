@@ -34,17 +34,24 @@ class LinkQKPPool:
         self.capacity_resolver = LinkQKPCapacityResolver(config)
         self.levels: dict[str, float] = {}
         self.batches: dict[str, list[tuple[float, int]]] = defaultdict(list)
+        # Live set of edges holding a positive key stock. Routing uses it to
+        # avoid per-edge get_level dict lookups in BFS hot loops.
+        self.positive: set[str] = set()
         self.capacities = {
             edge_id: self.capacity_resolver.capacity_for_edge(edge) for edge_id, edge in self.edges.items()
         }
 
-    def reset(self) -> None:
+    def reset(self, t: int = 0) -> None:
+        """Reset levels and batches; initial inventory is stamped with ``t`` so
+        it expires ``key_ttl_steps`` after the episode starts (with
+        ``episode_start_mode: random_day`` the start can be any time index)."""
         initial = float(self.config.get("initial_level", 0.0))
         self.levels = {edge_id: min(initial, capacity) for edge_id, capacity in self.capacities.items()}
+        self.positive = {edge_id for edge_id, level in self.levels.items() if level > 0}
         self.batches = defaultdict(list)
         for edge_id, level in self.levels.items():
             if level > 0:
-                self.batches[edge_id].append((level, 0))
+                self.batches[edge_id].append((level, t))
 
     def add_keys(self, edge_id: str, amount: float, t: int) -> float:
         amount = max(0.0, amount)
@@ -52,6 +59,7 @@ class LinkQKPPool:
         if addable > 0:
             self.levels[edge_id] += addable
             self.batches[edge_id].append((addable, t))
+            self.positive.add(edge_id)
         return addable
 
     def consume_keys(self, edge_id: str, amount: float) -> float:
@@ -70,6 +78,9 @@ class LinkQKPPool:
                 new_batches.append((left, batch_t))
         self.batches[edge_id] = new_batches
         self.levels[edge_id] -= consumed
+        if self.levels[edge_id] <= 0.0:
+            self.levels[edge_id] = 0.0
+            self.positive.discard(edge_id)
         return consumed
 
     def can_consume_path(self, edge_ids: list[str], amount: float) -> bool:
@@ -97,18 +108,30 @@ class LinkQKPPool:
             return 0.0
         ttl = int(ttl)
         expired_total = 0.0
-        for edge_id, batches in list(self.batches.items()):
-            kept: list[tuple[float, int]] = []
+        # Batches are appended in time order (add_keys) and consumed FIFO
+        # (consume_keys), so expired entries are always at the front. Scan only
+        # until the first fresh batch and delete the expired prefix in one
+        # C-level list delete instead of rebuilding the kept list every step.
+        for edge_id in list(self.batches.keys()):
+            batches = self.batches[edge_id]
+            k = 0
             expired = 0.0
             for amount, batch_t in batches:
                 if t - batch_t >= ttl:
                     expired += amount
+                    k += 1
                 else:
-                    kept.append((amount, batch_t))
+                    break
             if expired:
                 self.levels[edge_id] = max(0.0, self.levels[edge_id] - expired)
+                if self.levels[edge_id] <= 0.0:
+                    self.levels[edge_id] = 0.0
+                    self.positive.discard(edge_id)
                 expired_total += expired
-            self.batches[edge_id] = kept
+            if k:
+                del batches[:k]
+            if not batches:
+                del self.batches[edge_id]
         return expired_total
 
     def snapshot(self) -> dict[str, float]:

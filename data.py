@@ -16,31 +16,25 @@ class demand(): ## Key Rate Demand
         self.n2    = n2     # Destination node
 
 class gs(): ## Ground Station
-    def __init__(self, lg, la, N_RX, N_TX, A_MAX, tag=None):
+    def __init__(self, lg, la, A_MAX, tag=None):
         self.lg    = lg     # GS longitude (In degrees)
         self.la    = la     # GS latitude  (In degrees)
-        self.N_RX  = N_RX   # Maximum number of Rx connections
-        self.N_TX  = N_TX   # Maximum number of Tx connections
         self.A_MAX = A_MAX  # Maximum size of QKP
         self.tag   = tag    # HAP's name tag (Optional)
         
 class hap(): ## High Altitude Platform
-    def __init__(self, lg, la, H, N_RX, N_TX, A_MAX, tag=None):
+    def __init__(self, lg, la, H, A_MAX, tag=None):
         self.lg    = lg     # HAP longitude list (In degrees - for each time step)
         self.la    = la     # HAP latitude list  (In degrees - for each time step)
         self.H     = H      # HAP altitude
-        self.N_RX  = N_RX   # Maximum number of Rx connections
-        self.N_TX  = N_TX   # Maximum number of Tx connections
         self.A_MAX = A_MAX  # Maximum size of QKP
         self.tag   = tag    # HAP's name tag (Optional)
         
 class sat(): ## LEO Satellite
-    def __init__(self, lg, la, H, N_RX, N_TX, A_MAX, tag=None):
+    def __init__(self, lg, la, H, A_MAX, tag=None):
         self.lg    = lg     # Satellite longitude list (In degrees - for each time step)
         self.la    = la     # Satellite latitude list  (In degrees - for each time step)
         self.H     = H      # Satellite altitude list (In km, ~600)
-        self.N_RX  = N_RX   # Maximum number of Rx connections
-        self.N_TX  = N_TX   # Maximum number of Tx connections
         self.A_MAX = A_MAX  # Maximum size of QKP
         self.tag   = tag    # Satellite's name tag (Optional)
         

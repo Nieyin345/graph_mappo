@@ -68,7 +68,14 @@ class ConfigValidator:
             edge_dim += horizon
         if edge_cfg.get("include_available_future_window", True):
             edge_dim += horizon
-        for flag in ("include_rate_delta", "include_rate_mean", "include_rate_max", "include_last_activated", "include_switch_cost"):
+        for flag in (
+            "include_rate_delta",
+            "include_rate_mean",
+            "include_rate_max",
+            "include_last_activated",
+            "include_relay_importance",
+            "include_qkp_capacity_left",
+        ):
             edge_dim += int(bool(edge_cfg.get(flag, False)))
 
         demand_edge_dim = 0
@@ -78,23 +85,56 @@ class ConfigValidator:
                 "include_pending_count",
                 "include_min_deadline_left",
                 "include_mean_deadline_left",
+                "include_mean_wait_time",
                 "include_priority_sum",
             ):
                 demand_edge_dim += int(bool(demand_edge_cfg.get(flag, False)))
-            history_windows = demand_edge_cfg.get("history_windows", [])
-            if demand_edge_cfg.get("include_arrival_history", False):
-                demand_edge_dim += len(history_windows)
-            if demand_edge_cfg.get("include_served_history", False):
-                demand_edge_dim += len(history_windows)
-            if demand_edge_cfg.get("include_failed_history", False):
-                demand_edge_dim += len(history_windows)
+            if demand_edge_cfg.get("include_wait_bucket_amounts", False):
+                demand_edge_dim += int(demand_edge_cfg.get("wait_bucket_count", 10))
         edge_dim += demand_edge_dim
+
+        history_cfg = features.get("history_encoder", {})
+        history_enabled = bool(history_cfg.get("enabled", False))
+        history_hidden = int(history_cfg.get("hidden_dim", 128))
+        node_history_dim = 0
+        physical_history_dim = 0
+        demand_history_dim = 0
+        if history_enabled:
+            node_cfg = history_cfg.get("node", {})
+            if any(
+                bool(node_cfg.get(key, default))
+                for key, default in (
+                    ("include_arrived", True),
+                    ("include_served", True),
+                    ("include_failed", True),
+                    ("include_qkp_total", True),
+                )
+            ):
+                node_history_dim = history_hidden
+            phys_cfg = history_cfg.get("physical_edge", {})
+            if any(
+                bool(phys_cfg.get(key, default))
+                for key, default in (
+                    ("include_qkp_level", True),
+                    ("include_available", True),
+                    ("include_activated", False),
+                )
+            ):
+                physical_history_dim = history_hidden
+            demand_cfg = history_cfg.get("demand_edge", {})
+            if demand_cfg.get("include_pending_wait_buckets", False):
+                demand_history_dim = history_hidden
+        history_dim = max(physical_history_dim, demand_history_dim)
 
         features.setdefault("dims", {})
         features["dims"]["node_dim_resolved"] = node_dim
         features["dims"]["edge_dim_resolved"] = edge_dim
         features["dims"]["physical_edge_dim_resolved"] = edge_dim - demand_edge_dim
         features["dims"]["demand_edge_dim_resolved"] = demand_edge_dim
+        features["dims"]["history_dim_resolved"] = history_dim
+        features["dims"]["node_history_dim_resolved"] = node_history_dim
+        features["dims"]["physical_edge_history_dim_resolved"] = physical_history_dim
+        features["dims"]["demand_edge_history_dim_resolved"] = demand_history_dim
         return {"node_dim": node_dim, "edge_dim": edge_dim}
 
     def validate(self, config: dict[str, Any]) -> None:
@@ -105,3 +145,50 @@ class ConfigValidator:
             raise ValueError("prediction_horizon must be non-negative.")
         if config["qkp"]["type"] != "link":
             raise ValueError("Current implementation expects qkp.type = link.")
+        history_cfg = config["features"].get("history_encoder", {})
+        if history_cfg.get("enabled", False):
+            if int(history_cfg.get("seq_len", 0)) <= 0:
+                raise ValueError("history_encoder.seq_len must be positive when enabled.")
+            if int(history_cfg.get("hidden_dim", 0)) <= 0:
+                raise ValueError("history_encoder.hidden_dim must be positive when enabled.")
+            if history_cfg.get("type", "lstm") != "lstm":
+                raise ValueError("history_encoder.type: only 'lstm' is implemented.")
+        self._validate_options(config)
+
+    @staticmethod
+    def _validate_options(config: dict[str, Any]) -> None:
+        """Reject option values that exist in YAML but are not implemented, so
+        a silently ignored setting can never look like it is in control."""
+        model_cfg = config["model"]
+        if model_cfg.get("name", "graph_mappo") != "graph_mappo":
+            raise ValueError("model.name: only 'graph_mappo' is implemented.")
+        if model_cfg.get("mode", "mixed") not in ("mixed", "demand_edge"):
+            raise ValueError("model.mode: supported values are 'mixed' and 'demand_edge'.")
+        if not config["project"].get("name"):
+            raise ValueError("project.name must be set.")
+        enc = config["model"]["encoder"]
+        if enc.get("gnn_type", "graphsage") != "graphsage":
+            raise ValueError("model.encoder.gnn_type: only 'graphsage' is implemented.")
+        if not bool(enc.get("share_actor_critic_encoder", True)):
+            raise ValueError("model.encoder.share_actor_critic_encoder: False (separate actor/critic encoders) is not implemented.")
+        actor_cfg = config["model"]["actor"]
+        if not bool(actor_cfg.get("share_actor_across_node_types", True)):
+            raise ValueError("model.actor.share_actor_across_node_types: False (per-node-type actors) is not implemented.")
+        if float(actor_cfg.get("temperature", 1.0)) <= 0:
+            raise ValueError("model.actor.temperature must be positive.")
+        qkp_cfg = config["qkp"]
+        if qkp_cfg.get("overflow_policy", "discard") != "discard":
+            raise ValueError("qkp.overflow_policy: only 'discard' is implemented.")
+        routing_cfg = config["routing"]
+        if routing_cfg.get("mode", "link_path") != "link_path":
+            raise ValueError("routing.mode: only 'link_path' is implemented.")
+        if routing_cfg.get("path_selection", "shortest_available_path") != "shortest_available_path":
+            raise ValueError("routing.path_selection: only 'shortest_available_path' is implemented.")
+        if routing_cfg.get("serve_order", "earliest_deadline_first") != "earliest_deadline_first":
+            raise ValueError("routing.serve_order: only 'earliest_deadline_first' is implemented.")
+        rate_cfg = config["rate_provider"]["rate"]
+        if rate_cfg.get("negative_rate_policy", "clip_to_zero") not in ("clip_to_zero", "raise"):
+            raise ValueError("rate_provider.rate.negative_rate_policy: supported values are 'clip_to_zero' and 'raise'.")
+        if config["runtime"].get("dtype", "float32") != "float32":
+            raise ValueError("runtime.dtype: only 'float32' is implemented.")
+

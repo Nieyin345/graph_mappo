@@ -1,0 +1,42 @@
+{
+  "meta": {
+    "dataset": "D:\\destop\\work_space\\OB_database\\Research\\qkd_rl\\dataset\\global\\link_data.h5",
+    "total_rows": 525600,
+    "sampled_rows": 10512,
+    "n_links": 4241,
+    "theta_sec": 60,
+    "percentile_base": "nonzero k_max (bps), negative clipped to 0, NaN excluded"
+  },
+  "global": {
+    "p99": 3764.1631835937533,
+    "p99.9": 12583.65581054801,
+    "max": 61121628.0,
+    "frac_zero": 0.8691465039943123
+  },
+  "per_link_type": {
+    "HAP-GS": {
+      "p99": 6441.73291015625,
+      "p99.9": 6615.70556640625,
+      "max": 6636.79345703125,
+      "frac_zero": 0.9673072806902002
+    },
+    "SAT-GS": {
+      "p99": 2399.54626953125,
+      "p99.9": 2653.7726791992195,
+      "max": 2695.770263671875,
+      "frac_zero": 0.9259151140329965
+    },
+    "SAT-HAP": {
+      "p99": 2641.567282714849,
+      "p99.9": 7045.187722168567,
+      "max": 8003.0341796875,
+      "frac_zero": 0.818276678504989
+    },
+    "SAT-SAT": {
+      "p99": 3833.0996484374914,
+      "p99.9": 39129.807429690074,
+      "max": 61121628.0,
+      "frac_zero": 0.5555697702898932
+    }
+  }
+}

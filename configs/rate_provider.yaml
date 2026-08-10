@@ -1,29 +1,35 @@
 rate_provider:
   provider: h5              # training/evaluation read the H5 dataset only
-  edge_index_path: null
-  rate_stats_path: null
   time:
     slot_seconds: 60
     start_index: 0
     end_index: 525600
   rate:
-    min_link_rate: 0.001
+    # Minimum useful rate: 1 bps produces 60 key-bits per slot, close to the
+    # mean request size (amount_mean=100). Links below this are masked out.
+    min_link_rate: 1.0
     unavailable_if_nan: true
     negative_rate_policy: clip_to_zero
   normalization:
     mode: log_p99
-    p99: 10.0
+    stats_path: null        # null -> <dataset_dir>/rate_stats.json
+    p99: null               # explicit override (non-null takes precedence)
     eps: 1.0e-8
   h5:
-    # dataset/global is the output directory of build_global_tensor.py
+    # dataset/global is the output directory of build_global_tensor.py.
+    # The shipped lean link_data.h5 (scripts/compact_h5.py / build_global_tensor.py)
+    # stores ONLY k_max + link_registry: los/distance/zenith are dropped (never
+    # consumed by training; los is derivable from k_max when min_link_rate > 0).
+    # The los/distance/zenith keys below are kept only for legacy full files and
+    # are ignored when the dataset does not contain them.
     dataset_dir: dataset/global
     link_data_path: null        # default: <dataset_dir>/link_data.h5
     node_registry_path: null    # default: <dataset_dir>/node_registry.csv
     link_registry_path: null    # default: <dataset_dir>/link_registry.csv
     rate_dataset_key: k_max     # secure key rate, bits-per-second
-    los_dataset_key: los        # line-of-sight flag (int8, 1 = visible)
+    los_dataset_key: los        # optional (absent in the lean file)
     distance_dataset_key: distance
     zenith_dataset_key: zenith
-    availability_source: los_and_rate   # los | rate | los_and_rate
+    availability_source: los_and_rate   # los | rate | los_and_rate (los used only if present)
     out_of_range_policy: zero           # zero | pad_last | raise
     node_name_map: {}                   # env node id -> H5 node name (default: identity)

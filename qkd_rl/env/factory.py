@@ -8,6 +8,7 @@ from qkd_rl.env.action_resolver import ActionResolver
 from qkd_rl.env.action_space import NodeActionSpace
 from qkd_rl.env.env import QKDEnv
 from qkd_rl.env.graph_builder import GraphBuilder
+from qkd_rl.env.history_buffer import HistoryBuffer
 from qkd_rl.env.masks import ActionMaskBuilder
 from qkd_rl.env.metrics import MetricsTracker
 from qkd_rl.env.qkp import LinkQKPPool
@@ -47,9 +48,16 @@ def build_env_from_config(config: dict) -> QKDEnv:
         scenario = scenario_builder.build_full()
     else:
         raise ValueError(f"Unknown scenario mode: {scenario_mode!r}")
-    rate_provider = build_rate_provider(config, scenario.edges, seed=int(config["seed"]["global_seed"]))
+    normalizer = RateNormalizer(config["rate_provider"]["normalization"])
+    rate_provider = build_rate_provider(
+        config, scenario.edges, seed=int(config["seed"]["global_seed"]), normalizer=normalizer
+    )
     qkp = LinkQKPPool(scenario.edges, config["qkp"])
-    action_space = NodeActionSpace(scenario.node_ids, scenario.edges)
+    action_space = NodeActionSpace(
+        scenario.node_ids,
+        scenario.edges,
+        include_idle=bool(config["features"]["action"].get("include_idle_action", True)),
+    )
     mask_builder = ActionMaskBuilder(
         action_space,
         config["features"]["action"],
@@ -57,7 +65,11 @@ def build_env_from_config(config: dict) -> QKDEnv:
         allowed_link_types=config["scenario"].get("allowed_link_types", []),
     )
     action_resolver = ActionResolver(action_space, config["action_resolver"])
-    normalizer = RateNormalizer(config["rate_provider"]["normalization"])
+    routing = RoutingPolicy(scenario.edges, config["routing"])
+    history_cfg = config["features"].get("history_encoder", {})
+    history_buffer = (
+        HistoryBuffer(scenario.nodes, scenario.edges, config) if history_cfg.get("enabled", False) else None
+    )
     graph_builder = GraphBuilder(
         scenario.nodes,
         scenario.edges,
@@ -65,6 +77,9 @@ def build_env_from_config(config: dict) -> QKDEnv:
         qkp,
         normalizer,
         config,
+        history_buffer=history_buffer,
+        routing=routing,
+        rate_provider=rate_provider,
     )
     request_generator = RequestGenerator(
         [node.node_id for node in scenario.nodes if node.node_type.value == "gs"],
@@ -76,13 +91,14 @@ def build_env_from_config(config: dict) -> QKDEnv:
         rate_provider=rate_provider,
         request_generator=request_generator,
         qkp=qkp,
-        routing=RoutingPolicy(scenario.edges, config["routing"]),
+        routing=routing,
         reward_fn=RewardFunction(config["reward"]),
         graph_builder=graph_builder,
         mask_builder=mask_builder,
         action_resolver=action_resolver,
         metrics=MetricsTracker(),
         config=config,
+        history_buffer=history_buffer,
     )
 
 

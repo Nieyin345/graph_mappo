@@ -5,49 +5,164 @@ env:
   name: qkd_full
   episode_steps: 1440
   episode_start_mode: random_day
+  day_steps: 1440
   terminate_on_year_end: true
+  # Switch cost: a link that is activated this step but was not activated in
+  # the previous step generates at rate_decay_factor of its nominal rate for
+  # this slot only; links kept active generate at full rate.
+  switch_cost:
+    enabled: true
+    rate_decay_factor: 0.5
 
+# The policy samples one global matching directly with a sequential softmax
+# sampler. mutual_choice executes exactly that sampled matching, so PPO's
+# joint log-probability matches the action the environment actually executes.
 action_resolver:
-  mode: priority_matching
+  mode: mutual_choice
   score_merge: mean
   tie_break: rate_then_edge_id
+  # NetworkX's exact Blossom solver is pure Python and dominates CPU time on
+  # the full graph. Keep the best incident candidates per node, then solve the
+  # exact maximum-weight matching on that much smaller candidate graph.
+  max_candidates_per_node: 3
+  max_candidate_edges: 120
 
 scenario:
   mode: full
   allowed_link_types: [gs_hap, gs_sat, hap_sat, sat_sat]
+  # Global active-node subset shared by every algorithm (RL + all baselines):
+  # caps how many GS/HAP/SAT nodes are kept to shrink the graph, action space
+  # and request pairs. 0 = keep all nodes of that type.
+  # mode: smart picks GS closest to gs_center (default: all-GS centroid), HAP
+  # within hap_gs_max_km of a selected GS (default 700 km, matching the H5
+  # HAP-GS prefilter; HAPs with no nearby GS are dropped rather than padding
+  # hap_count), and inclined-orbit SAT (Mid/MEO) over equatorial/polar/GEO
+  # ones. mode: first_n keeps the first N in registry order (the old
+  # behaviour).
+  active_nodes:
+    mode: smart
+    # Selected subset: 20 GS + 10 HAP + 30 SAT = 60 nodes. Ground stations
+    # that never see a satellite are intentionally excluded by smart selection
+    # (20 closest to the GS centroid). Set counts to 0 to keep all nodes.
+    gs_count: 20
+    hap_count: 10
+    sat_count: 30
+    # gs_center: [35.0, 110.0]   # optional smart-mode center [lat, lon]
+    # hap_gs_max_km: 700.0      # smart-mode HAP-GS threshold (km); HAPs without a nearby GS are dropped
+  # Global time-window cap shared by every algorithm (RL + all baselines):
+  # limits how much of the year is simulated. days = only simulate the first
+  # N days (of env.day_steps slots) from rate_provider.time.start_index;
+  # 0 = no limit (full rate_provider.time window).
+  time_limit:
+    # 30-day window for stable training/evaluation and comparison with the
+    # existing MILP reference (30 days). Set to 0 for the full year.
+    days: 30
 
+# Calibration (scripts/calibrate_demand.py + full-env sweeps on the real H5):
+# the greedy relay policy's serving throughput is ~0.1-0.15 Mbit/slot while
+# raw generation is ~4.6 Mbit/slot, so sizing requests off generation makes
+# every policy fail. 0.8 requests/slot x 0.1 Mbit (0.08 Mbit/slot) with long
+# request/key lifetimes puts the relay baseline at ~70% full-day success with
+# a clear gap to the other baselines (random ~49%, rate-greedy ~56%), leaving
+# headroom for the trained RL agent. Keys live 32 h and requests 16 h
+# (1920 / 960 slots) so relay paths form and persist; capacities unchanged.
 qkp:
   type: link
-  initial_level: 10000.0
-  key_ttl_steps: 1440
+  initial_level: 0.0
+  # Experimental: keep key TTL effectively unlimited so stored key material
+  # almost never expires during long runs.
+  key_ttl_steps: 1000000
   overflow_policy: discard
   capacity:
-    default: 100000.0
+    default: 12000000.0
     per_link_type:
-      gs_hap: 100000.0
-      gs_sat: 80000.0
-      hap_sat: 120000.0
-      sat_sat: 150000.0
+      gs_hap: 20000000.0
+      gs_sat: 8000000.0
+      hap_sat: 8000000.0
+      sat_sat: 12000000.0
     per_edge: {}
 
 requests:
   source: generator
-  type: bernoulli
-  arrival_rate: 2.0
-  amount_mean: 100.0
-  deadline_steps: 30
+  type: poisson
+  # 0.8 requests/slot x 0.1 Mbit mean -> ~0.08 Mbit/slot mean offered load,
+  # with a truncated exponential (amount_max = 5x mean) so no single request
+  # is unserviceable inside the deadline. Requests live 960 slots (16 h).
+  arrival_rate: 0.8
+  amount_mean: 100000.0
+  amount_max: 500000.0
+  deadline_steps: 960
   priority_mode: uniform
-
-routing:
-  mode: link_path
-  path_selection: shortest_available_path
-  serve_order: earliest_deadline_first
+  # Realistic, learnable intra-day profile: 24 hourly weights, arrival_rate is
+  # the daily mean, so peak hours (~1.3x) amplify and night hours (~0.1x)
+  # reduce the Poisson rate. hour = (t // steps_per_hour) % 24.
+  steps_per_hour: 60
+  hourly_weights: [0.15, 0.10, 0.10, 0.10, 0.10, 0.15, 0.30, 0.60, 1.00, 1.20, 1.10, 1.00, 0.90, 0.80, 0.90, 1.00, 1.10, 1.20, 1.30, 1.20, 1.00, 0.80, 0.50, 0.25]
+  # City-pair long tail: fixed Zipf pair hotness (shuffled with pair_seed), a
+  # few hot GS pairs carry most demand - stable so the agent can learn it.
+  pair_hotness: zipf
+  pair_zipf_s: 1.0
+  pair_seed: 0
 
 reward:
-  served_weight: 1.0
-  failed_weight: 2.0
-  waiting_weight: 0.05
-  overflow_weight: 0.1
-  expired_key_weight: 0.1
-  conflict_weight: 0.01
-  normalize_by_arrived_demand: false
+  # Component switches: set any of these to false to disable that reward term
+  # entirely; the *_weight keys still control the term when enabled.
+  success_enabled: true
+  served_enabled: true
+  raw_generation_enabled: true
+  dense_enabled: true
+  failed_enabled: true
+  waiting_enabled: false
+  switch_enabled: true
+  overflow_enabled: false
+  expired_key_enabled: true
+  conflict_enabled: false
+  # Dense-flow mode (B1): per-step reward is a weighted combination of
+  # *supply-side* generation and *demand-side* service quality.
+  #
+  #   + served_reward = served_weight * served_keys / arrived_win   (success service)
+  #   + dense_reward  = dense_w * sum(added*relay_importance) / dense_reference
+  #                    (keys stored on high-importance relay paths; supply-side)
+  #   - waiting/failed/expired/overflow/conflict penalties / arrived_win
+  #   - switch_penalty = switch_weight * switch_count               (count, O(1))
+  #
+  # Unlike the old success_rate mode (whose success_delta was 0 on ~every step
+  # for a policy that never serves, killing the signal), B1 gives a real reward
+  # on every step: generation anywhere on the demand path is dense (nonzero on
+  # ~all steps) and served_keys adds an explicit reward for actually serving.
+  #
+  # Baselines: demand-side terms are normalized by the sliding-window mean of
+  # arrived key demand (normalize_by_arrived_demand), the supply-side generation
+  # term by its own dense_reference; the switch count is O(1) and needs no /1e6.
+  mode: shaped
+  # Success-service reward: reward actually served keys directly instead of the
+  # sparse, mostly-zero cumulative success-rate delta.
+  served_weight: 5.0
+  # Raw stored-key term (independent of demand path) -- leave 0; B1 uses the
+  # relay-importance-weighted dense term below so we only reward keys that help
+  # reach demand, not wholesale generation into the pools.
+  generated_weight: 0.0
+  # Dense supply-side generation on high-importance relay paths (the main dense
+  # positive signal). weight is scaled for dense_reference=1e6 and real
+  # importance-weighted added_keys (~millions/step) to sit ~0.1-0.2/step.
+  dense_generation_importance_weight: 0.001
+  dense_low_importance_penalty: 0.01
+  dense_reference: 1000000.0
+  # Demand-side penalties are divided by the arrived-demand window mean.
+  failed_weight: 0.01
+  # Waiting penalty is disabled so the shaped reward does not push the policy
+  # toward myopic queue reduction instead of successful service.
+  waiting_weight: 0.0
+  waiting_stock_weight: 0.0
+  switch_weight: 0.001
+  overflow_weight: 0.0
+  conflict_weight: 0.0
+  expired_key_weight: 0.01
+  penalty_reference: 1000000.0
+  normalize_penalties_by_arrived: true
+  normalize_by_arrived_demand: true
+  normalize_window: 60
+  normalize_floor: 10000.0
+  clip_abs: 0.0
+
+

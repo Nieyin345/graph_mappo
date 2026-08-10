@@ -1,0 +1,4 @@
+usage: profile_training.py [-h] [--steps STEPS] [--episodes EPISODES]
+                           [--minibatch-size MINIBATCH_SIZE]
+                           [--device {cpu,cuda}]
+profile_training.py: error: unrecognized arguments: ; echo EXIT=$?; echo --OUT--; cat prof_out.txt; echo --ERR tail--; tail -25 prof_err.txt

@@ -2,8 +2,24 @@
 name = "qkd-rl"
 version = "0.1.0"
 requires-python = ">=3.8"
+dependencies = [
+    "torch",
+    "h5py",
+    "pyyaml",
+    "pandas",
+    "matplotlib",
+    "tqdm",
+    "requests",
+    "xarray",
+    "cdsapi",
+    "pyproj",
+    "networkx",
+    "numpy",
+    "scipy",
+    "highspy>=1.7",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "--basetemp=.pytest_tmp2 -p no:cacheprovider"
+addopts = "-p no:cacheprovider"

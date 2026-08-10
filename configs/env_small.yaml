@@ -2,7 +2,11 @@ env:
   name: qkd_small
   episode_steps: 400
   episode_start_mode: random_window
+  day_steps: 1440
   terminate_on_year_end: true
+  switch_cost:
+    enabled: true
+    rate_decay_factor: 0.5
 
 action_resolver:
   mode: mutual_choice
@@ -15,28 +19,50 @@ scenario:
   num_hap: 1
   num_sat: 1
   allowed_link_types: [gs_hap, gs_sat, hap_sat]
+  # Global active-node subset shared by every algorithm (RL + all baselines):
+  # caps how many GS/HAP/SAT nodes are kept. 0 = keep all nodes of that type.
+  # mode: first_n (default) keeps the first N of each type in registry order.
+  active_nodes:
+    mode: first_n
+    gs_count: 0
+    hap_count: 0
+    sat_count: 0
+  # Global time-window cap shared by every algorithm (RL + all baselines):
+  # days = only simulate the first N days (of env.day_steps slots) from
+  # rate_provider.time.start_index; 0 = no limit (full window).
+  time_limit:
+    days: 0
 
+# Small-scenario calibration: synthetic H5 rates are ~uniform(0,50) bps so one
+# link generates ~1.5 Kbit/slot and ~3 links are activated -> ~4.5 Kbit/slot.
+# Capacity holds ~1 hour (60 slots); requests offer ~45% of the generated load.
 qkp:
   type: link
   initial_level: 1000.0
-  key_ttl_steps: 1440
+  key_ttl_steps: 1920
   overflow_policy: discard
   capacity:
-    default: 10000.0
+    default: 100000.0
     per_link_type:
-      gs_hap: 10000.0
-      gs_sat: 8000.0
-      hap_sat: 12000.0
-      sat_sat: 15000.0
+      gs_hap: 100000.0
+      gs_sat: 80000.0
+      hap_sat: 120000.0
+      sat_sat: 150000.0
     per_edge: {}
 
 requests:
   source: generator
-  type: bernoulli
-  arrival_rate: 0.2
-  amount_mean: 100.0
-  deadline_steps: 12
+  type: poisson
+  arrival_rate: 2.0
+  amount_mean: 1000.0
+  deadline_steps: 960
   priority_mode: uniform
+  # Same learnable intra-day + pair-hotness patterns as env_full.
+  steps_per_hour: 60
+  hourly_weights: [0.15, 0.10, 0.10, 0.10, 0.10, 0.15, 0.30, 0.60, 1.00, 1.20, 1.10, 1.00, 0.90, 0.80, 0.90, 1.00, 1.10, 1.20, 1.30, 1.20, 1.00, 0.80, 0.50, 0.25]
+  pair_hotness: zipf
+  pair_zipf_s: 1.0
+  pair_seed: 0
 
 routing:
   mode: link_path
@@ -44,11 +70,40 @@ routing:
   serve_order: earliest_deadline_first
 
 reward:
-  served_weight: 1.0
-  failed_weight: 2.0
-  waiting_weight: 0.05
-  overflow_weight: 0.1
-  expired_key_weight: 0.1
-  conflict_weight: 0.01
-  normalize_by_arrived_demand: false
+  # Component switches: set any of these to false to disable that reward term
+  # entirely; the *_weight keys still control the term when enabled.
+  success_enabled: true
+  served_enabled: true
+  raw_generation_enabled: true
+  dense_enabled: true
+  failed_enabled: true
+  waiting_enabled: false
+  switch_enabled: true
+  overflow_enabled: false
+  expired_key_enabled: true
+  conflict_enabled: false
+  # Same dense-flow reward family as env_full so tests exercise the training
+  # reward path: served keys + small importance-weighted generation, minus
+  # failure/waiting/switch penalties.
+  mode: shaped
+  served_weight: 5.0
+  generated_weight: 0.0
+  dense_generation_importance_weight: 0.001
+  dense_low_importance_penalty: 0.01
+  dense_reference: 1000000.0
+  failed_weight: 0.01
+  # Waiting penalty is disabled so the shaped reward does not push the policy
+  # toward myopic queue reduction instead of successful service.
+  waiting_weight: 0.0
+  waiting_stock_weight: 0.0
+  switch_weight: 0.001
+  overflow_weight: 0.0
+  conflict_weight: 0.0
+  expired_key_weight: 0.01
+  penalty_reference: 1000000.0
+  normalize_penalties_by_arrived: true
+  normalize_by_arrived_demand: true
+  normalize_window: 60
+  normalize_floor: 10000.0
+  clip_abs: 0.0
 

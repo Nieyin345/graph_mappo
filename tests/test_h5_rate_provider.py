@@ -114,6 +114,25 @@ def test_h5_provider_window_length_and_year_end_padding(tmp_path):
     pad_provider.close()
 
 
+def test_h5_window_blocks_honor_out_of_range_policy(tmp_path):
+    data = _write_dataset(tmp_path, t_steps=500)
+
+    zero_provider = _provider(tmp_path, horizon=2, out_of_range_policy="zero")
+    zero_blocks = zero_provider.get_window_blocks(data["T"] - 2)
+    assert zero_blocks[0][-1, 0] == 0.0
+    zero_provider.close()
+
+    pad_provider = _provider(tmp_path, horizon=2, out_of_range_policy="pad_last")
+    pad_blocks = pad_provider.get_window_blocks(data["T"] - 2)
+    assert pad_blocks[0][-1, 0] == pytest.approx(float(data["kmax"][data["T"] - 1, 0]))
+    pad_provider.close()
+
+    raise_provider = _provider(tmp_path, horizon=2, out_of_range_policy="raise")
+    with pytest.raises(IndexError):
+        raise_provider.get_window_blocks(data["T"] - 2)
+    raise_provider.close()
+
+
 def test_h5_provider_missing_edge_raises(tmp_path):
     _write_dataset(tmp_path)
     cfg = {"h5": {"dataset_dir": str(tmp_path)}, "rate": {"min_link_rate": 0.001}}
@@ -121,6 +140,29 @@ def test_h5_provider_missing_edge_raises(tmp_path):
     extra_edges = _edges() + [Edge("E_Beijing__Urumqi", "Beijing", "Urumqi", LinkType.GS_HAP)]
     with pytest.raises(ValueError, match="No H5 link"):
         provider.setup(extra_edges, horizon=6, min_link_rate=0.001)
+    provider.close()
+
+
+def test_h5_provider_lean_file_without_los(tmp_path):
+    """A compacted H5 (k_max only) must derive availability from rate>=min."""
+    import h5py
+
+    data = _write_dataset(tmp_path)
+    # Rewrite as lean: keep only k_max + link_registry (drop los/distance/zenith).
+    with h5py.File(tmp_path / "link_data.h5", "r") as src, h5py.File(tmp_path / "link_data_lean.h5", "w") as dst:
+        dst.create_dataset("k_max", data=src["k_max"][:])
+        dst.create_dataset("link_registry", data=src["link_registry"][:])
+        dst.attrs["theta_sec"] = 60
+    (tmp_path / "link_data.h5").unlink()
+    (tmp_path / "link_data_lean.h5").replace(tmp_path / "link_data.h5")
+
+    provider = _provider(tmp_path, min_link_rate=0.001)
+    # rate=0 during outage window -> unavailable even without los
+    assert not provider.is_available("E_Beijing__Sat_Test", 120)
+    # nonzero rate -> available
+    assert provider.is_available("E_Beijing__HAP_Test", 10)
+    window = provider.get_all_edge_windows(0)
+    assert window["E_Beijing__HAP_Test"].available[0] is True
     provider.close()
 
 

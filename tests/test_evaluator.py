@@ -14,6 +14,8 @@ from qkd_rl.evaluation.evaluator import (
     write_steps_csv,
     write_summary_json,
 )
+from qkd_rl.evaluation.plots import _rolling_smooth
+import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -105,3 +107,9 @@ def test_plot_learning_curve_outputs_vector(tmp_path: Path) -> None:
     svg = tmp_path / "figures" / "learning_curve.svg"
     assert svg.exists()
     assert "<image" not in svg.read_text(encoding="utf-8")
+
+
+def test_rolling_smooth_short_series_does_not_create_triangle() -> None:
+    values = [0.09] * 20
+    smoothed = _rolling_smooth(values, window=20)
+    np.testing.assert_allclose(smoothed, values, atol=1e-6)

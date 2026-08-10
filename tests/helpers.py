@@ -103,6 +103,11 @@ def point_config_to_h5(config: dict, data_dir: Path = SMALL_H5_DIR) -> dict:
     ensure_small_h5(data_dir)
     config["rate_provider"]["provider"] = "h5"
     config["rate_provider"]["h5"]["dataset_dir"] = str(data_dir)
+    # The tiny test dataset only covers the first 5000 slots while the
+    # scenario's year spans 525600 slots. Random-window starts would place t
+    # beyond the dataset and mask every physical edge (rate zero => no legal
+    # actions), so tests always start at t=0 and stay inside the H5 range.
+    config["env"]["episode_start_mode"] = "fixed"
     return config
 
 

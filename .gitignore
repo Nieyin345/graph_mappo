@@ -14,7 +14,10 @@ outputs/
 *.log
 
 # Large generated data (H5 / weather / reference works)
-dataset/
+dataset/*
+!dataset/global/
+dataset/global/*
+!dataset/global/rate_stats.json
 *.h5
 weather/
 ref_work/
@@ -26,3 +29,5 @@ ref_work/
 Thumbs.db
 .pytest_tmp/
 .pytest_tmp2/
+.pytest_tmp3/
+

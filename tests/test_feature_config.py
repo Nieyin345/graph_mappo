@@ -31,7 +31,7 @@ def _assert_dims_and_forward(obs, dims, config, env):
 def test_default_feature_dims():
     config, env, obs, dims = _build_with_switches({})
     assert dims["node_dim_resolved"] == 17
-    assert dims["edge_dim_resolved"] == 39
+    assert dims["edge_dim_resolved"] == 40
     _assert_dims_and_forward(obs, dims, config, env)
 
 
@@ -57,13 +57,12 @@ def test_switches_off_keep_dims_consistent():
     }
     config, env, obs, dims = _build_with_switches(switches)
     assert dims["node_dim_resolved"] == 17 - 1 - 1 - 1 - 1 - 3
-    assert dims["edge_dim_resolved"] == 39 - 6 - 6 - 1 - 1 - 1 - 1
+    assert dims["edge_dim_resolved"] == 40 - 6 - 6 - 1 - 1 - 1 - 1
     _assert_dims_and_forward(obs, dims, config, env)
 
 
 def test_shorter_prediction_horizon():
     switches = {"features": {"edge": {"prediction_horizon": 2}}}
     config, env, obs, dims = _build_with_switches(switches)
-    assert dims["edge_dim_resolved"] == 39 - 4 - 4
+    assert dims["edge_dim_resolved"] == 40 - 4 - 4
     _assert_dims_and_forward(obs, dims, config, env)
-

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 
+import pytest
 import torch
 
-from qkd_rl.algos.mappo_trainer import MAPPOTrainer
+from qkd_rl.algos.mappo_trainer import MAPPOTrainer, ValueNormalizer
 from qkd_rl.algos.policy import MAPPOPolicy
 from qkd_rl.core.config import deep_merge
 from qkd_rl.env.factory import build_env_from_config, load_default_config
@@ -41,7 +42,11 @@ def test_evaluate_actions_matches_act_log_probs():
     policy = MAPPOPolicy(model)
 
     step = policy.act(obs, deterministic=True)
-    log_probs, entropies, value = policy.evaluate_actions(obs, step.actions)
+    log_probs, entropies, value = policy.evaluate_actions(
+        obs,
+        step.actions,
+        matched_edges=step.matched_edges,
+    )
 
     for node_id in obs.node_ids:
         torch.testing.assert_close(log_probs[node_id], step.log_probs[node_id])
@@ -74,6 +79,63 @@ def test_collect_rollout_and_update(tmp_path):
     assert changed
 
 
+def test_collect_rollout_stores_sampled_matching_log_prob(tmp_path):
+    """The rollout must keep the sampled matching order and its log-prob,
+    not re-derive them from the resolver's output order."""
+    config = _tiny_config(tmp_path)
+    config["action_resolver"]["mode"] = "mutual_choice"
+    config["train"]["n_rollout_workers"] = 1
+    config["train"]["rollout_batch"] = False
+    env_manual = build_env_from_config(config)
+    env_trainer = build_env_from_config(config)
+    model = GraphMAPPOActorCritic(env_trainer.action_resolver.action_space, config)
+    policy = MAPPOPolicy(model)
+    trainer = MAPPOTrainer(env_trainer, policy, config, tmp_path)
+
+    obs = env_manual.reset(seed=int(config["seed"]["env_seed"]))
+    torch.manual_seed(123)
+    step = policy.act(obs)
+    env_manual.step(step.actions, step.action_scores, edge_scores=step.edge_scores)
+
+    torch.manual_seed(123)
+    buffer = trainer.collect_rollout()
+    first = buffer.steps[0]
+    assert first.matched_edges == list(step.matched_edges or [])
+    torch.testing.assert_close(first.joint_log_prob, step.joint_log_prob)
+    torch.testing.assert_close(first.joint_entropy, step.joint_entropy)
+
+
+def test_trainer_rejects_unsupported_resolver_mode(tmp_path):
+    config = _tiny_config(tmp_path)
+    config["action_resolver"]["mode"] = "greedy_rate_matching"
+    env = build_env_from_config(config)
+    model = GraphMAPPOActorCritic(env.action_resolver.action_space, config)
+    with pytest.raises(ValueError, match="incompatible with the global matching policy"):
+        MAPPOTrainer(env, MAPPOPolicy(model), config, tmp_path)
+
+
+def test_actor_parameters_learn_from_ppo_update(tmp_path):
+    """The joint matching log-prob must back-propagate into the actor.
+
+    Regression: `_fill_node_tensors` used to detach the joint log prob during
+    PPO evaluation, so the actor head received no gradient (KL stayed ~0 and
+    the policy never left its random initialization).
+    """
+    config = _tiny_config(tmp_path)
+    env = build_env_from_config(config)
+    model = GraphMAPPOActorCritic(env.action_resolver.action_space, config)
+    policy = MAPPOPolicy(model)
+    trainer = MAPPOTrainer(env, policy, config, tmp_path)
+
+    actor_params_before = [p.detach().clone() for p in model.actor.parameters()]
+    buffer = trainer.collect_rollout()
+    trainer.update(buffer)
+    actor_params_after = [p.detach().clone() for p in model.actor.parameters()]
+
+    changed = any(not torch.equal(a, b) for a, b in zip(actor_params_before, actor_params_after))
+    assert changed, "actor parameters did not change after a PPO update"
+
+
 def test_train_writes_log_and_checkpoints(tmp_path):
     config = _tiny_config(tmp_path)
     env = build_env_from_config(config)
@@ -88,6 +150,9 @@ def test_train_writes_log_and_checkpoints(tmp_path):
     assert log_path.exists()
     lines = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert len(lines) >= 2
+    assert lines[0]["rollout_s"] >= 0.0
+    assert lines[0]["update_s"] >= 0.0
+    assert lines[0]["elapsed_s"] >= lines[0]["rollout_s"] + lines[0]["update_s"]
     assert (tmp_path / "checkpoint_update_000001.pt").exists()
 
     eval_stats = trainer.evaluate(num_episodes=1)
@@ -100,6 +165,10 @@ def test_checkpoint_roundtrip(tmp_path):
     policy = MAPPOPolicy(model)
     trainer = MAPPOTrainer(env, policy, config, tmp_path)
     trainer.update_count = 5
+    trainer.value_norm.mean = 12.5
+    trainer.value_norm.std = 3.25
+    trainer.value_norm.count = 99
+    trainer.value_norm.tau = 0.2
 
     ckpt_path = trainer.save_checkpoint(tmp_path / "ckpt.pt")
     assert ckpt_path.exists()
@@ -108,5 +177,150 @@ def test_checkpoint_roundtrip(tmp_path):
     trainer2 = MAPPOTrainer(env, MAPPOPolicy(model2), config, tmp_path)
     trainer2.load_checkpoint(ckpt_path)
     assert trainer2.update_count == 5
+    assert trainer2.value_norm.mean == 12.5
+    assert trainer2.value_norm.std == 3.25
+    assert trainer2.value_norm.count == 99
+    assert trainer2.value_norm.tau == 0.2
     for p1, p2 in zip(model.parameters(), model2.parameters()):
         torch.testing.assert_close(p1.detach(), p2.detach())
+
+
+def test_value_normalizer_stats():
+    vn = ValueNormalizer("cpu", tau=0.5)
+    assert vn.mean == 0.0 and vn.std == 1.0
+    x = torch.randn(200) * 5.0 + 3.0
+    vn.update(x)
+    xn = vn.normalize(x)
+    assert abs(xn.mean()) < 0.3
+    assert abs(xn.std() - 1.0) < 0.2
+    # denormalize inverts normalize
+    torch.testing.assert_close(vn.denormalize(xn), x, atol=1.0e-4, rtol=1.0e-4)
+    # EMA: a second update moves the running mean only tau of the way toward
+    # the new batch mean (the previous full-merge formula made the running
+    # stats sensitive to one biased rollout; EMA keeps the target stable).
+    m0 = vn.mean
+    y = torch.randn(50) * 3.0 + 20.0
+    vn.update(y)
+    expected = (1.0 - 0.5) * m0 + 0.5 * float(y.mean())
+    assert abs(vn.mean - expected) < 1.0e-4
+    # tau=1 behaves like full replacement of the running stats.
+    vn1 = ValueNormalizer("cpu", tau=1.0)
+    vn1.update(x)
+    vn1.update(y)
+    assert abs(vn1.mean - float(y.mean())) < 1.0e-5
+    assert abs(vn1.std - float(y.std(correction=0))) < 1.0e-5
+
+
+def test_update_standardizes_critic_target(tmp_path):
+    config = _tiny_config(tmp_path)
+    env = build_env_from_config(config)
+    model = GraphMAPPOActorCritic(env.action_resolver.action_space, config)
+    policy = MAPPOPolicy(model)
+    trainer = MAPPOTrainer(env, policy, config, tmp_path)
+
+    buffer = trainer.collect_rollout()
+    stats = trainer.update(buffer)
+    # Standardized critic targets are attached to every step.
+    assert all(step.returns_norm is not None for step in buffer.steps)
+    rn = torch.stack([step.returns_norm for step in buffer.steps])
+    assert abs(rn.mean()) < 1.0e-3
+    assert abs(rn.std() - 1.0) < 0.3
+    # With standardization the critic MSE is O(1), not the raw return scale
+    # (the raw returns here are tens of units, and the broken non-normalized
+    # path produced critic losses of hundreds to thousands).
+    assert stats.critic_loss < 50.0
+
+
+def test_target_kl_stops_all_remaining_ppo_epochs(tmp_path):
+    """A KL breach must stop the update, not merely one epoch's minibatches."""
+    config = _tiny_config(tmp_path)
+    config["train"]["ppo"]["epochs"] = 3
+    config["train"]["ppo"]["target_kl"] = 0.01
+    env = build_env_from_config(config)
+    model = GraphMAPPOActorCritic(env.action_resolver.action_space, config)
+    trainer = MAPPOTrainer(env, MAPPOPolicy(model), config, tmp_path)
+
+    class Buffer:
+        steps = []
+
+        def __init__(self):
+            self.sample_calls = 0
+
+        def sample(self, _minibatch_size, _rng):
+            self.sample_calls += 1
+            return [[object()], [object()]]
+
+    buffer = Buffer()
+    parameter = next(model.parameters())
+
+    def high_kl_loss(*_args, **_kwargs):
+        zero = parameter.sum() * 0.0
+        return zero, zero, zero, torch.tensor(1.0), zero
+
+    trainer._loss_for_batch = high_kl_loss
+    trainer.update(buffer)
+
+    assert buffer.sample_calls == 1
+
+
+def test_curriculum_switches_rollout_length_and_episode_count(tmp_path):
+    config = _tiny_config(tmp_path)
+    config["train"]["curriculum"] = {
+        "stages": [
+            {"until_update": 10, "rollout_steps": 40, "episodes_per_update": 2},
+            {"until_update": 20, "rollout_steps": 80, "episodes_per_update": 4},
+            {"until_update": 30, "rollout_steps": 120, "episodes_per_update": 1},
+        ]
+    }
+    env = build_env_from_config(config)
+    trainer = MAPPOTrainer(env, MAPPOPolicy(GraphMAPPOActorCritic(env.action_resolver.action_space, config)), config, tmp_path)
+
+    trainer._rollout_envs = ["stale"] * 2
+    trainer.episodes_per_update = 2
+    trainer.update_count = 0
+    trainer._apply_curriculum()
+    assert trainer.rollout_steps == 40
+    assert trainer.episodes_per_update == 2
+    assert trainer._rollout_envs is not None
+
+    trainer._rollout_envs = ["stale"] * 4
+    trainer.update_count = 10
+    trainer._apply_curriculum()
+    assert trainer.rollout_steps == 80
+    assert trainer.episodes_per_update == 4
+    assert trainer._rollout_envs is None  # episode count changed -> rebuild
+
+    trainer.update_count = 20
+    trainer._apply_curriculum()
+    assert trainer.rollout_steps == 120
+    assert trainer.episodes_per_update == 1
+
+    trainer.update_count = 25
+    trainer._apply_curriculum()
+    assert trainer.rollout_steps == 120  # beyond last stage keeps final stage
+
+
+def test_checkpoint_reward_change_resets_critic_head(tmp_path):
+    config = _tiny_config(tmp_path)
+    env = build_env_from_config(config)
+    model = GraphMAPPOActorCritic(env.action_resolver.action_space, config)
+    trainer = MAPPOTrainer(env, MAPPOPolicy(model), config, tmp_path)
+    ckpt = trainer.save_checkpoint(tmp_path / "ckpt.pt")
+    head_before = [p.detach().clone() for p in model.critic.value_head.parameters()]
+
+    # Different reward config -> the stale critic head must be re-initialized.
+    # env_small.yaml already defaults to served_weight=5.0; use a value that
+    # is actually different so the critic-head reset branch is exercised.
+    config2 = deep_merge(config, {"reward": {"served_weight": 3.0}})
+    model2 = GraphMAPPOActorCritic(env.action_resolver.action_space, config2)
+    trainer2 = MAPPOTrainer(env, MAPPOPolicy(model2), config2, tmp_path)
+    trainer2.load_checkpoint(ckpt)
+    head_after = [p.detach().clone() for p in model2.critic.value_head.parameters()]
+    assert not all(torch.equal(a, b) for a, b in zip(head_before, head_after))
+
+    # Identical reward config -> the critic head is preserved.
+    model3 = GraphMAPPOActorCritic(env.action_resolver.action_space, config)
+    trainer3 = MAPPOTrainer(env, MAPPOPolicy(model3), config, tmp_path)
+    trainer3.load_checkpoint(ckpt)
+    head_same = [p.detach().clone() for p in model3.critic.value_head.parameters()]
+    assert all(torch.equal(a, b) for a, b in zip(head_before, head_same))

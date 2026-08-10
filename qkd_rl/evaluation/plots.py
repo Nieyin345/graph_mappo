@@ -30,12 +30,22 @@ def read_train_history(path: Path) -> list[dict]:
 
 
 def _rolling_smooth(values, window: int) -> np.ndarray:
-    """Centred moving average; shorter inputs are returned unchanged."""
+    """Centred moving average, keeping edge points raw.
+
+    ``np.convolve(mode="same")`` with a window as large as the series applies
+    a triangular weight profile to the ends, which can look like a real
+    learning-curve rise and fall even on flat data. Using ``mode="valid"``
+    and leaving the edge points unsmoothed avoids that artifact.
+    """
     arr = np.asarray(values, dtype=float)
     if window <= 1 or len(arr) < window:
         return arr
     kernel = np.ones(window) / window
-    return np.convolve(arr, kernel, mode="same")
+    smooth = np.convolve(arr, kernel, mode="valid")
+    out = arr.copy()
+    pad = (len(arr) - len(smooth)) // 2
+    out[pad : pad + len(smooth)] = smooth
+    return out
 
 
 def _series_grid(histories: list[list[dict]], field: str) -> tuple[np.ndarray, np.ndarray]:

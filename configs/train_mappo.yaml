@@ -1,14 +1,38 @@
 train:
+  # Canonical training preset: full-day rollouts with broad time coverage.
+  # Use this as the main config unless you explicitly want a short debugging run.
   num_updates: 10000
-  rollout_steps: 400
-  episodes_per_update: 8
+  rollout_steps: 1440
+  episodes_per_update: 4
+  # CPU is the rollout bottleneck (environment feature construction +
+  # matching). Run one episode per worker on CPU, then keep PPO updates on the
+  # main runtime.device (CUDA when available).
+  n_rollout_workers: 4
+  rollout_worker_device: cpu
+  # Lockstep batched rollout: all episodes_per_update envs run in
+  # parallel inside one process; every time step acts on all graphs with a
+  # single block-diagonal forward instead of one tiny CUDA forward per graph.
+  rollout_batch: true
   gamma: 0.99
   gae_lambda: 0.95
+  # Critic target: "mc" = bootstrap-free Monte-Carlo returns. The default
+  # "gae" target (returns = advantage + bootstrapped value) feeds the value
+  # normalizer's own bias back into the returns, drifting the training return
+  # to ~5x the true scale (measured: true ~-1390/step vs logged ~-5276/step).
+  # The actor still uses GAE advantages; only the critic target is decoupled.
+  value_target: mc
   ppo:
     epochs: 4
     minibatch_size: 1024
     clip_eps: 0.2
+    # PPO eval chunk: one block-diagonal forward per chunk (pure
+    # implementation-level kernel merging, same math).
+    batch_chunk: 256
     normalize_advantages: true
+    # EMA update rate of the running return statistics used to standardize the
+    # critic target. Set to 0 to keep the return scale fixed for generalized
+    # training across time windows.
+    value_norm_tau: 0.0
     entropy_coef: 0.01
     value_coef: 0.5
     max_grad_norm: 0.5
@@ -22,5 +46,3 @@ train:
     checkpoint_interval: 100
     eval_interval: 200
     eval_episodes: 4
-
-

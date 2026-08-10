@@ -282,11 +282,12 @@ class HapMobilityModel:
             if method == "wind":
                 for idx_hnode, hnode in enumerate(hnodes):
                     x, y = CoordinateTransformer.lonlat_to_xy(hnode.lg[t-1], hnode.la[t-1])
+                    wind_idx = min(t - 1, len(time) - 1)
                     u_val = ds.u.sel(
-                        valid_time=time[t-1], latitude=hnode.la[t-1], longitude=hnode.lg[t-1], method="nearest"
+                        valid_time=time[wind_idx], latitude=hnode.la[t-1], longitude=hnode.lg[t-1], method="nearest"
                     ).values.item()
                     v_val = ds.v.sel(
-                        valid_time=time[t-1], latitude=hnode.la[t-1], longitude=hnode.lg[t-1], method="nearest"
+                        valid_time=time[wind_idx], latitude=hnode.la[t-1], longitude=hnode.lg[t-1], method="nearest"
                     ).values.item()
                     
                     x_new = x + u_val * syst.THETA

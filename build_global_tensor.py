@@ -37,22 +37,23 @@ ENABLE_STATIC_HAP_GS_PREFILTER = True
 MAX_HAP_GS_DISTANCE_KM = 700.0
 
 # 无地面端链路 (SAT-HAP / SAT-SAT) 的晴空夜间默认天气，与 load_weather_data 的默认值一致。
-# 只读共享，避免每个 worker 重复分配 52 万步的 13 个数组。
-_DEFAULT_WEATHER = {
-    "c_low": np.zeros(T_YEAR, dtype=np.float32),
-    "c_mid": np.zeros(T_YEAR, dtype=np.float32),
-    "c_high": np.zeros(T_YEAR, dtype=np.float32),
-    "rain": np.zeros(T_YEAR, dtype=np.float32),
-    "snow": np.zeros(T_YEAR, dtype=np.float32),
-    "temp": np.full(T_YEAR, 15.0, dtype=np.float32),
-    "rh": np.full(T_YEAR, 50.0, dtype=np.float32),
-    "ws": np.full(T_YEAR, 2.0, dtype=np.float32),
-    "sf": np.zeros(T_YEAR, dtype=np.float32),
-    "vis": np.full(T_YEAR, 24000.0, dtype=np.float32),
-    "time": np.full(T_YEAR, "2023-01-01T12:00", dtype=object),
-    "sunrise": np.full(T_YEAR, "2023-01-01T06:00", dtype=object),
-    "sunset": np.full(T_YEAR, "2023-01-01T18:00", dtype=object),
-}
+# 只读共享，避免每个 worker 重复分配 52 万步的 10 个数组。
+def _build_default_weather(t_year):
+    return {
+        "c_low": np.zeros(t_year, dtype=np.float32),
+        "c_mid": np.zeros(t_year, dtype=np.float32),
+        "c_high": np.zeros(t_year, dtype=np.float32),
+        "rain": np.zeros(t_year, dtype=np.float32),
+        "snow": np.zeros(t_year, dtype=np.float32),
+        "temp": np.full(t_year, 15.0, dtype=np.float32),
+        "rh": np.full(t_year, 50.0, dtype=np.float32),
+        "ws": np.full(t_year, 2.0, dtype=np.float32),
+        "sf": np.zeros(t_year, dtype=np.float32),
+        "vis": np.full(t_year, 24000.0, dtype=np.float32),
+    }
+
+
+_DEFAULT_WEATHER = _build_default_weather(T_YEAR)
 
 _WEATHER_NUMERIC_KEYS = ("vis", "rain", "snow", "temp", "sf", "c_low", "c_mid", "c_high")
 
@@ -82,15 +83,7 @@ def load_weather_data(gnodes, T_YEAR, THETA):
         ws = np.full(T_YEAR, 2.0, dtype=np.float32)
         sf = np.zeros(T_YEAR, dtype=np.float32)
         vis = np.full(T_YEAR, 24000.0, dtype=np.float32)
-        
-        # 字符串类型，使用 object 数组
-        time_arr = np.empty(T_YEAR, dtype=object)
-        sunrise_arr = np.empty(T_YEAR, dtype=object)
-        sunset_arr = np.empty(T_YEAR, dtype=object)
-        time_arr[:] = "2023-01-01T12:00"
-        sunrise_arr[:] = "2023-01-01T06:00"
-        sunset_arr[:] = "2023-01-01T18:00"
-        
+
         cfg = next((c for c in configs if c["name"] == node.tag), None)
         source = "default_clear"
         csv_rows = 0
@@ -108,11 +101,6 @@ def load_weather_data(gnodes, T_YEAR, THETA):
                         else:
                             missing_columns.append(col)
                             df[col] = default
-                    for col in ("time", "sunrise", "sunset"):
-                        if col not in df.columns:
-                            missing_columns.append(col)
-                            df[col] = ""
-                        df[col] = df[col].fillna("").astype(str)
                     limit = min(T_YEAR, len(df) * repeat_factor)
                     covered_steps = limit
                     source = "csv"
@@ -126,10 +114,6 @@ def load_weather_data(gnodes, T_YEAR, THETA):
                     ws[:limit] = np.repeat(df['wind_speed_10m'].values, repeat_factor)[:limit]
                     sf[:limit] = np.repeat(df['direct_radiation_w'].values, repeat_factor)[:limit]
                     vis[:limit] = np.repeat(df['visibility_m'].values, repeat_factor)[:limit]
-                    
-                    time_arr[:limit] = np.repeat(df['time'].values, repeat_factor)[:limit]
-                    sunrise_arr[:limit] = np.repeat(df['sunrise'].values, repeat_factor)[:limit]
-                    sunset_arr[:limit] = np.repeat(df['sunset'].values, repeat_factor)[:limit]
                 except Exception as e:
                     print(f"    - Warning: Failed to parse weather for {node.tag}: {e}")
             else:
@@ -139,7 +123,6 @@ def load_weather_data(gnodes, T_YEAR, THETA):
             "c_low": c_low, "c_mid": c_mid, "c_high": c_high,
             "rain": rain, "snow": snow, "temp": temp, "rh": rh,
             "ws": ws, "sf": sf, "vis": vis,
-            "time": time_arr, "sunrise": sunrise_arr, "sunset": sunset_arr
         }
         coverage_rows.append({
             "node_id": idx,
@@ -237,6 +220,17 @@ def _compact_weather(weather):
     return {key: weather[key] for key in _WEATHER_NUMERIC_KEYS}
 
 _DEFAULT_NUMERIC_WEATHER = _compact_weather(_DEFAULT_WEATHER)
+
+
+def _configure_globals(theta_sec: int = 60) -> None:
+    """Recompute time-step-derived globals for a custom THETA (CLI/tests)."""
+    global THETA, T_HAP, BLEND_HOURS, T_YEAR, _DEFAULT_WEATHER, _DEFAULT_NUMERIC_WEATHER
+    THETA = int(theta_sec)
+    T_HAP = int((24 * 3600) / THETA)
+    BLEND_HOURS = int((4 * 3600) / THETA)
+    T_YEAR = int((365 * 24 * 3600) / THETA)
+    _DEFAULT_WEATHER = _build_default_weather(T_YEAR)
+    _DEFAULT_NUMERIC_WEATHER = _compact_weather(_DEFAULT_WEATHER)
 
 def _build_link_task(l_idx, u_idx, v_idx, ltype, w_u, w_v, latitude_impossible=False):
     return (l_idx, u_idx, v_idx, ltype, _compact_weather(w_u), _compact_weather(w_v), latitude_impossible)
@@ -371,30 +365,120 @@ def _worker_qkd_system():
         _WORKER_CONTEXT["qkd_system"] = qkd_system
     return qkd_system
 
-def compute_link_timeline(args):
-    qkd_system = None
-    l_idx, u_idx, v_idx, ltype, w_u, w_v, latitude_impossible = args
+def _vectorized_ecef(lat_deg, lon_deg, alt_km):
+    lat_rad = np.radians(lat_deg)
+    lon_rad = np.radians(lon_deg)
+    r = R + alt_km
+    return (
+        r * np.cos(lat_rad) * np.cos(lon_rad),
+        r * np.cos(lat_rad) * np.sin(lon_rad),
+        r * np.sin(lat_rad),
+    )
 
-    T_link = _WORKER_CONTEXT["T_link"]
-    N_gs = _WORKER_CONTEXT["N_gs"]
-    N_hap = _WORKER_CONTEXT["N_hap"]
-    gs_coords = _WORKER_CONTEXT["gs_coords"]
-    hap_pos = _WORKER_CONTEXT["hap_pos"]
-    sat_coords_full = _WORKER_CONTEXT["sat_coords_full"]
-    T_HAP = _WORKER_CONTEXT["T_HAP"]
-    min_elev_deg = _WORKER_CONTEXT["min_elev_deg"]
-    
-    dist_array = np.zeros(T_link, dtype=np.float32)
-    los_array  = np.zeros(T_link, dtype=np.int8)
-    zen_array  = np.full(T_link, np.nan, dtype=np.float32)
+
+def _vectorized_los(lat1, lon1, alt1, lat2, lon2, alt2):
+    """Vectorized GeoMath.check_line_of_sight (True = chord not blocked by Earth)."""
+    x1, y1, z1 = _vectorized_ecef(lat1, lon1, alt1)
+    x2, y2, z2 = _vectorized_ecef(lat2, lon2, alt2)
+    dx, dy, dz = x2 - x1, y2 - y1, z2 - z1
+    d_mag_sq = dx * dx + dy * dy + dz * dz
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t = -(x1 * dx + y1 * dy + z1 * dz) / d_mag_sq
+    cx = x1 + t * dx
+    cy = y1 + t * dy
+    cz = z1 + t * dz
+    min_dist_sq = cx * cx + cy * cy + cz * cz
+    blocked = (t > 0.0) & (t < 1.0) & (min_dist_sq < R * R)
+    return ~blocked
+
+
+def _vectorized_distance(lat1, lon1, alt1, lat2, lon2, alt2):
+    """Vectorized GeoMath.calculate_3d_distance (km)."""
+    x1, y1, z1 = _vectorized_ecef(lat1, lon1, alt1)
+    x2, y2, z2 = _vectorized_ecef(lat2, lon2, alt2)
+    return np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2 + (z2 - z1) ** 2)
+
+
+def _vectorized_elevation_deg(obs_lat, obs_lon, obs_alt, tgt_lat, tgt_lon, tgt_alt):
+    """Vectorized GeoMath.elevation_angle_deg with the lower endpoint as observer."""
+    ox, oy, oz = _vectorized_ecef(obs_lat, obs_lon, obs_alt)
+    tx, ty, tz = _vectorized_ecef(tgt_lat, tgt_lon, tgt_alt)
+    lx, ly, lz = tx - ox, ty - oy, tz - oz
+    los_norm = np.sqrt(lx * lx + ly * ly + lz * lz)
+    lat_rad = np.radians(obs_lat)
+    lon_rad = np.radians(obs_lon)
+    ux = np.cos(lat_rad) * np.cos(lon_rad)
+    uy = np.cos(lat_rad) * np.sin(lon_rad)
+    uz = np.sin(lat_rad)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        sin_elev = (lx * ux + ly * uy + lz * uz) / los_norm
+    sin_elev = np.clip(sin_elev, -1.0, 1.0)
+    elev = np.degrees(np.arcsin(sin_elev))
+    return np.where(los_norm <= 0.0, 90.0, elev)
+
+
+_GM_KEPLER = 398600.4418
+_OMEGA_E = 7.2921159e-5
+
+
+def _vectorized_sat_positions(cfg, t_seconds):
+    """Vectorized KeplerianPropagator.get_position_at_time over an array of times."""
+    alt_km = cfg["alt_km"]
+    inclination_deg = float(cfg.get("inclination", 0.0))
+    a = 6371.0 + alt_km
+    e = 0.0
+    raan0 = math.radians(float(cfg.get("init_lon", 0.0)))
+    aop = 0.0
+    init_lat = float(cfg.get("init_lat", 0.0))
+    i_rad = math.radians(inclination_deg)
+    if inclination_deg == 0:
+        m0 = 0.0
+    else:
+        val = max(-1.0, min(1.0, math.sin(math.radians(init_lat)) / math.sin(i_rad)))
+        m0 = math.asin(val)
+    n = math.sqrt(_GM_KEPLER / (a ** 3))
+    raan = raan0 - _OMEGA_E * t_seconds
+    M = m0 + n * t_seconds
+    E = M
+    for _ in range(50):
+        dE = (E - e * np.sin(E) - M) / (1.0 - e * np.cos(E))
+        E = E - dE
+    tan_half_nu = np.sqrt((1 + e) / (1 - e)) * np.tan(E / 2.0)
+    nu = 2.0 * np.arctan(tan_half_nu)
+    r = a * (1.0 - e * np.cos(E))
+    altitude = r - R
+    u = aop + nu
+    x_orb = r * np.cos(u)
+    y_orb = r * np.sin(u)
+    X = x_orb * np.cos(raan) - y_orb * np.cos(i_rad) * np.sin(raan)
+    Y = x_orb * np.sin(raan) + y_orb * np.cos(i_rad) * np.cos(raan)
+    Z = y_orb * np.sin(i_rad)
+    lat = np.degrees(np.arcsin(Z / r))
+    lon = np.degrees(np.arctan2(Y, X))
+    lon = (lon + 180.0) % 360.0 - 180.0
+    return lat, lon, altitude
+
+
+def compute_link_timeline(args):
+    l_idx, u_idx, v_idx, ltype, w_u, w_v, latitude_impossible = args
+    ctx = _WORKER_CONTEXT
+    T_link = ctx["T_link"]
+    N_gs = ctx["N_gs"]
+    N_hap = ctx["N_hap"]
+    gs_coords = ctx["gs_coords"]
+    hap_pos = ctx["hap_pos"]
+    sat_coords_full = ctx["sat_coords_full"]
+    T_HAP = ctx["T_HAP"]
+    min_elev_deg = ctx["min_elev_deg"]
+
     kmax_array = np.zeros(T_link, dtype=np.float32)
     if latitude_impossible:
-        return (l_idx, dist_array, los_array, zen_array, kmax_array)
-    
+        return (l_idx, kmax_array)
+
     u_type = "GS" if u_idx < N_gs else ("HAP" if u_idx < N_gs + N_hap else "SAT")
     v_type = "GS" if v_idx < N_gs else ("HAP" if v_idx < N_gs + N_hap else "SAT")
-
     w = w_u if u_type == "GS" else (w_v if v_type == "GS" else _DEFAULT_NUMERIC_WEATHER)
+
     lat1_arr, lon1_arr, alt1_arr = _node_coord_timelines(
         u_idx, T_link, N_gs, N_hap, gs_coords, hap_pos, sat_coords_full, T_HAP
     )
@@ -402,65 +486,66 @@ def compute_link_timeline(args):
         v_idx, T_link, N_gs, N_hap, gs_coords, hap_pos, sat_coords_full, T_HAP
     )
 
-    for t in range(T_link):
-        los_array[t] = 1 if GeoMath.check_line_of_sight(
-            lat1_arr[t], lon1_arr[t], alt1_arr[t], lat2_arr[t], lon2_arr[t], alt2_arr[t]
-        ) else 0
+    # Vectorized geometry in float64 (exact numpy versions of the scalar GeoMath
+    # path used by the original generator).
+    lat1 = lat1_arr.astype(np.float64)
+    lon1 = lon1_arr.astype(np.float64)
+    alt1 = alt1_arr.astype(np.float64)
+    lat2 = lat2_arr.astype(np.float64)
+    lon2 = lon2_arr.astype(np.float64)
+    alt2 = alt2_arr.astype(np.float64)
 
-    visible_indices = np.flatnonzero(los_array)
-    if len(visible_indices) == 0:
-        return (l_idx, dist_array, los_array, zen_array, kmax_array)
+    visible = _vectorized_los(lat1, lon1, alt1, lat2, lon2, alt2)
+    if not np.any(visible):
+        return (l_idx, kmax_array)
 
-    for t in visible_indices:
-        lat1, lon1, alt1 = lat1_arr[t], lon1_arr[t], alt1_arr[t]
-        lat2, lon2, alt2 = lat2_arr[t], lon2_arr[t], alt2_arr[t]
+    dist = _vectorized_distance(lat1, lon1, alt1, lat2, lon2, alt2)
+    # Elevation uses the lower endpoint as the local horizon observer (matches
+    # _observer_target_for_elevation).
+    obs_lat = np.where(alt1 <= alt2, lat1, lat2)
+    obs_lon = np.where(alt1 <= alt2, lon1, lon2)
+    obs_alt = np.where(alt1 <= alt2, alt1, alt2)
+    tgt_lat = np.where(alt1 <= alt2, lat2, lat1)
+    tgt_lon = np.where(alt1 <= alt2, lon2, lon1)
+    tgt_alt = np.where(alt1 <= alt2, alt2, alt1)
+    elev = _vectorized_elevation_deg(obs_lat, obs_lon, obs_alt, tgt_lat, tgt_lon, tgt_alt)
 
-        d = GeoMath.calculate_3d_distance(lat1, lon1, alt1, lat2, lon2, alt2)
-        dist_array[t] = d
-        if d <= 0:
-            continue
-        
-        obs_tgt = _observer_target_for_elevation(lat1, lon1, alt1, lat2, lon2, alt2)
-        elev_angle = GeoMath.elevation_angle_deg(*obs_tgt)
-        if "GS" in ltype and elev_angle < min_elev_deg:
-            los_array[t] = 0
-            continue
-        
-        zen_array[t] = 90.0 - elev_angle
+    if "GS" in ltype:
+        visible = visible & (elev >= min_elev_deg)
+    visible = visible & (dist > 0.0)
+    if not np.any(visible):
+        return (l_idx, kmax_array)
+
+    qkd_system = None
+    for t in np.flatnonzero(visible):
         if qkd_system is None:
             qkd_system = _worker_qkd_system()
         kmax_array[t] = qkd_system.compute_secure_key_rate(
-            distance_m=d * 1000.0,
-            visibility_m=w["vis"][t],
-            rain_mm=w["rain"][t],
-            snow_cm=w["snow"][t],
-            temperature_c=w["temp"][t],
-            current_time_str="2023-01-01T12:00",
-            sunrise_str="2023-01-01T06:00",
-            sunset_str="2023-01-01T18:00",
-            rh=50.0,
-            ws=2.0,
-            sf_w=w["sf"][t],
-            h_rx_km=alt2,
-            h_tx_km=alt1,
+            distance_m=float(dist[t] * 1000.0),
+            visibility_m=float(w["vis"][t]),
+            rain_mm=float(w["rain"][t]),
+            snow_cm=float(w["snow"][t]),
+            temperature_c=float(w["temp"][t]),
+            sf_w=float(w["sf"][t]),
+            h_rx_km=float(alt2[t]),
+            h_tx_km=float(alt1[t]),
             rx_node_type=v_type,
             tx_node_type=u_type,
-            c_low=w["c_low"][t],
-            c_mid=w["c_mid"][t],
-            c_high=w["c_high"][t],
-            elevation_angle_deg=elev_angle
+            c_low=float(w["c_low"][t]),
+            c_mid=float(w["c_mid"][t]),
+            c_high=float(w["c_high"][t]),
+            elevation_angle_deg=float(elev[t]),
         )
+    return (l_idx, kmax_array)
 
 
-    return (l_idx, dist_array, los_array, zen_array, kmax_array)
-
-def build_all():
-    out_dir = os.path.join("dataset", "global")
+def build_all(out_dir=None):
+    out_dir = out_dir or os.path.join("dataset", "global")
     os.makedirs(out_dir, exist_ok=True)
 
     print(">>> [1/5] 构建节点...")
     gs_configs = GlobalGroundStations.get_stations()[:SimConfig.NUM_GS]
-    gnodes = [gs(c["lon"], c["lat"], 1, 1, 1e9, c["name"]) for c in gs_configs]
+    gnodes = [gs(c["lon"], c["lat"], 1e9, c["name"]) for c in gs_configs]
     
     # 抽取天气数据字典
     weather_dict, weather_coverage = load_weather_data(gnodes, T_YEAR, THETA)
@@ -468,11 +553,11 @@ def build_all():
     
     hap_configs = GlobalHAPs.get_haps()[:SimConfig.NUM_HAPS]
     syst_hap = system(range(T_HAP), THETA, np.array([[1, 1]]))
-    hnodes = [hap({0: c["lon"]}, {0: c["lat"]}, {0: c["alt_km"]}, 1, 1, 1e9, c["name"]) for c in hap_configs]
+    hnodes = [hap({0: c["lon"]}, {0: c["lat"]}, {0: c["alt_km"]}, 1e9, c["name"]) for c in hap_configs]
     
     sat_configs = GlobalSatellites.get_satellites()[:SimConfig.NUM_SATS]
     # No longer store t->coord dictionaries to save memory
-    snodes = [sat({0: c.get("init_lon", 0.0)}, {0: c.get("init_lat", 0.0)}, {0: c["alt_km"]}, 1, 1, 1e9, c["name"]) for c in sat_configs]
+    snodes = [sat({0: c.get("init_lon", 0.0)}, {0: c.get("init_lat", 0.0)}, {0: c["alt_km"]}, 1e9, c["name"]) for c in sat_configs]
 
     all_nodes = gnodes + hnodes + snodes
     N = len(all_nodes)
@@ -568,22 +653,6 @@ def build_all():
         json.dump(metadata, fh, indent=2)
 
     print(">>> [4/5] 准备流式写入 (O(1) 内存)...")
-    propagators = []
-    for cfg in sat_configs:
-        alt_km = cfg["alt_km"]
-        inclination = cfg.get("inclination", 0.0)
-        a = 6371.0 + alt_km
-        e = 0.0
-        raan = cfg.get("init_lon", 0.0)
-        aop = 0.0
-        init_lat = cfg.get("init_lat", 0.0)
-        if inclination == 0:
-            m0 = 0.0
-        else:
-            val = max(-1.0, min(1.0, math.sin(math.radians(init_lat)) / math.sin(math.radians(inclination))))
-            m0 = math.degrees(math.asin(val))
-        propagators.append(KeplerianPropagator(a, e, inclination, raan, aop, m0))
-
     sat_node_ids = np.array([N_gs + N_hap + i for i in range(N_sat)], dtype=np.int32)
 
     f_sat = h5py.File(os.path.join(out_dir, "sat_positions.h5"), "w")
@@ -596,10 +665,16 @@ def build_all():
     reg = np.array([(idx, u, v, lt.encode()) for idx, (u, v, lt) in enumerate(link_defs)], dtype=dt)
     f_link.create_dataset("link_registry", data=reg)
 
-    ds_dist = f_link.create_dataset("distance", shape=(T_link, L), dtype=np.float32, chunks=True)
-    ds_los  = f_link.create_dataset("los",      shape=(T_link, L), dtype=np.int8, chunks=True)
-    ds_zen  = f_link.create_dataset("zenith",   shape=(T_link, L), dtype=np.float32, fillvalue=np.nan, chunks=True)
-    ds_kmax = f_link.create_dataset("k_max",    shape=(T_link, L), dtype=np.float32, chunks=True)
+    # Lean storage: only k_max is kept (los/distance/zenith are never consumed
+    # by training and los is derivable from k_max with min_link_rate > 0).
+    ds_kmax = f_link.create_dataset(
+        "k_max",
+        shape=(T_link, L),
+        dtype=np.float32,
+        chunks=(min(2048, T_link), L),
+        compression="gzip",
+        compression_opts=4,
+    )
     f_link.attrs["theta_sec"] = THETA
     f_link.attrs["period_hours"] = T_link
     f_link.attrs["period_steps"] = T_link
@@ -607,13 +682,14 @@ def build_all():
     f_link.attrs["static_hap_gs_prefilter"] = int(ENABLE_STATIC_HAP_GS_PREFILTER)
     f_link.attrs["max_hap_gs_distance_km"] = MAX_HAP_GS_DISTANCE_KM
 
-    print(">>> [5/6] 预结算全天候卫星坐标...")
+    print(">>> [5/6] 预结算全天候卫星坐标 (向量化)...")
+    t_seconds = np.arange(T_link, dtype=np.float64) * THETA
     sat_coords_full = np.zeros((T_link, N_sat, 3), dtype=np.float32)
-    for t in tqdm(range(T_link), desc="Sat Orbits"):
-        t_seconds = t * THETA
-        for i, prop in enumerate(propagators):
-            lat, lon, alt = prop.get_position_at_time(t_seconds)
-            sat_coords_full[t, i, :] = [lat, lon, alt]
+    for i, cfg in enumerate(sat_configs):
+        lat, lon, alt = _vectorized_sat_positions(cfg, t_seconds)
+        sat_coords_full[:, i, 0] = lat
+        sat_coords_full[:, i, 1] = lon
+        sat_coords_full[:, i, 2] = alt
     ds_sat[:] = sat_coords_full
     f_sat.close()
 
@@ -656,21 +732,53 @@ def build_all():
     if latitude_impossible_count:
         print(f"    纬度上界短路链路数: {latitude_impossible_count} (保留链路，全年输出0)")
 
-    with ProcessPoolExecutor(
-        max_workers=worker_count,
-        initializer=_init_worker_context,
-        initargs=(T_link, N_gs, N_hap, gs_coords, hap_pos, sat_coords_full, THETA, T_HAP, MIN_ELEVATION_DEG),
-    ) as executor:
-        futures = [executor.submit(compute_link_timeline, task) for task in tasks]
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Parallel Physics"):
-            l_idx, dist_array, los_array, zen_array, kmax_array = future.result()
-            ds_dist[:, l_idx] = dist_array
-            ds_los[:, l_idx]  = los_array
-            ds_zen[:, l_idx]  = zen_array
-            ds_kmax[:, l_idx] = kmax_array
+    # Workers return per-link timelines; we stage them in an on-disk memmap and
+    # pack row-block by row-block into the gzip target. Writing full rows
+    # sequentially avoids the read-modify-write amplification of column writes
+    # into a row-major gzip-compressed dataset (which would recompress every
+    # chunk per link column).
+    stage_path = os.path.join(out_dir, "_kmax_stage.dat")
+    stage = np.memmap(stage_path, dtype=np.float32, mode="w+", shape=(T_link, L), order="F")
+    try:
+        with ProcessPoolExecutor(
+            max_workers=worker_count,
+            initializer=_init_worker_context,
+            initargs=(T_link, N_gs, N_hap, gs_coords, hap_pos, sat_coords_full, THETA, T_HAP, MIN_ELEVATION_DEG),
+        ) as executor:
+            futures = [executor.submit(compute_link_timeline, task) for task in tasks]
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Parallel Physics"):
+                l_idx, kmax_array = future.result()
+                stage[:, l_idx] = kmax_array
+        stage.flush()
+        block_rows = min(2048, T_link)
+        for r0 in tqdm(range(0, T_link, block_rows), desc="Packing kmax rows"):
+            r1 = min(T_link, r0 + block_rows)
+            ds_kmax[r0:r1, :] = np.ascontiguousarray(stage[r0:r1, :])
+    finally:
+        del stage
+        try:
+            os.remove(stage_path)
+        except OSError:
+            pass
     f_link.close()
 
     print(f"\n全部完成！巨型流式大表生成完毕，未发生任何内存累积。")
 
+def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Build the global link-rate H5 tensor.")
+    parser.add_argument("--theta", type=int, default=60, help="core step size in seconds (default 60)")
+    parser.add_argument("--out-dir", default=os.path.join("dataset", "global"), help="output directory")
+    parser.add_argument("--workers", type=int, default=0, help="worker processes (0 = all cores)")
+    args = parser.parse_args()
+    if args.theta != 60:
+        _configure_globals(args.theta)
+    if args.workers > 0:
+        os.environ["HAP_QKD_WORKERS"] = str(args.workers)
+    build_all(out_dir=args.out_dir)
+
+
 if __name__ == "__main__":
-    build_all()
+    main()
+
