@@ -22,7 +22,7 @@ portal.context.defineParameter(
     "urn:publicid:IDN+emulab.net+image+emulab-ops:UBUNTU22-64-STD",
 )
 
-params = portal.context.bind()
+params = portal.context.bindParameters()
 
 node = rspec.Node("train")
 node.hardware_type = params.hardware_type
