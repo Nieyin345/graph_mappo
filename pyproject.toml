@@ -19,6 +19,9 @@ dependencies = [
     "highspy>=1.7",
 ]
 
+[tool.setuptools.packages.find]
+include = ["qkd_rl*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
