@@ -24,7 +24,7 @@ portal.context.defineParameter(
 
 params = portal.context.bindParameters()
 
-node = rspec.Node("train")
+node = rspec.Node("train", rspec.NodeType("pc"))
 node.hardware_type = params.hardware_type
 node.disk_image = params.disk_image
 node.addService(
