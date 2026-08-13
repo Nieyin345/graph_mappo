@@ -5,8 +5,6 @@ Git repository. It defines one compute node, the OS image, and the setup
 script that installs the Python environment and prepares the dataset.
 """
 
-from __future__ import annotations
-
 import geni.portal as portal
 import geni.rspec.pg as rspec
 
