@@ -61,7 +61,7 @@ def test_all_config_files_merge_and_validate() -> None:
         "train_mappo.yaml",
         "env_full.yaml",
         "baselines.yaml",
-        "train_demand_edge.yaml",
+        "train_profiles.yaml",
     ]
     config = load_config([ROOT / "configs" / name for name in names])
     ConfigValidator().validate(config)
@@ -276,6 +276,7 @@ def test_baselines_yaml_policies_constructible() -> None:
     from qkd_rl.baselines.greedy_qkp import GreedyQKPPolicy
     from qkd_rl.baselines.greedy_rate import GreedyRatePolicy
     from qkd_rl.baselines.greedy_relay import GreedyRelayPolicy
+    from qkd_rl.baselines.greedy_relay_diffusion import GreedyRelayDiffusionPolicyV3
     from qkd_rl.baselines.ilp_optimal import ILPOptimalPolicy
     from qkd_rl.baselines.random_policy import RandomPolicy
 
@@ -287,6 +288,7 @@ def test_baselines_yaml_policies_constructible() -> None:
         "greedy_demand",
         "greedy_matching",
         "greedy_relay",
+        "greedy_relay_diffusion_v3",
         "ilp_optimal",
     }
     # Construct every enabled policy exactly like run_baselines.py does.
@@ -310,6 +312,18 @@ def test_baselines_yaml_policies_constructible() -> None:
         completion_multiplier=base_cfg["greedy_relay"]["completion_multiplier"],
         keep_weight=base_cfg["greedy_relay"]["keep_weight"],
         deadline_window=base_cfg["greedy_relay"]["deadline_window"],
+    )
+    GreedyRelayDiffusionPolicyV3(
+        rate_weight=base_cfg["greedy_relay_diffusion_v3"]["rate_weight"],
+        importance_weight=base_cfg["greedy_relay_diffusion_v3"]["importance_weight"],
+        completion_weight=base_cfg["greedy_relay_diffusion_v3"]["completion_weight"],
+        keep_weight=base_cfg["greedy_relay_diffusion_v3"]["keep_weight"],
+        switch_weight=base_cfg["greedy_relay_diffusion_v3"]["switch_weight"],
+        hop_decay_factor=base_cfg["greedy_relay_diffusion_v3"]["hop_decay_factor"],
+        max_path_links=base_cfg["greedy_relay_diffusion_v3"]["max_path_links"],
+        wait_urgency_tau_ratio=base_cfg["greedy_relay_diffusion_v3"]["wait_urgency_tau_ratio"],
+        ignore_consumption=base_cfg["greedy_relay_diffusion_v3"]["ignore_consumption"],
+        include_stocked_unavailable=base_cfg["greedy_relay_diffusion_v3"]["include_stocked_unavailable"],
     )
     ILPOptimalPolicy(
         slot_seconds=base_cfg["ilp_optimal"]["slot_seconds"],

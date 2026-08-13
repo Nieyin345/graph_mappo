@@ -32,7 +32,6 @@ class RolloutStep:
     joint_entropy: torch.Tensor | None = None
     returns: torch.Tensor | None = None
     advantages: torch.Tensor | None = None
-    returns_norm: torch.Tensor | None = None
     matched_edges: list[str] | None = None
 
 
@@ -94,6 +93,9 @@ class RolloutBuffer:
                 acc = rewards_t[t] + self.gamma * acc
                 mc_returns[t] = acc
             returns = mc_returns
+            # The actor also uses the raw MC returns (whitened per minibatch
+            # in PPO), so an imperfect critic cannot bias the policy gradient.
+            advantages = mc_returns
         for step, ret, adv in zip(episode, returns, advantages):
             step.returns = ret.detach()
             step.advantages = adv.detach()

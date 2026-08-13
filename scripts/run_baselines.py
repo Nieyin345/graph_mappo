@@ -26,53 +26,74 @@ from qkd_rl.baselines.greedy_matching import GreedyMatchingPolicy
 from qkd_rl.baselines.greedy_qkp import GreedyQKPPolicy
 from qkd_rl.baselines.greedy_rate import GreedyRatePolicy
 from qkd_rl.baselines.greedy_relay import GreedyRelayPolicy
+from qkd_rl.baselines.greedy_relay_diffusion import GreedyRelayDiffusionPolicyV3
 from qkd_rl.baselines.ilp_optimal import ILPOptimalPolicy
 from qkd_rl.baselines.random_policy import RandomPolicy
 from qkd_rl.algos.checkpoint import load_checkpoint
 from qkd_rl.algos.policy import MAPPOPolicy
 from qkd_rl.models.graph_mappo import GraphMAPPOActorCritic
-from qkd_rl.core.config import deep_merge, load_config
-from qkd_rl.env.factory import build_env_from_config, load_default_config
+from qkd_rl.core.config import load_config
+from qkd_rl.env.factory import build_env_from_config
+from qkd_rl.evaluation.test_protocol import (
+    build_validation_env_config,
+    load_validation_profile,
+    resolve_seeds,
+)
 from qkd_rl.evaluation import Evaluator, plot_episode_timeline, plot_policy_comparison
 from qkd_rl.evaluation.evaluator import write_episodes_csv, write_steps_csv, write_summary_json
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run heuristic baselines and export figures.")
-    parser.add_argument("--episodes", type=int, default=5)
-    parser.add_argument("--seeds", type=str, default="1000,1001,1002,1003,1004")
+    parser.add_argument("--config", type=str, default="configs/global.yaml")
+    parser.add_argument("--episodes", type=int, default=None)
+    parser.add_argument("--seeds", type=str, default=None)
     parser.add_argument("--out", type=str, default="outputs/eval/small")
     parser.add_argument("--name", type=str, default="")
     parser.add_argument("--rl-checkpoint", type=str, default=None, help="Optional trained RL checkpoint .pt to include in the comparison.")
     parser.add_argument("--rl-name", type=str, default="rl_model")
     parser.add_argument("--device", type=str, default=None, help="Device for the RL model (auto: cuda if available).")
     parser.add_argument("--episode-start-mode", type=str, default=None, help="Override env.episode_start_mode (e.g. fixed for a deterministic t=0 comparison).")
-    parser.add_argument("--time-limit-days", type=int, default=None, help="Override scenario.time_limit.days (1 = first-day protocol).")
+    parser.add_argument("--time-limit-days", type=int, default=None, help="Override scenario.time_limit.days.")
+    parser.add_argument("--skip-ilp", action="store_true", help="Skip the slow MILP baseline (run it separately with compute_milp_reference.py).")
     args = parser.parse_args()
 
-    seeds = [int(s) for s in args.seeds.split(",") if s.strip()]
+    profile = load_validation_profile(ROOT / args.config)
+    if args.episodes is None:
+        args.episodes = profile["episodes"]
+    if args.seeds:
+        seeds = [int(s) for s in args.seeds.split(",") if s.strip()]
+    else:
+        seeds = resolve_seeds(profile, args.episodes)
+    if args.episode_start_mode is None:
+        args.episode_start_mode = profile["start_mode"]
+    episode_steps = profile["episode_steps"] or profile["episode_days"] * 1440
     out_dir = Path(ROOT) / args.out
 
     def base_config():
-        config = load_default_config(ROOT)
-        config = deep_merge(config, load_config([ROOT / "configs" / "env_full.yaml"]))
-        config = deep_merge(config, load_config([ROOT / "configs" / "baselines.yaml"]))
-        config["rate_provider"]["provider"] = "h5"
-        if args.episode_start_mode:
-            config["env"]["episode_start_mode"] = args.episode_start_mode
+        config = build_validation_env_config(
+            profile,
+            include_baselines=True,
+            episode_steps=episode_steps,
+            start_mode=args.episode_start_mode,
+        )
         if args.time_limit_days is not None:
             config["scenario"]["time_limit"]["days"] = args.time_limit_days
         return config
 
     def env_builder(seed: int):
         env = build_env_from_config(base_config())
-        env.reset(seed=seed)
+        env.reset(
+            seed=seed,
+            start_seed=int(profile.get("start_seed", 0)) + seed,
+        )
         return env
 
     # Baseline configuration lives in configs/baselines.yaml; every policy is
     # independent of the training stack and each entry can be disabled.
     base_cfg = load_config([ROOT / "configs" / "baselines.yaml"]).get("baselines", {})
     policies = {}
+    template_env = None
     if base_cfg.get("random", {}).get("enabled", True):
         policies["random"] = RandomPolicy(seed=0)
     gr_cfg = base_cfg.get("greedy_rate", {})
@@ -96,6 +117,20 @@ def main() -> None:
             keep_weight=relay_cfg.get("keep_weight", 0.5),
             deadline_window=relay_cfg.get("deadline_window", 60.0),
         )
+    grd_v3_cfg = base_cfg.get("greedy_relay_diffusion_v3", {})
+    if grd_v3_cfg.get("enabled", True):
+        policies["greedy_relay_diffusion_v3"] = GreedyRelayDiffusionPolicyV3(
+            rate_weight=grd_v3_cfg.get("rate_weight", 1.0),
+            importance_weight=grd_v3_cfg.get("importance_weight", 10.0),
+            completion_weight=grd_v3_cfg.get("completion_weight", 1.0),
+            keep_weight=grd_v3_cfg.get("keep_weight", 0.5),
+            switch_weight=grd_v3_cfg.get("switch_weight", 0.2),
+            hop_decay_factor=grd_v3_cfg.get("hop_decay_factor", 0.25),
+            max_path_links=grd_v3_cfg.get("max_path_links", 3),
+            wait_urgency_tau_ratio=grd_v3_cfg.get("wait_urgency_tau_ratio", 0.8),
+            ignore_consumption=grd_v3_cfg.get("ignore_consumption", False),
+            include_stocked_unavailable=grd_v3_cfg.get("include_stocked_unavailable", True),
+        )
     gm_cfg = base_cfg.get("greedy_matching", {})
     if gm_cfg.get("enabled", True):
         policies["greedy_matching"] = GreedyMatchingPolicy(
@@ -107,7 +142,8 @@ def main() -> None:
     if args.rl_checkpoint:
         import torch
         device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
-        template_env = build_env_from_config(base_config())
+        if template_env is None:
+            template_env = build_env_from_config(base_config())
         model = GraphMAPPOActorCritic(template_env.action_resolver.action_space, base_config())
         rl_policy = MAPPOPolicy(model, device)
         data = load_checkpoint(args.rl_checkpoint, device)
@@ -126,7 +162,7 @@ def main() -> None:
         print(f"rl policy: loaded {args.rl_checkpoint} (update={data.update}) on {device}")
 
     ilp_cfg = base_cfg.get("ilp_optimal", {})
-    if ilp_cfg.get("enabled", True):
+    if ilp_cfg.get("enabled", True) and not args.skip_ilp:
         policies["ilp_optimal"] = ILPOptimalPolicy(
             slot_seconds=ilp_cfg.get("slot_seconds", 60.0),
             max_requests=ilp_cfg.get("max_requests", 64),
@@ -135,10 +171,20 @@ def main() -> None:
             time_limit_s=ilp_cfg.get("time_limit_s", 5.0),
             mip_rel_gap=ilp_cfg.get("mip_rel_gap", 0.0),
             switch_decay=ilp_cfg.get("switch_decay", 0.5),
+            importance_weight=ilp_cfg.get("importance_weight", 2.0),
+            max_path_links=ilp_cfg.get("max_path_links", 3),
+            hop_decay_factor=ilp_cfg.get("hop_decay_factor", 0.25),
+            wait_urgency_tau_ratio=ilp_cfg.get("wait_urgency_tau_ratio", 0.8),
+            service_slack_ratio=ilp_cfg.get("service_slack_ratio", 0.05),
+            ignore_consumption=ilp_cfg.get("ignore_consumption", False),
         )
     evaluator = Evaluator(env_builder)
     episodes, step_rows = evaluator.compare(
-        policies, num_episodes=args.episodes, seeds=seeds, collect_steps=True
+        policies,
+        num_episodes=args.episodes,
+        seeds=seeds,
+        collect_steps=True,
+        start_seed=int(profile.get("start_seed", 0)),
     )
 
     write_episodes_csv(episodes, out_dir / "episodes.csv")
@@ -162,4 +208,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

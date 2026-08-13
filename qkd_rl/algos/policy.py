@@ -349,30 +349,9 @@ class MAPPOPolicy:
 def _masked_log_prob_entropy(
     logits: torch.Tensor, idx: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Log probs and entropies for a masked categorical, ``-inf`` padding safe.
-
-    ``log_softmax`` maps the ``-inf`` padding columns to ``-inf``, so
-    ``exp(logp) * logp`` would be ``0 * -inf = NaN``. The padding positions are
-    exactly where ``logits`` is non-finite, so those entries are zeroed before
-    the entropy sum; log probs gathered at valid indices are unaffected.
-    """
+    """Log probs and entropies for a masked categorical, ``-inf`` padding safe."""
     logp = torch.log_softmax(logits, dim=-1)
     log_probs = logp.gather(-1, idx.unsqueeze(-1)).squeeze(-1)
     safe = torch.where(torch.isfinite(logits), logp, torch.zeros_like(logp))
     entropies = -(safe.exp() * safe).sum(-1)
     return log_probs, entropies
-
-
-def _pad_logits(logits: dict[str, torch.Tensor], device: torch.device) -> tuple[torch.Tensor, int]:
-    """Pad per-node logits to a common length with ``-inf``.
-
-    ``-inf`` logits produce exact zero probabilities, so sampled indices,
-    log probs, and entropies are unaffected by the padding.
-    """
-    node_ids = list(logits.keys())
-    max_n = max(int(logits[node_id].shape[0]) for node_id in node_ids)
-    padded = torch.full((len(node_ids), max_n), float("-inf"), dtype=torch.float32, device=device)
-    for i, node_id in enumerate(node_ids):
-        n = int(logits[node_id].shape[0])
-        padded[i, :n] = logits[node_id]
-    return padded, max_n

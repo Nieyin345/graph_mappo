@@ -44,6 +44,7 @@ class QKDEnv:
         self.action_resolver = action_resolver
         self.metrics = metrics
         self.config = config
+        self.continuous = bool(config["env"].get("continuous", False))
         self.requests = RequestQueue()
         self.request_history = RequestHistoryTracker()
         self.history_buffer = history_buffer
@@ -56,30 +57,70 @@ class QKDEnv:
         # step (t+1) is exactly what the next step would rebuild at its start.
         self._obs_cache: tuple[int, GraphObservation, dict[str, list[bool]]] | None = None
 
-    def reset(self, seed: int | None = None) -> GraphObservation:
+    def reset(self, seed: int | None = None, start_seed: int | None = None) -> GraphObservation:
         if seed is not None:
-            self.rng.seed(seed)
             # Per-episode reproducibility: reseed the request stream with the
-            # episode seed too. Workers reuse one env across episodes, so
-            # without this the second episode continues the first one's
-            # stream and rerunning the same seed cannot reproduce the same
-            # requests.
+            # episode seed. Workers reuse one env across episodes, so without
+            # this the second episode continues the first one's stream and
+            # rerunning the same seed cannot reproduce the same requests.
             self.request_generator.seed(seed)
+        if start_seed is not None:
+            # The random start is driven by its own seed so request seed and
+            # start-day seed stay independent while remaining reproducible.
+            self.rng.seed(start_seed)
+        elif seed is not None:
+            self.rng.seed(seed)
         start_mode = self.config["env"].get("episode_start_mode", "fixed")
         if start_mode == "random_day" and seed is not None:
-            # Full-year H5 training: start each episode at a random day boundary
-            # so the agent sees every season instead of always re-running day 0.
             episode_steps = int(self.config["env"].get("episode_steps", 400))
             day_steps = int(self.config["env"].get("day_steps", 1440))
-            max_start = max(self.scenario.start_t, self.scenario.end_t - episode_steps)
-            max_day = max(0, (max_start - self.scenario.start_t) // day_steps)
-            self.t = self.scenario.start_t + self.rng.randint(0, max_day) * day_steps
+            activation_days = int(self.config["env"].get("activation_window_days", 0) or 0)
+            activation_end_day = int(self.config["env"].get("activation_window_end_day", -1) or -1)
+            if activation_days <= 0 and activation_end_day >= 0:
+                activation_start_day = int(self.config["env"].get("activation_window_start_day", 0) or 0)
+                activation_days = max(0, activation_end_day - activation_start_day)
+            if activation_days > 0:
+                # Activation window = allowed range for the episode start.
+                # The episode itself may run past the window end; the caller
+                # should configure scenario.time_limit.days large enough to
+                # include both the activation window and the episode horizon.
+                activation_start_day = int(self.config["env"].get("activation_window_start_day", 0) or 0)
+                window_start = int(self.scenario.start_t) + activation_start_day * day_steps
+                window_end = min(
+                    int(self.scenario.end_t),
+                    window_start + activation_days * day_steps,
+                )
+                self.t = self.rng.randint(window_start, max(window_start, window_end - 1))
+            else:
+                # Legacy full-year behavior: random day boundary, but avoid
+                # starting so late that the episode cannot fit before the end.
+                max_start = max(self.scenario.start_t, self.scenario.end_t - episode_steps)
+                max_day = max(0, (max_start - self.scenario.start_t) // day_steps)
+                self.t = self.scenario.start_t + self.rng.randint(0, max_day) * day_steps
         elif start_mode == "random_window" and seed is not None:
             episode_steps = int(self.config["env"].get("episode_steps", 400))
             max_start = max(self.scenario.start_t, self.scenario.end_t - episode_steps)
             self.t = self.rng.randint(self.scenario.start_t, max_start)
         else:
             self.t = self.scenario.start_t
+        episode_start_day = int(self.config["env"].get("episode_start_day", -1) or -1)
+        if episode_start_day >= 0:
+            day_steps = int(self.config["env"].get("day_steps", 1440))
+            self.t = self.scenario.start_t + episode_start_day * day_steps
+        if self.continuous and "activation_window_start_day" in self.config["env"]:
+            day_steps = int(self.config["env"].get("day_steps", 1440))
+            start_day = int(self.config["env"].get("activation_window_start_day", 0) or 0)
+            activation_days = int(self.config["env"].get("activation_window_days", 0) or 0)
+            activation_end_day = int(self.config["env"].get("activation_window_end_day", -1) or -1)
+            if activation_days <= 0 and activation_end_day >= 0:
+                activation_days = max(0, activation_end_day - start_day)
+            if activation_days > 0:
+                last_allowed = min(
+                    activation_days - 1,
+                    max(0, int(self.scenario.end_t / day_steps) - start_day - 1),
+                )
+                start_day += self.rng.randrange(last_allowed + 1)
+            self.t = self.scenario.start_t + start_day * day_steps
         self.qkp.reset(self.t)
         self.requests.reset()
         self.request_history.reset()
@@ -141,6 +182,16 @@ class QKDEnv:
         # (before the current step's arrivals), and the reward side never
         # recomputes it.
         relay_importance = self.graph_builder.last_relay_importance
+        baseline_reward = 0.0
+        if self.reward_fn.mode == "baseline_score":
+            active_edge_ids = self._active_edge_ids(masks)
+            baseline_scores = self._baseline_edge_scores(
+                state_before.edge_windows, active_edge_ids
+            )
+            baseline_reward = sum(
+                baseline_scores.get(edge_id, 0.0)
+                for edge_id in resolved.activated_edges
+            )
         reward_detail = self.reward_fn.compute(
             serve_result=serve_result,
             allocation=allocation,
@@ -155,6 +206,7 @@ class QKDEnv:
             switch_count=len(set(resolved.activated_edges) - set(self.last_activated_edges)),
             added_by_edge=allocation.added_by_edge,
             relay_importance=relay_importance,
+            baseline_reward=baseline_reward,
         )
         self.metrics.update(resolved, generated, serve_result, reward_detail, self.qkp, expired_requests)
 
@@ -174,10 +226,43 @@ class QKDEnv:
         self.t += 1
         self.steps += 1
         obs = self._build_observation()
-        terminated = self.steps >= int(self.config["env"]["episode_steps"])
+        episode_steps = int(self.config["env"]["episode_steps"])
+        terminated = (not self.continuous) and self.steps >= episode_steps
         terminate_on_year_end = bool(self.config["env"].get("terminate_on_year_end", True))
         truncated = self.t >= self.scenario.end_t if terminate_on_year_end else False
         return obs, reward_detail.total, terminated, truncated, self.metrics.last_info(reward_detail)
+
+    def _active_edge_ids(self, masks: dict[str, list[bool]]) -> list[str]:
+        """Edge ids legal for both endpoints at the current time step."""
+        if self._obs_cache is not None and self._obs_cache[0] == self.t:
+            return list(self._obs_cache[1].physical_edge_ids)
+        active_edges, _ = self.graph_builder._active_edges(
+            masks, self.mask_builder.last_flat_legal
+        )
+        return [edge.edge_id for edge in active_edges]
+
+    def _baseline_edge_scores(
+        self,
+        edge_windows: dict,
+        active_edge_ids: list[str],
+    ) -> dict[str, float]:
+        """Score every legal edge exactly like the dynamic BFS baseline."""
+        reward_cfg = self.config.get("reward", {})
+        rate_weight = float(reward_cfg.get("baseline_rate_weight", 1.0))
+        importance_weight = float(reward_cfg.get("baseline_importance_weight", 2.0))
+        rates = {
+            edge_id: float(edge_windows[edge_id].rates[0])
+            for edge_id in active_edge_ids
+        }
+        max_rate = max(rates.values(), default=1.0) or 1.0
+        importance = self.graph_builder.last_relay_importance
+        return {
+            edge_id: (
+                rate_weight * (rates[edge_id] / max_rate)
+                + importance_weight * float(importance.get(edge_id, 0.0))
+            )
+            for edge_id in active_edge_ids
+        }
 
     def _generate_keys(
         self, activated_edges: list[str], edge_windows: dict[str, EdgeWindow]

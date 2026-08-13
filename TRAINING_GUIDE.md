@@ -9,17 +9,17 @@
 
 ```powershell
 conda run -n pytorch python scripts/train_graph_mappo.py `
-  --configs train_curriculum.yaml `
+  --mode continuous `
   --run-name my_run `
-  --num-updates 400 `
+  --num-updates 30 `
   --seed 7 `
   --device cuda
 
 # demand_edge 模式：需求等待分桶 -> 物理边 relay 权重 -> Actor 直连
 conda run -n pytorch python scripts/train_graph_mappo.py `
-  --configs train_curriculum.yaml train_demand_edge.yaml `
+  --mode demand_edge `
   --run-name my_run_demand_edge `
-  --num-updates 400 `
+  --num-updates 30 `
   --seed 7 `
   --device cuda
 ```
@@ -28,7 +28,7 @@ conda run -n pytorch python scripts/train_graph_mappo.py `
 
 | 参数 | 含义 |
 | --- | --- |
-| `--configs` | 按顺序叠加的额外配置，后者覆盖前者。推荐 `train_curriculum.yaml` |
+| `--mode` | 训练模式，见 `configs/train_profiles.yaml` |
 | `--run-name` | 输出子目录名，结果写到 `outputs/<run-name>/` |
 | `--num-updates` | 总更新次数 |
 | `--seed` | 随机种子，训练与环境共用 |
@@ -37,19 +37,21 @@ conda run -n pytorch python scripts/train_graph_mappo.py `
 
 ### 1.3 配置加载顺序
 
-不传 `--configs` 时默认加载：
+不传 `--mode` 时默认使用 `continuous`：
 
 ```text
 default.yaml -> rate_provider.yaml -> features.yaml -> env_small.yaml
 -> graph_mappo.yaml -> train_mappo.yaml
 ```
 
-然后脚本会强制叠加 `env_full.yaml`（训练只读 H5 数据集），最后再按 `--configs` 的顺序叠加额外配置。
+然后脚本会强制叠加 `env_full.yaml`（训练只读 H5 数据集），再叠加 `train_profiles.yaml` 中对应模式。
 
-当前推荐课程配置：
+训练模式：
 
-- `configs/train_curriculum.yaml`：短局到长局的课程安排，`value_target: gae`
-- `configs/train_demand_edge.yaml`：`demand_edge` 模式（默认关 LSTM）
+- `continuous`：连续 30 天，随机起点后不 reset
+- `curriculum`：短局到长局的课程安排，`value_target: gae`
+- `fixed_day`：固定第 0 天跑满一天
+- `demand_edge`：`demand_edge` 模式（默认关 LSTM）
 
 ## 2. 训练结果保存在哪里
 
@@ -174,22 +176,39 @@ conda run -n pytorch python scripts/run_baselines.py `
 
 ## 5. 单独评估某个 RL Checkpoint
 
+测试参数默认写在 `configs/global.yaml`，一般不需要每次改命令行：
+
 ```powershell
-conda run -n pytorch python scripts/eval_checkpoints_quick.py `
-  outputs/train_curriculum_v1/checkpoint_update_000100.pt `
-  --seed 1234 --days 1 --out outputs/eval/ckpt_100.json
+conda run -n pytorch python scripts/eval_long_horizon.py
+```
+
+需要临时覆盖时再传参数，例如：
+
+```powershell
+conda run -n pytorch python scripts/eval_long_horizon.py `
+  --window-start-day 0 --window-end-day 30 `
+  --episode-days 1 --episodes 3
 ```
 
 结果是一个 JSON，包含：
 
 ```text
-update, steps, arrived_keys, served_keys, failed_keys,
-success_rate, arrived_requests, completed_requests,
-request_completion_rate, conflict_count, total_reward
+checkpoint, update, mean_success_rate,
+mean_request_completion_rate, mean_served_keys, mean_arrived_keys,
+min/max success_rate, per-episode details
 ```
 
-推荐使用固定 seed 对比不同 checkpoint 与基线，例如与 `greedy_rate` / `greedy_relay` 用同一个
-`--episode-start-mode fixed --time-limit-days 1` 比较。
+`configs/global.yaml` 参数说明：
+
+- `window.start_day`：激活窗口起始天
+- `window.end_day`：激活窗口结束天
+- `episode.days` / `episode.steps`：一局时长
+- `episodes` 或 `seeds`：局数 / 指定随机种子
+- `start_mode`：`random_day` 随机起点，`fixed` 固定起点
+- `checkpoints`：要评估的模型列表
+- `out`：结果 JSON 路径
+
+推荐用多个随机起点、多天评估不同 checkpoint，不要只看固定一天。
 
 ## 6. Baseline 结果保存在哪里
 

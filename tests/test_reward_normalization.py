@@ -14,10 +14,12 @@ def _reward_fn(
     generated_weight: float = 0.0,
     overflow_weight: float = 0.1,
     waiting_stock_weight: float = 0.01,
+    served_reference: float = 0.0,
 ) -> RewardFunction:
     return RewardFunction(
         {
             "served_weight": 1.0,
+            "served_reference": served_reference,
             "generated_weight": generated_weight,
             "failed_weight": 2.0,
             "waiting_weight": 0.05,
@@ -95,6 +97,16 @@ def test_reset_clears_window_with_floor_1() -> None:
     fn.reset()
     detail = _compute(fn, arrived=0.0, failed_keys=50000.0)
     assert detail.failed_penalty == pytest.approx(100000.0, rel=0.6)
+
+
+def test_fixed_served_reference_is_time_invariant() -> None:
+    fn = _reward_fn(served_reference=100000.0)
+    fn.reset()
+    early = _compute(fn, arrived=0.0, served_keys=20000.0)
+    for _ in range(20):
+        _compute(fn, arrived=100000.0, served_keys=0.0)
+    late = _compute(fn, arrived=100000.0, served_keys=20000.0)
+    assert early.served_reward == pytest.approx(late.served_reward, rel=1e-9)
 
 
 def test_generated_reward_scales_with_added_keys() -> None:

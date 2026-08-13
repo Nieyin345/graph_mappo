@@ -137,18 +137,30 @@ reward:
   mode: shaped
   # Success-service reward: reward actually served keys directly instead of the
   # sparse, mostly-zero cumulative success-rate delta.
-  served_weight: 5.0
+  served_weight: 20.0
+  # Normalize served keys by current queued demand (served + still-waiting),
+  # so reward reflects link-selection quality instead of raw request volume.
+  normalize_served_by_queue: true
   # Raw stored-key term (independent of demand path) -- leave 0; B1 uses the
   # relay-importance-weighted dense term below so we only reward keys that help
   # reach demand, not wholesale generation into the pools.
   generated_weight: 0.0
-  # Dense supply-side generation on high-importance relay paths (the main dense
-  # positive signal). weight is scaled for dense_reference=1e6 and real
-  # importance-weighted added_keys (~millions/step) to sit ~0.1-0.2/step.
-  dense_generation_importance_weight: 0.001
+  # Dense supply-side generation on high-importance relay paths. The old
+  # Dense should stay a secondary shaping signal. Empirically 1.0/1e5 made
+  # dense larger than served (0.1-0.24 vs 0.04-0.10 per step) and the policy
+  # started optimizing key generation instead of service. 0.2/1e6 keeps the
+  # term ~1e-3/step, meaningful but clearly below the served reward.
+  # Lower dense weight so served stays dominant even when queue backlog
+  # dilutes the served/queue ratio.
+  dense_generation_importance_weight: 0.02
   dense_low_importance_penalty: 0.01
   dense_reference: 1000000.0
-  # Demand-side penalties are divided by the arrived-demand window mean.
+  # Reward the share of generated keys stored on high-importance relay paths,
+  # not the absolute generated volume, so huge raw generation cannot dominate.
+  dense_normalize_by_added: true
+  # Demand-side terms are divided by a fixed served_reference so early and
+  # late slots reward the same served keys equally.
+  served_reference: 100000.0
   failed_weight: 0.01
   # Waiting penalty is disabled so the shaped reward does not push the policy
   # toward myopic queue reduction instead of successful service.
@@ -160,7 +172,7 @@ reward:
   expired_key_weight: 0.01
   penalty_reference: 1000000.0
   normalize_penalties_by_arrived: true
-  normalize_by_arrived_demand: true
+  normalize_by_arrived_demand: false
   normalize_window: 60
   normalize_floor: 10000.0
   clip_abs: 0.0

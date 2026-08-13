@@ -165,7 +165,13 @@ class RequestQueue:
 
         def _priority(req: KeyRequest):
             remaining = max(0.0, req.amount - req.served_amount)
-            return (req.deadline_t, routing.hop_distance(req.src_gs, req.dst_gs), remaining)
+            # FIFO by arrival first; deadline/route length only break ties.
+            return (
+                req.arrival_t,
+                req.deadline_t,
+                routing.hop_distance(req.src_gs, req.dst_gs),
+                remaining,
+            )
 
         for req in sorted(self.pending, key=_priority):
             served_now = routing.partial_consume_for_request(req, qkp, t)

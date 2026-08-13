@@ -27,12 +27,11 @@ train:
     clip_eps: 0.2
     # PPO eval chunk: one block-diagonal forward per chunk (pure
     # implementation-level kernel merging, same math).
-    batch_chunk: 256
+    batch_chunk: 512
     normalize_advantages: true
     # EMA update rate of the running return statistics used to standardize the
     # critic target. Set to 0 to keep the return scale fixed for generalized
     # training across time windows.
-    value_norm_tau: 0.0
     entropy_coef: 0.01
     value_coef: 0.5
     max_grad_norm: 0.5

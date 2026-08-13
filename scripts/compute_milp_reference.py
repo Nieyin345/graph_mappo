@@ -29,6 +29,11 @@ sys.path.insert(0, str(ROOT))
 from qkd_rl.baselines.ilp_optimal import ILPOptimalPolicy
 from qkd_rl.core.config import deep_merge, load_config
 from qkd_rl.env.factory import build_env_from_config, load_default_config
+from qkd_rl.evaluation.test_protocol import (
+    build_validation_env_config,
+    load_validation_profile,
+    resolve_seeds,
+)
 
 STEP_FIELDS = [
     "step", "t", "reward", "served_keys", "generated_keys", "failed_keys",
@@ -39,23 +44,60 @@ STEP_FIELDS = [
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Compute the MILP-optimal reference trajectory.")
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--out", type=str, default="outputs/milp_reference")
     parser.add_argument("--max-steps", type=int, default=0, help="0 = full window")
     parser.add_argument("--progress", type=int, default=1000)
+    parser.add_argument("--start-mode", choices=("fixed", "random_day"), default=None)
+    parser.add_argument("--window-start-day", type=int, default=None)
+    parser.add_argument("--window-days", type=int, default=None)
+    parser.add_argument("--episode-days", type=int, default=None, help="Episode length in days; 0 = full fixed window.")
+    parser.add_argument("--wait-ratio", type=float, default=None)
+    parser.add_argument("--service-slack", type=float, default=None)
     args = parser.parse_args()
 
-    config = load_default_config(ROOT)
-    config = deep_merge(config, load_config([ROOT / "configs" / "env_full.yaml"]))
-    config = deep_merge(config, load_config([ROOT / "configs" / "baselines.yaml"]))
-    config["rate_provider"]["provider"] = "h5"
-    # Deterministic full-window run: start at t=0 and rely on
-    # terminate_on_year_end (truncated at scenario.end_t) to stop.
-    config["env"]["episode_start_mode"] = "fixed"
-    config["env"]["episode_steps"] = int(10 ** 9)
+    profile = load_validation_profile(ROOT / "configs" / "global.yaml")
+    episode_days = args.episode_days
+    if episode_days is None:
+        episode_days = int(profile["episode_days"])
+    start_mode = args.start_mode or profile["start_mode"]
+    window_start_day = args.window_start_day
+    if window_start_day is None:
+        window_start_day = int(profile["window_start_day"])
+    window_days = args.window_days
+    if window_days is None:
+        window_days = int(profile["window_end_day"]) - window_start_day
+    seed = args.seed if args.seed is not None else resolve_seeds(profile)[0]
+
+    if episode_days > 0:
+        milp_profile = {
+            "window_start_day": window_start_day,
+            "window_end_day": window_start_day + window_days,
+            "episode_days": episode_days,
+            "episode_steps": 0,
+            "start_mode": start_mode,
+        }
+        config = build_validation_env_config(
+            milp_profile,
+            include_baselines=True,
+            episode_days=episode_days,
+            start_mode=start_mode,
+        )
+    else:
+        config = load_default_config(ROOT)
+        config = deep_merge(config, load_config([ROOT / "configs" / "env_full.yaml"]))
+        config = deep_merge(config, load_config([ROOT / "configs" / "baselines.yaml"]))
+        config["rate_provider"]["provider"] = "h5"
+        config["env"]["episode_start_mode"] = "fixed"
+        config["env"]["episode_steps"] = int(10 ** 9)
+        config["scenario"]["time_limit"]["days"] = window_start_day + window_days
 
     env = build_env_from_config(config)
     ilp_cfg = config["baselines"]["ilp_optimal"]
+    if args.wait_ratio is not None:
+        ilp_cfg["wait_urgency_tau_ratio"] = args.wait_ratio
+    if args.service_slack is not None:
+        ilp_cfg["service_slack_ratio"] = args.service_slack
     policy = ILPOptimalPolicy(
         slot_seconds=ilp_cfg.get("slot_seconds", 60.0),
         max_requests=ilp_cfg.get("max_requests", 64),
@@ -64,14 +106,25 @@ def main() -> None:
         time_limit_s=ilp_cfg.get("time_limit_s", 5.0),
         mip_rel_gap=ilp_cfg.get("mip_rel_gap", 0.0),
         switch_decay=ilp_cfg.get("switch_decay", 0.5),
+        importance_weight=ilp_cfg.get("importance_weight", 2.0),
+        max_path_links=ilp_cfg.get("max_path_links", 3),
+        hop_decay_factor=ilp_cfg.get("hop_decay_factor", 0.25),
+        wait_urgency_tau_ratio=ilp_cfg.get("wait_urgency_tau_ratio", 0.8),
+        service_slack_ratio=ilp_cfg.get("service_slack_ratio", 0.05),
+        ignore_consumption=ilp_cfg.get("ignore_consumption", False),
     )
-    obs = env.reset(seed=args.seed)
+    obs = env.reset(
+        seed=seed,
+        start_seed=int(profile.get("start_seed", 0)) + seed,
+    )
 
     out_dir = Path(ROOT) / args.out
     out_dir.mkdir(parents=True, exist_ok=True)
     steps_path = out_dir / "steps.csv"
 
-    max_steps = args.max_steps or (env.scenario.end_t - env.scenario.start_t)
+    max_steps = args.max_steps or (
+        episode_days * 1440 if episode_days > 0 else env.scenario.end_t - env.scenario.start_t
+    )
     window_len = env.scenario.end_t - env.scenario.start_t
     print(
         "scenario: {} nodes, {} edges, window {}->{} ({} slots), max_steps={}".format(
@@ -136,7 +189,7 @@ def main() -> None:
         json.dump(payload, f, indent=2, ensure_ascii=False)
 
     metadata = {
-        "seed": args.seed,
+        "seed": seed,
         "scenario": {
             "mode": config["scenario"]["mode"],
             "active_nodes": config["scenario"].get("active_nodes", {}),
@@ -148,7 +201,7 @@ def main() -> None:
             "n_edges": len(env.scenario.edges),
             "node_ids": env.scenario.node_ids,
         },
-        "milp": {k: ilp_cfg.get(k) for k in ("slot_seconds", "max_requests", "max_paths_per_request", "max_path_hops", "time_limit_s", "mip_rel_gap", "switch_decay")},
+        "milp": {k: ilp_cfg.get(k) for k in ("slot_seconds", "max_requests", "max_paths_per_request", "max_path_hops", "time_limit_s", "mip_rel_gap", "switch_decay", "importance_weight", "max_path_links", "hop_decay_factor", "wait_urgency_tau_ratio", "service_slack_ratio", "ignore_consumption")},
         "steps_computed": n_steps,
         "wall_seconds": round(wall, 2),
         "steps_per_second": round(n_steps / wall, 3) if wall > 0 else 0.0,

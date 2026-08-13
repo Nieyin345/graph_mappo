@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 import time
 from dataclasses import asdict, dataclass
@@ -20,70 +21,6 @@ def _reset_module(module: torch.nn.Module) -> None:
     """Re-initialize a module's parameters in place (identity preserved)."""
     if hasattr(module, "reset_parameters"):
         module.reset_parameters()
-
-
-class ValueNormalizer:
-    """Running mean/std normalization of GAE returns (official MAPPO style).
-
-    The critic is trained to predict standardized returns (mean 0, std 1) so
-    the value target stays well-conditioned regardless of the reward scale.
-    During rollout the critic's standardized output is denormalized back into
-    the raw scale before it is used as the GAE bootstrap.
-    """
-
-    def __init__(self, device: torch.device, tau: float = 0.05):
-        self.mean = 0.0
-        self.std = 1.0
-        self.count = 0
-        self.tau = float(tau)
-        self.device = torch.device(device)
-
-    def update(self, returns: torch.Tensor) -> None:
-        """Exponential-moving-average update of the return statistics.
-
-        The first batch seeds the statistics; afterwards each update moves the
-        running mean/std by ``tau`` toward the new batch statistics. A full
-        merge (the previous implementation) let one biased rollout permanently
-        drag the running mean: because GAE returns are ``V + advantage`` and
-        ``V`` is denormalized from the running mean, a biased mean made every
-        later return more negative, a positive feedback loop that drifted the
-        training return from ~-50 to ~-1100 while the true (bootstrap-free)
-        return stayed ~-200. EMA keeps the target distribution stable so the
-        critic can actually fit it.
-        """
-        if returns.numel() == 0:
-            return
-        m = float(returns.mean())
-        s = float(returns.std(correction=0).clamp_min(1.0e-6))
-        n = returns.numel()
-        if self.count == 0:
-            self.mean, self.std, self.count = m, s, n
-            return
-        self.mean = (1.0 - self.tau) * self.mean + self.tau * m
-        self.std = (1.0 - self.tau) * self.std + self.tau * s
-        self.count += n
-
-    def normalize(self, x: torch.Tensor) -> torch.Tensor:
-        return (x - self.mean) / self.std
-
-    def denormalize(self, x: torch.Tensor) -> torch.Tensor:
-        return self.mean + self.std * x
-
-    def state_dict(self) -> dict[str, float]:
-        return {
-            "mean": float(self.mean),
-            "std": float(self.std),
-            "count": int(self.count),
-            "tau": float(self.tau),
-        }
-
-    def load_state_dict(self, state: dict | None) -> None:
-        if not state:
-            return
-        self.mean = float(state.get("mean", self.mean))
-        self.std = float(state.get("std", self.std)) or 1.0
-        self.count = int(state.get("count", self.count))
-        self.tau = float(state.get("tau", self.tau))
 
 
 @dataclass
@@ -169,14 +106,36 @@ class MAPPOTrainer:
         self.log_interval = int(log_cfg.get("log_interval", 1))
         self.eval_interval = int(log_cfg.get("eval_interval", 0))
         self.eval_episodes = int(log_cfg.get("eval_episodes", 4))
+        self.eval_steps = int(log_cfg.get("eval_steps", 0) or 0)
         self._rollout_pool = None
+        self._continuous_obs = None
+        self._continuous_obs_list = None
+        self._replay_buffers: list[list[RolloutStep]] = []
+        self.replay_days = int(train_cfg.get("replay_days", 0) or 0)
+        self.continuous_session_updates = 0
+        if getattr(env, "continuous", False):
+            session_days = int(train_cfg.get("continuous_session_days", 0) or 0)
+            if session_days > 0:
+                day_steps = int(config["env"].get("day_steps", 1440))
+                rollout_steps = int(train_cfg.get("rollout_steps", 1440))
+                self.continuous_session_updates = max(
+                    1, math.ceil(session_days * day_steps / max(1, rollout_steps))
+                )
+        self.episode_days_min = int(train_cfg.get("episode_days_min", 1) or 1)
+        self.episode_days_max = int(train_cfg.get("episode_days_max", 1) or 1)
+        if self.episode_days_max < self.episode_days_min:
+            self.episode_days_max = self.episode_days_min
+        if getattr(env, "continuous", False) and self.episodes_per_update != 1:
+            raise ValueError("continuous RL training requires episodes_per_update=1.")
         # Lockstep batched-rollout envs (episodes_per_update instances), built
         # lazily so single-episode runs never pay the construction cost.
         self._rollout_envs = None
         self._eval_envs = None
-        self.value_norm = ValueNormalizer(
-            self.device, tau=float(train_cfg.get("ppo", {}).get("value_norm_tau", 0.05))
-        )
+        self.validation_cfg = config.get("validation", {}) or {}
+        self._validation_envs = None
+        self._validation_seeds: list[int] = []
+        self.best_validation_success = -float("inf")
+        self._rollout_debug: dict[str, float] = {}
         # Critic target mode: "gae" (default) or "mc" (bootstrap-free returns,
         # see RolloutBuffer). "mc" breaks the value-normalizer feedback loop
         # that drifted GAE returns to ~5x the true return scale.
@@ -207,7 +166,14 @@ class MAPPOTrainer:
         self.episodes_per_update = new_episodes
 
     # ------------------------------------------------------------------ rollout
+    def _sample_episode_steps(self) -> int:
+        """Sample an episode length in whole days (used by random_episode)."""
+        day_steps = int(self.config["env"].get("day_steps", 1440))
+        days = self.rng.randint(self.episode_days_min, self.episode_days_max)
+        return days * day_steps
+
     def collect_rollout(self) -> RolloutBuffer:
+        self._reset_rollout_debug()
         n_workers = int(self.config["train"].get("n_rollout_workers", 1))
         if n_workers <= 1:
             if (
@@ -223,8 +189,14 @@ class MAPPOTrainer:
             self._rollout_pool = RolloutWorkerPool(self.config, worker_device, n_workers)
         base_seed = int(self.config["seed"]["env_seed"]) + self.update_count * self.episodes_per_update
         seeds = [base_seed + ep for ep in range(self.episodes_per_update)]
+        if self.env.continuous:
+            episode_steps_list = [self.rollout_steps] * len(seeds)
+        else:
+            episode_steps_list = [self._sample_episode_steps() for _ in seeds]
         weights = {k: v.detach().cpu() for k, v in self.model.state_dict().items()}
-        results = self._rollout_pool.collect(weights, seeds, self.rollout_steps, self.value_norm.mean, self.value_norm.std)
+        results = self._rollout_pool.collect(
+            weights, seeds, self.rollout_steps, episode_steps_list
+        )
         buffer = RolloutBuffer(self.gamma, self.gae_lambda, self.device, value_target=self.value_target)
         episode_rewards: list[float] = []
         episode_summaries: list[dict] = []
@@ -236,6 +208,91 @@ class MAPPOTrainer:
         self.last_episode_summaries = episode_summaries
         return buffer
 
+    def _reset_rollout_debug(self) -> None:
+        self._rollout_debug = {
+            "steps": 0.0,
+            "activated_edges": 0.0,
+            "generated_keys": 0.0,
+            "served_keys": 0.0,
+            "failed_keys": 0.0,
+            "waiting_keys": 0.0,
+            "qkp_utilization": 0.0,
+            "conflict_count": 0.0,
+            "reward_total": 0.0,
+            "reward_served": 0.0,
+            "reward_generated": 0.0,
+            "reward_dense": 0.0,
+            "reward_failed": 0.0,
+            "reward_waiting": 0.0,
+            "reward_switch": 0.0,
+            "reward_expired": 0.0,
+            "reward_conflict": 0.0,
+        }
+
+    def _update_rollout_debug(self, info: dict, activated_count: int) -> None:
+        debug = self._rollout_debug
+        debug["steps"] += 1.0
+        debug["activated_edges"] += float(activated_count)
+        debug["generated_keys"] += float(info.get("generated_keys", 0.0))
+        debug["served_keys"] += float(info.get("served_keys", 0.0))
+        debug["failed_keys"] += float(info.get("failed_keys", 0.0))
+        debug["waiting_keys"] += float(info.get("waiting_keys", 0.0))
+        debug["qkp_utilization"] += float(info.get("qkp_utilization", 0.0))
+        debug["conflict_count"] += float(info.get("conflict_count", 0.0))
+        detail = info.get("reward_detail")
+        if detail is not None:
+            debug["reward_total"] += float(detail.total)
+            debug["reward_served"] += float(detail.served_reward)
+            debug["reward_generated"] += float(detail.generated_reward)
+            debug["reward_dense"] += float(detail.dense_reward)
+            debug["reward_failed"] += float(detail.failed_penalty)
+            debug["reward_waiting"] += float(detail.waiting_penalty)
+            debug["reward_switch"] += float(detail.switch_penalty)
+            debug["reward_expired"] += float(detail.expired_key_penalty)
+            debug["reward_conflict"] += float(detail.conflict_penalty)
+
+    def _rollout_debug_record(self, stats: UpdateStats) -> dict:
+        debug = dict(self._rollout_debug)
+        n = max(1.0, float(debug.get("steps", 0.0)))
+        means = {
+            "update": stats.update,
+            "steps": int(debug.get("steps", 0.0)),
+            "mean_activated_edges": debug.get("activated_edges", 0.0) / n,
+            "mean_generated_keys": debug.get("generated_keys", 0.0) / n,
+            "mean_served_keys": debug.get("served_keys", 0.0) / n,
+            "mean_failed_keys": debug.get("failed_keys", 0.0) / n,
+            "mean_waiting_keys": debug.get("waiting_keys", 0.0) / n,
+            "mean_qkp_utilization": debug.get("qkp_utilization", 0.0) / n,
+            "mean_conflict_count": debug.get("conflict_count", 0.0) / n,
+            "mean_reward": debug.get("reward_total", 0.0) / n,
+            "mean_reward_served": debug.get("reward_served", 0.0) / n,
+            "mean_reward_generated": debug.get("reward_generated", 0.0) / n,
+            "mean_reward_dense": debug.get("reward_dense", 0.0) / n,
+            "mean_reward_failed": debug.get("reward_failed", 0.0) / n,
+            "mean_reward_waiting": debug.get("reward_waiting", 0.0) / n,
+            "mean_reward_switch": debug.get("reward_switch", 0.0) / n,
+            "mean_reward_expired": debug.get("reward_expired", 0.0) / n,
+            "mean_reward_conflict": debug.get("reward_conflict", 0.0) / n,
+            "actor_loss": stats.actor_loss,
+            "critic_loss": stats.critic_loss,
+            "entropy": stats.entropy,
+            "kl": stats.kl,
+            "mean_ratio": stats.mean_ratio,
+            "actor_grad_norm": stats.actor_grad_norm,
+            "mean_return": stats.mean_return,
+            "mean_abs_advantage": stats.mean_abs_advantage,
+            "mean_success_rate": stats.mean_success_rate,
+        }
+        return means
+
+    def _write_rollout_debug(self, stats: UpdateStats) -> None:
+        if not self._rollout_debug.get("steps", 0.0):
+            return
+        record = self._rollout_debug_record(stats)
+        path = self.output_dir / "rollout_debug.jsonl"
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
     def _collect_rollout_serial(self) -> RolloutBuffer:
         buffer = RolloutBuffer(self.gamma, self.gae_lambda, self.device, value_target=self.value_target)
         self.model.eval()
@@ -243,7 +300,12 @@ class MAPPOTrainer:
         episode_rewards: list[float] = []
         episode_summaries: list[dict] = []
         for ep_idx in range(self.episodes_per_update):
-            obs = self.env.reset(seed=base_seed + ep_idx)
+            if self.env.continuous and self._continuous_obs is not None:
+                obs = self._continuous_obs
+            else:
+                if not self.env.continuous:
+                    self.env.config["env"]["episode_steps"] = self._sample_episode_steps()
+                obs = self.env.reset(seed=base_seed + ep_idx)
             ep_reward = 0.0
             terminated = False
             truncated = False
@@ -251,8 +313,8 @@ class MAPPOTrainer:
             while steps < self.rollout_steps:
                 with torch.no_grad():
                     step = self.policy.act(obs)
-                value_denorm = self.value_norm.denormalize(step.value.detach())
-                next_obs, reward, terminated, truncated, _info = self.env.step(
+                raw_value = step.value.detach()
+                next_obs, reward, terminated, truncated, info = self.env.step(
                     step.actions,
                     step.action_scores,
                     edge_scores=step.edge_scores,
@@ -262,6 +324,7 @@ class MAPPOTrainer:
                         else list(step.matched_edges or [])
                     ),
                 )
+                self._update_rollout_debug(info, len(self.env.last_activated_edges))
                 if self.resolver_mode == "max_weight_matching":
                     # max-weight is a deterministic resolver action, so the PPO
                     # target follows the matching the environment executed.
@@ -283,7 +346,7 @@ class MAPPOTrainer:
                         actions=step.actions,
                         log_probs={node: lp.detach() for node, lp in step.log_probs.items()},
                         entropies={node: ent.detach() for node, ent in step.entropies.items()},
-                        value=value_denorm,
+                        value=raw_value,
                         reward=float(reward),
                         terminated=terminated,
                         truncated=truncated,
@@ -301,10 +364,12 @@ class MAPPOTrainer:
                 last_value = torch.zeros((), dtype=torch.float32, device=self.device)
             else:
                 with torch.no_grad():
-                    last_value = self.value_norm.denormalize(self.policy.act(obs).value.detach())
+                    last_value = self.policy.act(obs).value.detach()
             buffer.finish_episode(last_value)
             episode_rewards.append(ep_reward)
             episode_summaries.append(self.env.metrics.episode_summary())
+            if self.env.continuous:
+                self._continuous_obs = None if truncated else obs
         self.last_episode_rewards = episode_rewards
         self.last_episode_summaries = episode_summaries
         return buffer
@@ -323,8 +388,13 @@ class MAPPOTrainer:
 
             self._rollout_envs = [build_env_from_config(self.config) for _ in range(n_ep)]
         envs = self._rollout_envs
+        for env in envs:
+            env.config["env"]["episode_steps"] = self._sample_episode_steps()
         base_seed = int(self.config["seed"]["env_seed"]) + self.update_count * n_ep
-        obs_list = [env.reset(seed=base_seed + i) for i, env in enumerate(envs)]
+        if envs[0].continuous and self._continuous_obs_list is not None:
+            obs_list = list(self._continuous_obs_list)
+        else:
+            obs_list = [env.reset(seed=base_seed + i) for i, env in enumerate(envs)]
         ep_steps: list[list[RolloutStep]] = [[] for _ in range(n_ep)]
         ep_rewards = [0.0] * n_ep
         done = [False] * n_ep
@@ -338,8 +408,8 @@ class MAPPOTrainer:
                 if done[i]:
                     continue
                 step = step_outs[i]
-                value_denorm = self.value_norm.denormalize(step.value.detach())
-                next_obs, reward, term, trunc, _info = env.step(
+                raw_value = step.value.detach()
+                next_obs, reward, term, trunc, info = env.step(
                     step.actions,
                     step.action_scores,
                     edge_scores=step.edge_scores,
@@ -349,6 +419,7 @@ class MAPPOTrainer:
                         else list(step.matched_edges or [])
                     ),
                 )
+                self._update_rollout_debug(info, len(env.last_activated_edges))
                 if self.resolver_mode == "max_weight_matching":
                     matched_edges = list(env.last_activated_edges)
                     joint_lp, joint_entropy = self.policy.log_prob_entropy_for_matching(
@@ -364,7 +435,7 @@ class MAPPOTrainer:
                         actions=step.actions,
                         log_probs={node: lp.detach() for node, lp in step.log_probs.items()},
                         entropies={node: ent.detach() for node, ent in step.entropies.items()},
-                        value=value_denorm,
+                        value=raw_value,
                         reward=float(reward),
                         terminated=term,
                         truncated=trunc,
@@ -389,17 +460,30 @@ class MAPPOTrainer:
                 last_value = torch.zeros((), dtype=torch.float32, device=self.device)
             else:
                 with torch.no_grad():
-                    last_value = self.value_norm.denormalize(self.policy.act(obs_list[i]).value.detach())
+                    last_value = self.policy.act(obs_list[i]).value.detach()
             for step in ep_steps[i]:
                 buffer.add(step)
             buffer.finish_episode(last_value)
             episode_rewards.append(ep_rewards[i])
             episode_summaries.append(env.metrics.episode_summary())
+        if envs[0].continuous:
+            self._continuous_obs_list = (
+                None
+                if any(truncated[i] for i in range(n_ep))
+                else [obs_list[i] for i in range(n_ep)]
+            )
         self.last_episode_rewards = episode_rewards
         self.last_episode_summaries = episode_summaries
         return buffer
 
     # -------------------------------------------------------------------- update
+    def _remember_replay(self, buffer: RolloutBuffer) -> None:
+        if self.replay_days <= 0:
+            return
+        self._replay_buffers.append(list(buffer.steps))
+        if len(self._replay_buffers) > self.replay_days:
+            self._replay_buffers.pop(0)
+
     def update(self, buffer: RolloutBuffer) -> UpdateStats:
         ppo = self.ppo_cfg
         epochs = int(ppo["epochs"])
@@ -412,13 +496,11 @@ class MAPPOTrainer:
         target_kl = float(ppo.get("target_kl", 0.0)) or None
 
         self.model.train()
-        # Update the running return statistics and attach standardized critic
-        # targets so the value function is well-conditioned at any reward scale.
-        if buffer.steps:
-            all_returns = torch.stack([step.returns.to(self.device) for step in buffer.steps])
-            self.value_norm.update(all_returns)
-            for step in buffer.steps:
-                step.returns_norm = self.value_norm.normalize(step.returns.to(self.device)).detach()
+        replay_steps = [
+            step
+            for replay in self._replay_buffers
+            for step in replay
+        ]
         total_actor = 0.0
         total_critic = 0.0
         total_entropy = 0.0
@@ -428,7 +510,16 @@ class MAPPOTrainer:
         total_batches = 0
         stop_for_kl = False
         for _epoch in range(epochs):
-            for batch in buffer.sample(minibatch_size, self.rng):
+            if replay_steps:
+                indices = list(range(len(replay_steps)))
+                self.rng.shuffle(indices)
+                batch_iter = (
+                    [replay_steps[idx] for idx in indices[start : start + minibatch_size]]
+                    for start in range(0, len(replay_steps), minibatch_size)
+                )
+            else:
+                batch_iter = buffer.sample(minibatch_size, self.rng)
+            for batch in batch_iter:
                 actor_loss, critic_loss, entropy_mean, kl_mean, ratio_mean = self._loss_for_batch(
                     batch,
                     clip_eps=clip_eps,
@@ -499,6 +590,8 @@ class MAPPOTrainer:
             mean = stacked.mean()
             std = stacked.std().clamp_min(1.0e-6)
             advantages = [(adv - mean) / std for adv in advantages]
+        returns_batch = torch.stack([step.returns.to(self.device) for step in batch])
+        critic_beta = torch.clamp(returns_batch.std(), min=1.0).detach()
 
         actor_loss = torch.zeros((), dtype=torch.float32, device=self.device)
         critic_loss = torch.zeros((), dtype=torch.float32, device=self.device)
@@ -510,42 +603,42 @@ class MAPPOTrainer:
         # The math is identical to per-step evaluation; only the CUDA kernels
         # are merged into larger batched ones.
         chunk_size = int(self.config["train"].get("ppo", {}).get("batch_chunk", 256))
-        batched_results: list[tuple[dict, dict, torch.Tensor]] = []
+        n_steps = 0
         for start in range(0, len(batch), chunk_size):
             chunk = batch[start:start + chunk_size]
-            batched_results.extend(
-                self.policy.evaluate_actions_batched(
-                    [step.obs for step in chunk],
-                    [step.actions for step in chunk],
-                    [list(step.matched_edges or []) for step in chunk],
-                )
+            chunk_advantages = advantages[start:start + chunk_size]
+            batched_results = self.policy.evaluate_actions_batched(
+                [step.obs for step in chunk],
+                [step.actions for step in chunk],
+                [list(step.matched_edges or []) for step in chunk],
             )
-        n_steps = 0
-        for step, adv, (log_probs, entropies, value) in zip(batch, advantages, batched_results):
-            node_ids = step.obs.node_ids
-            if node_ids:
-                # PPO is now evaluated on the whole matching action, not on
-                # the per-node copies of that same scalar.
-                new_lp = torch.stack([log_probs[node_id] for node_id in node_ids])[0]
-                old_lp = (
-                    step.joint_log_prob.to(self.device)
-                    if step.joint_log_prob is not None
-                    else torch.stack([step.log_probs[node_id].to(self.device) for node_id in node_ids])[0]
+            for step, adv, (log_probs, entropies, value) in zip(chunk, chunk_advantages, batched_results):
+                node_ids = step.obs.node_ids
+                if node_ids:
+                    # PPO is now evaluated on the whole matching action, not on
+                    # the per-node copies of that same scalar.
+                    new_lp = torch.stack([log_probs[node_id] for node_id in node_ids])[0]
+                    old_lp = (
+                        step.joint_log_prob.to(self.device)
+                        if step.joint_log_prob is not None
+                        else torch.stack([step.log_probs[node_id].to(self.device) for node_id in node_ids])[0]
+                    )
+                    ratios = torch.exp(new_lp - old_lp)
+                    surr1 = ratios * adv
+                    surr2 = torch.clamp(ratios, 1.0 - clip_eps, 1.0 + clip_eps) * adv
+                    actor_loss = actor_loss - torch.min(surr1, surr2)
+                    entropy_sum = entropy_sum + torch.stack([ent for ent in entropies.values()])[0]
+                    kl_sum = kl_sum + (ratios - 1.0 - (new_lp - old_lp))
+                    ratio_sum = ratio_sum + ratios
+                returns_target = step.returns.to(self.device)
+                # Huber loss keeps the critic robust to high-reward outlier
+                # episodes; the beta scales with the current batch so the
+                # loss stays comparable across different return magnitudes.
+                critic_loss = critic_loss + torch.nn.functional.smooth_l1_loss(
+                    value, returns_target, beta=critic_beta
                 )
-                ratios = torch.exp(new_lp - old_lp)
-                surr1 = ratios * adv
-                surr2 = torch.clamp(ratios, 1.0 - clip_eps, 1.0 + clip_eps) * adv
-                actor_loss = actor_loss - torch.min(surr1, surr2)
-                entropy_sum = entropy_sum + torch.stack([ent for ent in entropies.values()])[0]
-                kl_sum = kl_sum + (ratios - 1.0 - (new_lp - old_lp))
-                ratio_sum = ratio_sum + ratios
-            returns_target = (
-                step.returns_norm
-                if getattr(step, "returns_norm", None) is not None
-                else step.returns.to(self.device)
-            )
-            critic_loss = critic_loss + torch.nn.functional.mse_loss(value, returns_target)
-            n_steps += 1
+                n_steps += 1
+            del batched_results, chunk_advantages
         actor_loss = actor_loss / n_steps
         critic_loss = (critic_loss / n_steps) * value_coef
         return (
@@ -579,6 +672,10 @@ class MAPPOTrainer:
                         build_env_from_config(self.config) for _ in range(num_episodes)
                     ]
                 envs = self._eval_envs
+                if self.eval_steps > 0:
+                    for env in envs:
+                        env.continuous = False
+                        env.config["env"]["episode_steps"] = self.eval_steps
                 obs_list = [env.reset(seed=base_seed + i) for i, env in enumerate(envs)]
                 ep_rewards = [0.0] * num_episodes
                 done = [False] * num_episodes
@@ -606,24 +703,33 @@ class MAPPOTrainer:
                     success_rates.append(summary.get("success_rate", 0.0))
                     served.append(summary.get("served_keys", 0.0))
             else:
-                obs = self.env.reset(seed=base_seed)
-                ep_reward = 0.0
-                done = False
-                while not done:
-                    step = self.policy.act(obs, deterministic=True)
-                    obs, reward, terminated, truncated, _info = self.env.step(
-                        step.actions,
-                        step.action_scores,
-                        edge_scores=step.edge_scores,
-                        expected_matched_edges=(
-                            None
-                            if self.resolver_mode == "max_weight_matching"
-                            else list(step.matched_edges or [])
-                        ),
-                    )
-                    ep_reward += float(reward)
-                    done = terminated or truncated
-                summary = self.env.metrics.episode_summary()
+                old_continuous = self.env.continuous
+                old_episode_steps = int(self.env.config["env"]["episode_steps"])
+                if self.eval_steps > 0:
+                    self.env.continuous = False
+                    self.env.config["env"]["episode_steps"] = self.eval_steps
+                try:
+                    obs = self.env.reset(seed=base_seed)
+                    ep_reward = 0.0
+                    done = False
+                    while not done:
+                        step = self.policy.act(obs, deterministic=True)
+                        obs, reward, terminated, truncated, _info = self.env.step(
+                            step.actions,
+                            step.action_scores,
+                            edge_scores=step.edge_scores,
+                            expected_matched_edges=(
+                                None
+                                if self.resolver_mode == "max_weight_matching"
+                                else list(step.matched_edges or [])
+                            ),
+                        )
+                        ep_reward += float(reward)
+                        done = terminated or truncated
+                    summary = self.env.metrics.episode_summary()
+                finally:
+                    self.env.continuous = old_continuous
+                    self.env.config["env"]["episode_steps"] = old_episode_steps
                 rewards.append(ep_reward)
                 success_rates.append(summary.get("success_rate", 0.0))
                 served.append(summary.get("served_keys", 0.0))
@@ -632,6 +738,91 @@ class MAPPOTrainer:
             "mean_reward": sum(rewards) / max(1, len(rewards)),
             "mean_success_rate": sum(success_rates) / max(1, len(success_rates)),
             "mean_served_keys": sum(served) / max(1, len(served)),
+        }
+
+    # ----------------------------------------------------------- validation eval
+    @property
+    def validation_enabled(self) -> bool:
+        window = self.validation_cfg.get("window", {}) or {}
+        return window.get("start_day") is not None and window.get("end_day") is not None
+
+    def _build_validation_envs(self) -> list[QKDEnv]:
+        if self._validation_envs is not None:
+            return self._validation_envs
+
+        import copy
+
+        window = self.validation_cfg.get("window", {}) or {}
+        start_day = int(window.get("start_day", 0))
+        end_day = int(window.get("end_day", 365))
+        seeds = [int(s) for s in (self.validation_cfg.get("request_seeds", []) or [])]
+        if not seeds:
+            seeds = list(range(7, 7 + int(self.validation_cfg.get("episodes", 3) or 3)))
+        episode_days = int(self.validation_cfg.get("episode_days", 1) or 1)
+        day_steps = int(self.config["env"].get("day_steps", 1440))
+        episode_steps = episode_days * day_steps
+
+        config = copy.deepcopy(self.config)
+        config["env"]["episode_start_mode"] = "random_day"
+        config["env"]["episode_steps"] = episode_steps
+        config["env"]["continuous"] = False
+        config["env"]["activation_window_start_day"] = start_day
+        config["env"]["activation_window_end_day"] = end_day
+        config["env"]["activation_window_days"] = max(0, end_day - start_day)
+        config["scenario"]["time_limit"]["days"] = end_day + max(
+            1, math.ceil(episode_steps / day_steps)
+        )
+        config["seed"]["env_seed"] = seeds[0]
+
+        from qkd_rl.env.factory import build_env_from_config
+
+        self._validation_seeds = seeds
+        self._validation_envs = [build_env_from_config(config) for _ in seeds]
+        return self._validation_envs
+
+    def evaluate_validation(self) -> dict:
+        """Deterministic rollouts on the held-out validation window."""
+        envs = self._build_validation_envs()
+        self.model.eval()
+        start_seed_base = int(self.validation_cfg.get("start_seed", 0) or 0)
+        obs_list = [
+            env.reset(seed=seed, start_seed=start_seed_base + seed)
+            for env, seed in zip(envs, self._validation_seeds)
+        ]
+        rewards = [0.0] * len(envs)
+        done = [False] * len(envs)
+        with torch.no_grad():
+            while not all(done):
+                outs = self.policy.act_batched(obs_list, deterministic=True)
+                for i, env in enumerate(envs):
+                    if done[i]:
+                        continue
+                    obs, reward, terminated, truncated, _info = env.step(
+                        outs[i].actions,
+                        outs[i].action_scores,
+                        edge_scores=outs[i].edge_scores,
+                        expected_matched_edges=(
+                            None
+                            if self.resolver_mode == "max_weight_matching"
+                            else list(outs[i].matched_edges or [])
+                        ),
+                    )
+                    rewards[i] += float(reward)
+                    obs_list[i] = obs
+                    done[i] = terminated or truncated
+        summaries = [env.metrics.episode_summary() for env in envs]
+        self.model.train()
+        return {
+            "mean_reward": sum(rewards) / max(1, len(rewards)),
+            "mean_success_rate": sum(
+                summary.get("success_rate", 0.0) for summary in summaries
+            )
+            / max(1, len(summaries)),
+            "mean_served_keys": sum(
+                summary.get("served_keys", 0.0) for summary in summaries
+            )
+            / max(1, len(summaries)),
+            "seeds": list(self._validation_seeds),
         }
 
     # ------------------------------------------------------------------- control
@@ -652,12 +843,34 @@ class MAPPOTrainer:
                 stats.elapsed_s = update_finished - iteration_started
                 self.update_count += 1
                 stats.update = self.update_count
+                self._remember_replay(buffer)
+                if (
+                    self.env.continuous
+                    and self.continuous_session_updates > 0
+                    and self.update_count % self.continuous_session_updates == 0
+                ):
+                    self._continuous_obs = None
+                    self._continuous_obs_list = None
+                self._write_rollout_debug(stats)
                 self._log(stats, log_path)
                 if self.update_count % self.checkpoint_interval == 0 or self.update_count == target_updates:
                     self.save_checkpoint(self.output_dir / f"checkpoint_update_{self.update_count:06d}.pt", stats)
                 if self.eval_interval and self.update_count % self.eval_interval == 0:
                     eval_stats = self.evaluate(self.eval_episodes)
                     self._append_log({"eval": eval_stats}, log_path)
+                    if self.validation_enabled:
+                        val_stats = self.evaluate_validation()
+                        self._append_log({"eval_validation": val_stats}, log_path)
+                        val_success = float(val_stats["mean_success_rate"])
+                        if val_success > self.best_validation_success:
+                            self.best_validation_success = val_success
+                            self.save_checkpoint(
+                                self.output_dir / "checkpoint_best_val.pt", stats
+                            )
+                            print(
+                                f"new best validation success={val_success:.4f} "
+                                "-> checkpoint_best_val.pt"
+                            )
         finally:
             self.shutdown()
         return {"last_stats": asdict(self.last_stats) if self.last_stats else None}
@@ -682,7 +895,6 @@ class MAPPOTrainer:
             optimizer=self.optimizer,
             config=self.config,
             metrics=asdict(stats) if stats is not None else None,
-            trainer_state={"value_norm": self.value_norm.state_dict()},
         )
         return path
 
@@ -697,9 +909,14 @@ class MAPPOTrainer:
             self.model.critic.value_head.apply(_reset_module)
             print("reward config differs from checkpoint: re-initialized critic value head")
         if data.optimizer_state is not None:
-            self.optimizer.load_state_dict(data.optimizer_state)
-        if data.trainer_state is not None:
-            self.value_norm.load_state_dict(data.trainer_state.get("value_norm"))
+            try:
+                self.optimizer.load_state_dict(data.optimizer_state)
+            except ValueError as exc:
+                # Pretraining checkpoints may use a single-parameter optimizer
+                # while the trainer uses encoder/actor/critic groups. The
+                # model weights are what matter for warm-starting; keep a
+                # freshly initialized optimizer in that case.
+                print(f"optimizer state incompatible ({exc}); starting optimizer fresh")
         self.update_count = data.update
         if data.config is not None:
             # Keep the CURRENT training config (env scenario, train schedule,

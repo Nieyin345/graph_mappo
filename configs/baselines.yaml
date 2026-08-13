@@ -27,6 +27,21 @@ baselines:
     keep_weight: 0.5
     deadline_window: 60.0
 
+  # V3: current BFS baseline. Uses the shared dynamic relay importance that
+  # includes stocked-but-unavailable edges, with the tuned importance weight.
+  greedy_relay_diffusion_v3:
+    enabled: true
+    rate_weight: 1.0
+    importance_weight: 10.0
+    completion_weight: 1.0
+    keep_weight: 0.5
+    switch_weight: 0.2
+    hop_decay_factor: 0.25
+    max_path_links: 3
+    wait_urgency_tau_ratio: 0.8
+    ignore_consumption: false
+    include_stocked_unavailable: true
+
   greedy_matching:
     enabled: true
     rate_weight: 1.0
@@ -45,4 +60,14 @@ baselines:
     max_path_hops: 6
     time_limit_s: 5.0
     mip_rel_gap: 0.0
-
+    # Stage-2 objective bonus: after maximising this-slot service, prefer
+    # generating keys on dynamic relay-importance paths so the MILP also
+    # stocks future demand instead of only chasing immediate service.
+    importance_weight: 2.0
+    max_path_links: 3
+    hop_decay_factor: 0.25
+    wait_urgency_tau_ratio: 0.8
+    ignore_consumption: false
+    # Allow the stage-2 stocking objective to sacrifice up to this fraction
+    # of the stage-1 optimal service, so future relay paths can be stocked.
+    service_slack_ratio: 0.1

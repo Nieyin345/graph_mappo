@@ -7,7 +7,7 @@ import json
 import pytest
 import torch
 
-from qkd_rl.algos.mappo_trainer import MAPPOTrainer, ValueNormalizer
+from qkd_rl.algos.mappo_trainer import MAPPOTrainer
 from qkd_rl.algos.policy import MAPPOPolicy
 from qkd_rl.core.config import deep_merge
 from qkd_rl.env.factory import build_env_from_config, load_default_config
@@ -77,6 +77,26 @@ def test_collect_rollout_and_update(tmp_path):
     params_after = [p.detach().clone() for p in model.parameters()]
     changed = any(not torch.equal(a, b) for a, b in zip(params_before, params_after))
     assert changed
+
+
+def test_train_writes_rollout_debug(tmp_path):
+    config = _tiny_config(tmp_path)
+    config["train"]["num_updates"] = 1
+    config["train"]["n_rollout_workers"] = 1
+    config["train"]["rollout_batch"] = False
+    config["train"]["logging"]["checkpoint_interval"] = 100000
+    config["train"]["logging"]["eval_interval"] = 0
+    env = build_env_from_config(config)
+    trainer = MAPPOTrainer(env, MAPPOPolicy(GraphMAPPOActorCritic(env.action_resolver.action_space, config)), config, tmp_path)
+    trainer.train()
+
+    debug_path = tmp_path / "rollout_debug.jsonl"
+    assert debug_path.exists()
+    row = json.loads(debug_path.read_text(encoding="utf-8").splitlines()[0])
+    assert row["steps"] > 0
+    assert row["mean_activated_edges"] >= 0
+    assert row["mean_reward_served"] is not None
+    assert row["actor_grad_norm"] >= 0
 
 
 def test_collect_rollout_stores_sampled_matching_log_prob(tmp_path):
@@ -165,10 +185,6 @@ def test_checkpoint_roundtrip(tmp_path):
     policy = MAPPOPolicy(model)
     trainer = MAPPOTrainer(env, policy, config, tmp_path)
     trainer.update_count = 5
-    trainer.value_norm.mean = 12.5
-    trainer.value_norm.std = 3.25
-    trainer.value_norm.count = 99
-    trainer.value_norm.tau = 0.2
 
     ckpt_path = trainer.save_checkpoint(tmp_path / "ckpt.pt")
     assert ckpt_path.exists()
@@ -177,41 +193,11 @@ def test_checkpoint_roundtrip(tmp_path):
     trainer2 = MAPPOTrainer(env, MAPPOPolicy(model2), config, tmp_path)
     trainer2.load_checkpoint(ckpt_path)
     assert trainer2.update_count == 5
-    assert trainer2.value_norm.mean == 12.5
-    assert trainer2.value_norm.std == 3.25
-    assert trainer2.value_norm.count == 99
-    assert trainer2.value_norm.tau == 0.2
     for p1, p2 in zip(model.parameters(), model2.parameters()):
         torch.testing.assert_close(p1.detach(), p2.detach())
 
 
-def test_value_normalizer_stats():
-    vn = ValueNormalizer("cpu", tau=0.5)
-    assert vn.mean == 0.0 and vn.std == 1.0
-    x = torch.randn(200) * 5.0 + 3.0
-    vn.update(x)
-    xn = vn.normalize(x)
-    assert abs(xn.mean()) < 0.3
-    assert abs(xn.std() - 1.0) < 0.2
-    # denormalize inverts normalize
-    torch.testing.assert_close(vn.denormalize(xn), x, atol=1.0e-4, rtol=1.0e-4)
-    # EMA: a second update moves the running mean only tau of the way toward
-    # the new batch mean (the previous full-merge formula made the running
-    # stats sensitive to one biased rollout; EMA keeps the target stable).
-    m0 = vn.mean
-    y = torch.randn(50) * 3.0 + 20.0
-    vn.update(y)
-    expected = (1.0 - 0.5) * m0 + 0.5 * float(y.mean())
-    assert abs(vn.mean - expected) < 1.0e-4
-    # tau=1 behaves like full replacement of the running stats.
-    vn1 = ValueNormalizer("cpu", tau=1.0)
-    vn1.update(x)
-    vn1.update(y)
-    assert abs(vn1.mean - float(y.mean())) < 1.0e-5
-    assert abs(vn1.std - float(y.std(correction=0))) < 1.0e-5
-
-
-def test_update_standardizes_critic_target(tmp_path):
+def test_update_trains_critic_on_raw_returns(tmp_path):
     config = _tiny_config(tmp_path)
     env = build_env_from_config(config)
     model = GraphMAPPOActorCritic(env.action_resolver.action_space, config)
@@ -220,15 +206,25 @@ def test_update_standardizes_critic_target(tmp_path):
 
     buffer = trainer.collect_rollout()
     stats = trainer.update(buffer)
-    # Standardized critic targets are attached to every step.
-    assert all(step.returns_norm is not None for step in buffer.steps)
-    rn = torch.stack([step.returns_norm for step in buffer.steps])
-    assert abs(rn.mean()) < 1.0e-3
-    assert abs(rn.std() - 1.0) < 0.3
-    # With standardization the critic MSE is O(1), not the raw return scale
-    # (the raw returns here are tens of units, and the broken non-normalized
-    # path produced critic losses of hundreds to thousands).
+    # The critic target is the raw return; Huber loss keeps it bounded.
+    assert all(step.returns is not None for step in buffer.steps)
     assert stats.critic_loss < 50.0
+
+
+def test_update_with_replay_steps(tmp_path):
+    config = _tiny_config(tmp_path)
+    config["train"]["replay_days"] = 1
+    env = build_env_from_config(config)
+    model = GraphMAPPOActorCritic(env.action_resolver.action_space, config)
+    trainer = MAPPOTrainer(env, MAPPOPolicy(model), config, tmp_path)
+
+    buffer1 = trainer.collect_rollout()
+    trainer.update(buffer1)
+    trainer._remember_replay(buffer1)
+
+    buffer2 = trainer.collect_rollout()
+    stats = trainer.update(buffer2)
+    assert stats.actor_loss is not None
 
 
 def test_target_kl_stops_all_remaining_ppo_epochs(tmp_path):

@@ -86,11 +86,14 @@ reward:
   # reward path: served keys + small importance-weighted generation, minus
   # failure/waiting/switch penalties.
   mode: shaped
-  served_weight: 5.0
+  served_reference: 100000.0
+  served_weight: 20.0
+  normalize_served_by_queue: true
   generated_weight: 0.0
-  dense_generation_importance_weight: 0.001
+  dense_generation_importance_weight: 0.02
   dense_low_importance_penalty: 0.01
   dense_reference: 1000000.0
+  dense_normalize_by_added: true
   failed_weight: 0.01
   # Waiting penalty is disabled so the shaped reward does not push the policy
   # toward myopic queue reduction instead of successful service.
@@ -102,7 +105,7 @@ reward:
   expired_key_weight: 0.01
   penalty_reference: 1000000.0
   normalize_penalties_by_arrived: true
-  normalize_by_arrived_demand: true
+  normalize_by_arrived_demand: false
   normalize_window: 60
   normalize_floor: 10000.0
   clip_abs: 0.0

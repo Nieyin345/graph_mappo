@@ -28,11 +28,22 @@ from qkd_rl.env.factory import build_env_from_config
 from qkd_rl.models.graph_mappo import GraphMAPPOActorCritic
 
 
-def _run_episode(env, policy, seed: int, rollout_steps: int, gamma: float, gae_lambda: float, value_mean: float = 0.0, value_std: float = 1.0, value_target: str = "gae"):
+def _run_episode(
+    env,
+    policy,
+    seed: int,
+    rollout_steps: int,
+    gamma: float,
+    gae_lambda: float,
+    value_target: str = "gae",
+    episode_steps: int | None = None,
+):
     """Run one episode and return finished ``RolloutStep``s (CPU tensors).
 
     Returns ``(steps, episode_reward, episode_summary)``.
     """
+    if episode_steps is not None:
+        env.config["env"]["episode_steps"] = int(episode_steps)
     obs = env.reset(seed=seed)
     buffer = RolloutBuffer(gamma, gae_lambda, device="cpu", value_target=value_target)
     ep_reward = 0.0
@@ -68,7 +79,7 @@ def _run_episode(env, policy, seed: int, rollout_steps: int, gamma: float, gae_l
                 actions=step.actions,
                 log_probs={node: lp.detach().cpu() for node, lp in step.log_probs.items()},
                 entropies={node: ent.detach().cpu() for node, ent in step.entropies.items()},
-                value=(value_mean + value_std * step.value.detach().cpu()),
+                value=step.value.detach().cpu(),
                 reward=float(reward),
                 terminated=terminated,
                 truncated=truncated,
@@ -86,7 +97,7 @@ def _run_episode(env, policy, seed: int, rollout_steps: int, gamma: float, gae_l
         last_value = torch.zeros((), dtype=torch.float32)
     else:
         with torch.no_grad():
-            last_value = (value_mean + value_std * policy.act(obs).value.detach().cpu())
+            last_value = policy.act(obs).value.detach().cpu()
     buffer.finish_episode(last_value)
     return buffer.steps, ep_reward, env.metrics.episode_summary()
 
@@ -105,10 +116,12 @@ def _worker_entry(config: dict, device: str, task_queue, result_queue, job_dir: 
         task = task_queue.get()
         if task is None:
             break
-        weights, seed, rollout_steps, value_mean, value_std = task
+        weights, seed, rollout_steps, episode_steps = task
         if weights is not None:
             policy.model.load_state_dict(weights)
-        steps, ep_reward, summary = _run_episode(env, policy, seed, rollout_steps, gamma, gae_lambda, value_mean, value_std, value_target)
+        steps, ep_reward, summary = _run_episode(
+            env, policy, seed, rollout_steps, gamma, gae_lambda, value_target, episode_steps
+        )
         path = Path(job_dir) / f"job_{seed}.pkl"
         with path.open("wb") as f:
             pickle.dump((steps, ep_reward, summary), f, protocol=4)
@@ -142,12 +155,13 @@ class RolloutWorkerPool:
         weights: dict,
         seeds: list[int],
         rollout_steps: int,
-        value_mean: float = 0.0,
-        value_std: float = 1.0,
+        episode_steps_list: list[int] | None = None,
     ) -> list[tuple[int, list, float, dict]]:
         """Dispatch one episode per seed; returns results sorted by seed."""
-        for seed in seeds:
-            self.task_queue.put((weights, seed, int(rollout_steps), float(value_mean), float(value_std)))
+        if episode_steps_list is None:
+            episode_steps_list = [int(rollout_steps)] * len(seeds)
+        for seed, episode_steps in zip(seeds, episode_steps_list):
+            self.task_queue.put((weights, seed, int(rollout_steps), int(episode_steps)))
         results: list[tuple[int, list, float, dict]] = []
         for _ in seeds:
             seed_done = self.result_queue.get()

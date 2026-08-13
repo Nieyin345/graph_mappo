@@ -29,18 +29,22 @@ def _minimal_obs(
     edge_pairs: list[tuple[str, str]],
     demand: dict[tuple[str, str], float],
     levels: dict[str, float],
+    inactive_pairs: list[tuple[str, str]] | None = None,
 ) -> GraphObservation:
-    edge_ids = [f"E_{src}__{dst}" for src, dst in edge_pairs]
+    inactive_pairs = inactive_pairs or []
+    all_pairs = edge_pairs + inactive_pairs
+    edge_ids = [f"E_{src}__{dst}" for src, dst in all_pairs]
+    active_edge_ids = [f"E_{src}__{dst}" for src, dst in edge_pairs]
     windows = {
         edge_id: EdgeWindow(
             edge_id=edge_id,
             rates=[10.0],
-            available=[True],
+            available=[edge_id in active_edge_ids],
             link_type=LinkType.GS_SAT,
         )
         for edge_id in edge_ids
     }
-    pair_to_edge = {tuple(sorted(pair)): edge_id for pair, edge_id in zip(edge_pairs, edge_ids)}
+    pair_to_edge = {tuple(sorted(pair)): edge_id for pair, edge_id in zip(all_pairs, edge_ids)}
     requests = [
         KeyRequest(
             request_id=f"req_{i}",
@@ -71,7 +75,7 @@ def _minimal_obs(
         edge_features=[[0.0] for _ in edge_ids],
         node_ids=node_ids,
         edge_ids=edge_ids,
-        physical_edge_ids=edge_ids,
+        physical_edge_ids=active_edge_ids,
         demand_edge_ids=[],
         action_candidates=candidates,
         action_masks={node: [True] * len(cands) for node, cands in candidates.items()},
@@ -230,6 +234,39 @@ def test_greedy_relay_prefers_demand_path_over_high_rate() -> None:
     assert actions["R1"] == "A"
     assert actions["B"] == "idle"
     assert actions["R2"] == "idle"
+
+
+def test_stocked_unavailable_edges_are_included_by_default() -> None:
+    from qkd_rl.baselines.greedy_relay_diffusion import (
+        GreedyRelayDiffusionPolicyV2,
+        GreedyRelayDiffusionPolicyV3,
+    )
+
+    # A-R is the only selectable edge. B-R holds keys but is unavailable this
+    # slot, so the pending A<->B demand is only visible to the BFS when the
+    # stocked-unavailable edge is included in the potential graph.
+    obs = _minimal_obs(
+        node_ids=["A", "B", "R"],
+        edge_pairs=[("A", "R")],
+        demand={("A", "B"): 100.0},
+        levels={"E_A__R": 0.0, "E_B__R": 50.0},
+        inactive_pairs=[("B", "R")],
+    )
+    obs.state.qkp_capacity = {"E_A__R": 100.0, "E_B__R": 100.0}
+
+    v2 = GreedyRelayDiffusionPolicyV2()
+    v3 = GreedyRelayDiffusionPolicyV3()
+    _, scores_v2 = v2.act(obs)
+    _, scores_v3 = v3.act(obs)
+    v2_disabled = GreedyRelayDiffusionPolicyV2(include_stocked_unavailable=False)
+    _, scores_disabled = v2_disabled.act(obs)
+
+    assert scores_v3["A"]["R"] > scores_v2["A"]["R"]
+    assert scores_v2["A"]["R"] > scores_v2["A"]["idle"]
+    assert v2.include_stocked_unavailable is True
+    assert v2_disabled.include_stocked_unavailable is False
+    assert v3.include_stocked_unavailable is True
+    assert v3.importance_weight == 10.0
 
 
 def test_pending_demand_uses_remaining_amount() -> None:

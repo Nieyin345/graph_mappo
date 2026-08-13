@@ -35,6 +35,7 @@ class RewardDetail:
     conflict_penalty: float
     dense_reward: float = 0.0
     switch_penalty: float = 0.0
+    baseline_reward: float = 0.0
 
 
 class RewardFunction:
@@ -99,6 +100,9 @@ class RewardFunction:
             return 0.0
         penalty_weight = float(self.config.get("dense_low_importance_penalty", 0.0))
         reference = float(self.config.get("dense_reference", 1.0)) or 1.0
+        added_total = sum(max(0.0, amount) for amount in added_by_edge.values())
+        if added_total <= 0.0:
+            return 0.0
         total = 0.0
         for edge_id, added in added_by_edge.items():
             importance = max(0.0, min(1.0, float(relay_importance.get(edge_id, 0.0))))
@@ -106,6 +110,11 @@ class RewardFunction:
             if penalty_weight > 0.0:
                 value -= penalty_weight * added * (1.0 - importance)
             total += value
+        if bool(self.config.get("dense_normalize_by_added", False)):
+            # Shape by the *share* of generated keys on high-importance paths
+            # instead of absolute key volume. This keeps the dense reward in
+            # [~0, weight] regardless of how much raw generation happens.
+            return weight * (total / added_total)
         # Supply-side baseline: the dense generation term is normalized by its
         # own dense_reference (NOT the arrived-demand window, which is the
         # demand-side baseline for served/waiting/failed). Keeping the two
@@ -130,12 +139,28 @@ class RewardFunction:
         switch_count: int = 0,
         added_by_edge: dict[str, float] | None = None,
         relay_importance: dict[str, float] | None = None,
+        baseline_reward: float = 0.0,
     ) -> RewardDetail:
         dense_reward = (
             self._dense_importance_reward(added_by_edge, relay_importance)
             if self._enabled(self.config, "dense")
             else 0.0
         )
+        if self.mode == "baseline_score":
+            total = float(baseline_reward)
+            if self.clip_abs > 0.0:
+                total = self._clip(total)
+            return RewardDetail(
+                total=total,
+                served_reward=total,
+                generated_reward=0.0,
+                failed_penalty=0.0,
+                waiting_penalty=0.0,
+                overflow_penalty=0.0,
+                expired_key_penalty=0.0,
+                conflict_penalty=0.0,
+                baseline_reward=total,
+            )
         if self.mode == "success_rate":
             arrived = max(0.0, float(arrived_keys))
             served = max(0.0, float(served_keys))
@@ -295,7 +320,23 @@ class RewardFunction:
             - failed_penalty - waiting_penalty - overflow_penalty - expired_key_penalty - conflict_penalty
         )
         total = key_total - switch_penalty
-        if self.config.get("normalize_by_arrived_demand", False):
+        fixed_reference = float(self.config.get("served_reference", 0.0) or 0.0)
+        if fixed_reference > 0.0:
+            # Fixed demand-side reference: the same served/penalty volume has
+            # the same reward everywhere in the episode. The sliding arrived
+            # mean (and its cold-start floor) made early served keys worth
+            # many times more than later ones, biasing the policy toward
+            # serving only the first minutes of the day.
+            served_reward /= fixed_reference
+            raw_n = raw_generation / fixed_reference
+            failed_penalty /= fixed_reference
+            waiting_penalty /= fixed_reference
+            overflow_penalty /= fixed_reference
+            expired_key_penalty /= fixed_reference
+            conflict_penalty /= fixed_reference
+            generated_reward = raw_n + dense_reward
+            total = key_total / fixed_reference + dense_reward - switch_penalty
+        elif self.config.get("normalize_by_arrived_demand", False):
             # Normalize the *demand-side* key-flow terms (served, waiting, ...)
             # by the recent mean of arrived key demand so they stay O(1)-ish
             # regardless of network scale. A sliding-window mean (instead of
@@ -315,6 +356,28 @@ class RewardFunction:
             conflict_penalty /= denom
             generated_reward = raw_n + dense_reward
             total = key_total / denom + dense_reward - switch_penalty
+        if self.config.get("normalize_served_by_queue", False):
+            # Served reward relative to the current demand pressure:
+            # served / (served + still-waiting). waiting_keys is measured
+            # after service, so served + waiting is the total queued demand
+            # including requests that arrived this step.
+            demand_before = max(0.0, served_keys + waiting_keys)
+            denom = max(demand_before, self.normalize_floor)
+            served_reward = (
+                float(self.config["served_weight"]) * served_keys / denom
+                if self._enabled(self.config, "served")
+                else 0.0
+            )
+            total = (
+                served_reward
+                + generated_reward
+                - failed_penalty
+                - waiting_penalty
+                - overflow_penalty
+                - expired_key_penalty
+                - conflict_penalty
+                - switch_penalty
+            )
         if self.clip_abs > 0.0:
             served_reward = self._clip(served_reward)
             generated_reward = self._clip(generated_reward)

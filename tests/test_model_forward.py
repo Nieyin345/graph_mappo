@@ -25,7 +25,7 @@ def test_graph_mappo_actor_critic_forward_matches_action_candidates():
         assert logits.shape[0] == len(obs.action_candidates[node_id])
 
 
-def test_demand_edge_mode_uses_edge_only_actor():
+def test_demand_edge_mode_actor_sees_node_and_edge_features():
     config = point_config_to_h5(load_default_config("."))
     config["model"]["mode"] = "demand_edge"
     config["features"]["edge"]["include_relay_importance"] = True
@@ -39,9 +39,8 @@ def test_demand_edge_mode_uses_edge_only_actor():
     assert set(output.logits) == set(obs.node_ids)
     assert output.edge_scores
     assert not model.encoder.layers[0].fuse_physical_to_node
-    assert model.actor.edge_scorer[0].in_features == int(
-        config["model"]["encoder"]["hidden_dim"]
-    )
+    hidden = int(config["model"]["encoder"]["hidden_dim"])
+    assert model.actor.edge_scorer[0].in_features == hidden * 3
 
 
 def test_demand_edge_mode_batched_policy_roundtrip():

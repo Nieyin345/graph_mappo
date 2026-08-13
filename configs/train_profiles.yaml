@@ -1,0 +1,160 @@
+# Unified training mode profiles. Select with:
+#   python scripts/train_graph_mappo.py --mode continuous
+train_profiles:
+  random_episode:
+    env:
+      episode_start_mode: random_day
+      day_steps: 1440
+      episode_steps: 4320
+      continuous: false
+    train:
+      num_updates: 100
+      rollout_steps: 4320
+      episodes_per_update: 1
+      episode_days_min: 1
+      episode_days_max: 2
+      replay_days: 0
+      n_rollout_workers: 2
+      rollout_worker_device: cpu
+      rollout_batch: true
+      value_target: gae
+      ppo:
+        epochs: 2
+        minibatch_size: 1024
+        batch_chunk: 256
+        clip_eps: 0.1
+        normalize_advantages: true
+        entropy_coef: 0.001
+        value_coef: 0.5
+        max_grad_norm: 0.5
+        target_kl: 0.02
+      optimizer:
+        type: adam
+        actor_lr: 0.0003
+        critic_lr: 0.0003
+      logging:
+        log_interval: 1
+        checkpoint_interval: 10
+        eval_interval: 10
+        eval_steps: 1440
+        eval_episodes: 1
+
+  continuous:
+    env:
+      episode_start_mode: random_day
+      day_steps: 1440
+      episode_steps: 1000000
+      continuous: true
+    train:
+      num_updates: 30
+      rollout_steps: 1440
+      episodes_per_update: 1
+      replay_days: 7
+      continuous_session_days: 30
+      n_rollout_workers: 1
+      rollout_batch: true
+      value_target: gae
+      ppo:
+        epochs: 2
+        minibatch_size: 1024
+        batch_chunk: 512
+        clip_eps: 0.1
+        normalize_advantages: true
+        entropy_coef: 0.001
+        value_coef: 0.5
+        max_grad_norm: 0.5
+        target_kl: 0.005
+      optimizer:
+        type: adam
+        actor_lr: 0.0001
+        critic_lr: 0.0003
+      logging:
+        log_interval: 1
+        checkpoint_interval: 5
+        eval_interval: 5
+        eval_steps: 1440
+        eval_episodes: 2
+
+  fixed_day:
+    env:
+      episode_start_mode: fixed
+      episode_steps: 1440
+    train:
+      num_updates: 20
+      rollout_steps: 1440
+      episodes_per_update: 1
+      n_rollout_workers: 1
+      rollout_batch: true
+      value_target: mc
+      ppo:
+        epochs: 1
+        minibatch_size: 1024
+        batch_chunk: 512
+        entropy_coef: 0.001
+      logging:
+        log_interval: 1
+        checkpoint_interval: 5
+        eval_interval: 5
+        eval_episodes: 1
+
+  curriculum:
+    train:
+      num_updates: 400
+      rollout_steps: 240
+      episodes_per_update: 4
+      rollout_batch: true
+      n_rollout_workers: 1
+      gamma: 0.99
+      gae_lambda: 0.95
+      value_target: gae
+      ppo:
+        epochs: 3
+        minibatch_size: 1024
+        clip_eps: 0.2
+        batch_chunk: 512
+        normalize_advantages: true
+        entropy_coef: 0.001
+        value_coef: 0.5
+        max_grad_norm: 0.5
+        target_kl: 0.03
+      optimizer:
+        type: adam
+        actor_lr: 0.0003
+        critic_lr: 0.001
+      logging:
+        log_interval: 1
+        checkpoint_interval: 10
+        eval_interval: 10
+        eval_episodes: 2
+      curriculum:
+        stages:
+          - until_update: 60
+            rollout_steps: 240
+            episodes_per_update: 4
+          - until_update: 120
+            rollout_steps: 480
+            episodes_per_update: 4
+          - until_update: 200
+            rollout_steps: 720
+            episodes_per_update: 2
+          - until_update: 400
+            rollout_steps: 1440
+            episodes_per_update: 2
+
+  demand_edge:
+    model:
+      mode: demand_edge
+    features:
+      demand_edge:
+        wait_bucket_count: 10
+        wait_decay_tau: 0
+      edge:
+        include_relay_importance: true
+        relay_importance:
+          max_path_links: 3
+          hop_decay_factor: 0.25
+          include_stocked_unavailable: true
+          availability_sample_stride: 600
+          availability_sample_limit: 876
+          capacity_decay_strength: 1.0
+          min_scarcity: 0.0

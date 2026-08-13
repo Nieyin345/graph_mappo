@@ -46,6 +46,7 @@ class Evaluator:
         num_episodes: int = 5,
         seeds: list[int] | None = None,
         collect_steps: bool = False,
+        start_seed: int | None = None,
     ) -> tuple[list[EpisodeRecord], list[dict] | None]:
         """Run one policy and return episode records + optional step records."""
         episodes: list[EpisodeRecord] = []
@@ -53,7 +54,8 @@ class Evaluator:
         for ep in range(num_episodes):
             seed = seeds[ep % len(seeds)] if seeds else (ep + 1) * 1000
             env = self.env_builder(seed)
-            obs = env.reset(seed=seed)
+            episode_start_seed = start_seed + seed if start_seed is not None else None
+            obs = env.reset(seed=seed, start_seed=episode_start_seed)
             total_reward = 0.0
             done = False
             step = 0
@@ -89,13 +91,19 @@ class Evaluator:
         num_episodes: int = 5,
         seeds: list[int] | None = None,
         collect_steps: bool = False,
+        start_seed: int | None = None,
     ) -> tuple[list[EpisodeRecord], dict[str, list[dict]]]:
         """Run several policies and return all episode records + step records per policy."""
         all_episodes: list[EpisodeRecord] = []
         all_steps: dict[str, list[dict]] = {}
         for name, policy in policies.items():
             episodes, steps = self.run_policy(
-                policy, name, num_episodes=num_episodes, seeds=seeds, collect_steps=collect_steps
+                policy,
+                name,
+                num_episodes=num_episodes,
+                seeds=seeds,
+                collect_steps=collect_steps,
+                start_seed=start_seed,
             )
             all_episodes.extend(episodes)
             if steps:

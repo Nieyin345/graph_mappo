@@ -47,6 +47,7 @@ except ImportError:  # pragma: no cover
     highspy = None
 
 from qkd_rl.core.types import KeyRequest
+from qkd_rl.baselines.greedy_relay_diffusion import compute_dynamic_relay_importance
 from qkd_rl.env.action_space import NodeActionSpace
 from qkd_rl.env.graph_builder import GraphObservation
 
@@ -195,6 +196,12 @@ class ILPOptimalPolicy:
         time_limit_s: float = 5.0,
         mip_rel_gap: float = 0.0,
         switch_decay: float = 0.5,
+        importance_weight: float = 2.0,
+        max_path_links: int = 3,
+        hop_decay_factor: float = 0.25,
+        wait_urgency_tau_ratio: float = 0.8,
+        service_slack_ratio: float = 0.0,
+        ignore_consumption: bool = False,
     ):
         self.slot_seconds = float(slot_seconds)
         self.max_requests = int(max_requests)
@@ -202,6 +209,12 @@ class ILPOptimalPolicy:
         self.max_path_hops = int(max_path_hops)
         self.time_limit_s = float(time_limit_s)
         self.mip_rel_gap = float(mip_rel_gap)
+        self.importance_weight = float(importance_weight)
+        self.max_path_links = int(max_path_links)
+        self.hop_decay_factor = float(hop_decay_factor)
+        self.wait_urgency_tau_ratio = float(wait_urgency_tau_ratio)
+        self.service_slack_ratio = float(service_slack_ratio)
+        self.ignore_consumption = bool(ignore_consumption)
         # Matches env.switch_cost.rate_decay_factor: a link activated now but
         # not in the previous slot generates at this fraction of its rate.
         self.switch_decay = float(switch_decay)
@@ -408,13 +421,27 @@ class ILPOptimalPolicy:
             return ILPOutcome([], [], 0.0, time.perf_counter() - t0, status)
 
         served_obj = float(c_served @ x)
+        served_max = max(0.0, -served_obj)
+        service_slack = (
+            served_max * self.service_slack_ratio
+            if served_max > 1.0e-9
+            else 1.0e-4
+        )
+        importance = compute_dynamic_relay_importance(
+            obs,
+            max_path_links=self.max_path_links,
+            hop_decay_factor=self.hop_decay_factor,
+            wait_urgency_tau_ratio=self.wait_urgency_tau_ratio,
+            ignore_consumption=self.ignore_consumption,
+        )
         c_gen = np.zeros(n_vars, dtype=np.float64)
         for edge_id in edges:
-            c_gen[edge_var[edge_id]] = -generated[edge_id]
+            future_bonus = 1.0 + self.importance_weight * importance.get(edge_id, 0.0)
+            c_gen[edge_var[edge_id]] = -generated[edge_id] * future_bonus
         served_cols = np.array([i for i in range(n_vars) if c_served[i] != 0.0], dtype=np.int64)
         served_coeffs = np.asarray(c_served[served_cols], dtype=np.float64)
         constraints2 = list(constraints)
-        constraints2.append((served_coeffs, served_cols, served_obj + 1.0e-4))
+        constraints2.append((served_coeffs, served_cols, served_obj + service_slack))
         n_cons2 = len(constraints2)
         matrix2 = lil_matrix((n_cons2, n_vars), dtype=np.float64)
         upper2 = np.full(n_cons2, np.inf, dtype=np.float64)

@@ -260,7 +260,13 @@ class SharedNodeActor(nn.Module):
         activation = config.get("activation", "relu")
         dropout = float(config.get("dropout", 0.0))
         self.mode = config.get("mode", "mixed")
-        edge_scorer_input_dim = hidden_dim if self.mode == "demand_edge" else hidden_dim * 3
+        # Both modes score an edge from its two endpoint node embeddings plus
+        # the physical edge embedding. In demand_edge mode the encoder still
+        # keeps physical-link messages out of the node representation, so the
+        # node embeddings carry the dynamic demand signal without being
+        # polluted by raw link rates; the actor can therefore see pending
+        # demand even on slots where relay_importance is empty.
+        edge_scorer_input_dim = hidden_dim * 3
         self.edge_scorer = build_mlp(
             edge_scorer_input_dim,
             list(config["actor"]["edge_scorer_hidden_dims"]),
@@ -475,13 +481,10 @@ class SharedNodeActor(nn.Module):
             src_t = torch.from_numpy(edge_srcs).to(device)
             dst_t = torch.from_numpy(edge_dsts).to(device)
             pos_t = torch.from_numpy(edge_poss).to(device)
-            if self.mode == "demand_edge":
-                pair_emb = edge_emb_directed[pos_t]
-            else:
-                pair_emb = torch.cat(
-                    [node_emb[src_t], node_emb[dst_t], edge_emb_directed[pos_t]],
-                    dim=-1,
-                )
+            pair_emb = torch.cat(
+                [node_emb[src_t], node_emb[dst_t], edge_emb_directed[pos_t]],
+                dim=-1,
+            )
             edge_scores = self.edge_scorer(pair_emb).squeeze(-1)
         else:
             edge_scores = torch.zeros((0,), dtype=torch.float32, device=device)
@@ -873,10 +876,7 @@ class GraphMAPPOActorCritic(nn.Module):
             src_t = torch.from_numpy(np.concatenate(src_parts)).to(device)
             dst_t = torch.from_numpy(np.concatenate(dst_parts)).to(device)
             pos_t = torch.from_numpy(np.concatenate(pos_parts)).to(device)
-            if self.mode == "demand_edge":
-                pair_emb = edge_emb[pos_t]
-            else:
-                pair_emb = torch.cat([node_emb[src_t], node_emb[dst_t], edge_emb[pos_t]], dim=-1)
+            pair_emb = torch.cat([node_emb[src_t], node_emb[dst_t], edge_emb[pos_t]], dim=-1)
             edge_scores = self.actor.edge_scorer(pair_emb).squeeze(-1)
         else:
             edge_scores = torch.zeros((0,), dtype=torch.float32, device=device)

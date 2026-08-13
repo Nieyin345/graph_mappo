@@ -1,0 +1,10 @@
+evaluation:
+  episode_days: 1
+  episode_steps: 0
+  # Deterministically iterate every day in the global training window.
+  cover_all_days: true
+  # Continuous 30-day run: QKP pools and pending requests carry over between
+  # days instead of being reset at each day boundary.
+  continuous: true
+  min_loss: 0.05
+  out: outputs/supervised_bfs_greedy

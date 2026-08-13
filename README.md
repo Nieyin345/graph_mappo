@@ -29,12 +29,12 @@ Current implementation target:
 
 Important config files:
 
+- `configs/global.yaml`: global training/validation windows and shared request seeds.
 - `configs/features.yaml`: node, physical edge, and GS-GS demand edge feature switches and resolved dimensions.
 - `configs/env_small.yaml`: scenario size, link-level QKP capacity, requests, routing, reward, and action resolver mode.
 - `configs/graph_mappo.yaml`: encoder, shared actor, critic, and masked categorical settings.
 - `configs/train_mappo.yaml`: rollout length, GAE/PPO hyper-parameters, learning rates, logging and checkpoint intervals.
-- `configs/train_curriculum.yaml`: short -> long curriculum schedule (`value_target: gae`).
-- `configs/train_demand_edge.yaml`: demand -> physical-edge mode (`model.mode: demand_edge`).
+- `configs/train_profiles.yaml`: all training modes (`continuous`, `fixed_day`, `curriculum`, `demand_edge`).
 - `configs/baselines.yaml`: heuristic / ILP baseline switches and parameters.
 
 Run from this folder:
@@ -49,24 +49,27 @@ conda run -n pytorch python -m pytest
 训练入口是 `scripts/train_graph_mappo.py`，默认加载 `default -> rate_provider -> features -> env_full -> graph_mappo -> train_mappo` 配置（数据只从 H5 读取）：
 
 ```powershell
+# 连续训练（默认）
+conda run -n pytorch python scripts/train_graph_mappo.py `
+  --mode continuous --run-name exp1 --seed 7 --device cuda
+
 # 课程训练（短局起步，逐步加长到全天）
 conda run -n pytorch python scripts/train_graph_mappo.py `
-  --configs train_curriculum.yaml `
-  --run-name exp1 --seed 7 --device cuda
+  --mode curriculum --run-name exp1 --seed 7 --device cuda
 
 # demand_edge 模式（需求分桶 -> 物理边 relay 权重 -> Actor 直连）
 conda run -n pytorch python scripts/train_graph_mappo.py `
-  --configs train_curriculum.yaml train_demand_edge.yaml `
+  --mode demand_edge `
   --run-name exp1_demand_edge --seed 7 --device cuda
 
 # 覆盖更新次数
 conda run -n pytorch python scripts/train_graph_mappo.py `
-  --configs train_curriculum.yaml `
+  --mode curriculum `
   --run-name exp1 --num-updates 200 --seed 7 --device cuda
 
 # 从 checkpoint 续训
 conda run -n pytorch python scripts/train_graph_mappo.py `
-  --configs train_curriculum.yaml `
+  --mode curriculum `
   --run-name exp1 --checkpoint outputs/exp1/checkpoint_update_0100.pt
 ```
 

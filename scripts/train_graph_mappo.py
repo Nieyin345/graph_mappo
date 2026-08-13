@@ -42,6 +42,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Extra config files under configs/ merged in order, e.g. env_full.yaml train_mappo.yaml",
     )
+    parser.add_argument(
+        "--mode",
+        default="random_episode",
+        choices=["random_episode", "continuous", "fixed_day", "curriculum", "demand_edge"],
+        help="Training profile in configs/train_profiles.yaml.",
+    )
     parser.add_argument("--run-name", default=None, help="Override project.run_name (output sub-folder).")
     parser.add_argument("--num-updates", type=int, default=None, help="Override train.num_updates.")
     parser.add_argument("--seed", type=int, default=None, help="Override global/env seed.")
@@ -54,6 +60,32 @@ def build_config(args: argparse.Namespace) -> dict:
     config = load_default_config(ROOT)
     # Training reads the H5 dataset only: default to the full-scale scenario.
     config = deep_merge(config, load_config([ROOT / "configs" / "env_full.yaml"]))
+    profiles = load_config([ROOT / "configs" / "train_profiles.yaml"]).get("train_profiles", {})
+    if args.mode not in profiles:
+        raise SystemExit(f"Unknown training mode: {args.mode}. Available: {sorted(profiles)}")
+    config = deep_merge(config, profiles[args.mode])
+    global_cfg = load_config([ROOT / "configs" / "global.yaml"]).get("global", {})
+    train_global = global_cfg.get("training", {}) or {}
+    train_window = train_global.get("window", {}) or {}
+    if train_window.get("start_day") is not None and train_window.get("end_day") is not None:
+        train_start_day = int(train_window["start_day"])
+        train_end_day = int(train_window["end_day"])
+        config["env"]["activation_window_start_day"] = train_start_day
+        config["env"]["activation_window_end_day"] = train_end_day
+        config["env"]["activation_window_days"] = max(0, train_end_day - train_start_day)
+        day_steps = int(config["env"].get("day_steps", 1440))
+        if config["env"].get("continuous"):
+            session_days = int(config["train"].get("continuous_session_days", 30) or 30)
+            extension_days = session_days
+        else:
+            rollout_steps = int(config["train"].get("rollout_steps", day_steps) or day_steps)
+            extension_days = max(1, (rollout_steps + day_steps - 1) // day_steps)
+        config["scenario"]["time_limit"]["days"] = train_end_day + extension_days
+    if "request_seed" in train_global:
+        config["seed"]["env_seed"] = int(train_global["request_seed"])
+    validation_global = global_cfg.get("validation", {}) or {}
+    if validation_global:
+        config["validation"] = validation_global
     if args.configs:
         for name in args.configs:
             config = deep_merge(config, load_config([ROOT / "configs" / name]))

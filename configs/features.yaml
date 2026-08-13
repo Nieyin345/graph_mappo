@@ -48,6 +48,16 @@ features:
     relay_importance:
       max_path_links: 3
       hop_decay_factor: 0.25
+      # tau = deadline_steps * ratio. Longer queue time makes the edge more
+      # important; 0.8 means urgency reaches e^1 at 80% of the deadline.
+      wait_urgency_tau_ratio: 0.8
+      # Use original request amount instead of remaining-after-service, so
+      # importance reflects demand itself rather than key consumption.
+      ignore_consumption: false
+      # Include currently-unavailable edges that still hold key stock in the
+      # BFS potential graph; importance is still only assigned to selectable
+      # edges.
+      include_stocked_unavailable: true
       availability_sample_stride: 600
       availability_sample_limit: 876
       capacity_decay_strength: 1.0

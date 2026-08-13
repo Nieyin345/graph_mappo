@@ -1,0 +1,14 @@
+global:
+  training:
+    window:
+      start_day: 0
+      end_day: 295
+    request_seed: 7
+  validation:
+    window:
+      start_day: 330
+      end_day: 365
+    request_seeds: [7]
+    episodes: 1
+    episode_days: 2
+    start_seed: 1000

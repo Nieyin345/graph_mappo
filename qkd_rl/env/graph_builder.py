@@ -10,6 +10,7 @@ from qkd_rl.core.types import Edge, LinkType, Node, NodeType
 from qkd_rl.env.action_space import NodeActionSpace
 from qkd_rl.env.qkp import LinkQKPPool
 from qkd_rl.env.request import DemandEdgeStats, RequestHistoryTracker, RequestQueue, wait_bucket_edges
+from qkd_rl.env.relay_importance import compute_relay_importance
 from qkd_rl.env.state import EnvState
 from qkd_rl.link.rate_provider import RateNormalizer
 
@@ -550,11 +551,27 @@ class GraphBuilder:
         edge_cfg = self.config["features"]["edge"]
         physical_dim = int(self.config["features"]["dims"]["physical_edge_dim_resolved"])
         demand_dim = int(self.config["features"]["dims"]["demand_edge_dim_resolved"])
-        relay_importance = self._relay_importance(
-            requests,
-            demand_stats_by_pair,
-            env_state,
-            active_edges=active_edges,
+        relay_cfg = edge_cfg.get("relay_importance", {})
+        include_stocked_unavailable = bool(
+            relay_cfg.get("include_stocked_unavailable", True)
+        )
+        relay_importance = compute_relay_importance(
+            node_ids=self._node_ids_list,
+            physical_edge_ids=[edge.edge_id for edge in active_edges],
+            pending_requests=requests.get_pending(),
+            qkp_snapshot=self.qkp.snapshot(),
+            qkp_capacity=self.qkp.capacities,
+            t=env_state.t,
+            max_path_links=int(relay_cfg.get("max_path_links", 3)),
+            hop_decay_factor=float(relay_cfg.get("hop_decay_factor", 0.25)),
+            capacity_strength=float(relay_cfg.get("capacity_decay_strength", 1.0)),
+            min_scarcity=float(relay_cfg.get("min_scarcity", 0.0)),
+            wait_urgency_tau_ratio=float(relay_cfg.get("wait_urgency_tau_ratio", 0.8)),
+            ignore_consumption=bool(relay_cfg.get("ignore_consumption", False)),
+            include_stocked_unavailable=include_stocked_unavailable,
+            all_edge_ids=(
+                list(env_state.edge_windows.keys()) if include_stocked_unavailable else None
+            ),
         )
         self._last_relay_importance = relay_importance or {}
         ewindows = env_state.edge_windows

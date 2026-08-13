@@ -92,9 +92,9 @@ def test_rollout_buffer_finishes_episodes_and_samples():
 
 
 def test_mc_value_target_removes_bootstrap_from_returns():
-    # "mc" critic target: returns are bootstrap-free Monte-Carlo sums of the
-    # rewards, so a biased value cannot feed back into its own target. The
-    # advantages (used by the actor) stay identical to the GAE mode.
+    # "mc": returns and actor advantages are both bootstrap-free
+    # Monte-Carlo sums, so a biased critic cannot feed back into the
+    # policy gradient target.
     rewards = [1.0, 2.0, 3.0]
     values = torch.tensor([100.0, 100.0, 100.0])  # wildly biased value
     gae_buffer = RolloutBuffer(gamma=0.9, gae_lambda=0.95, value_target="gae")
@@ -113,7 +113,7 @@ def test_mc_value_target_removes_bootstrap_from_returns():
     # MC returns = discounted reward sums only (no +100 value offset).
     expected = torch.tensor([1.0 + 0.9 * 2.0 + 0.81 * 3.0, 2.0 + 0.9 * 3.0, 3.0])
     torch.testing.assert_close(mc_returns, expected)
-    torch.testing.assert_close(mc_adv, gae_adv)
+    torch.testing.assert_close(mc_adv, mc_returns)
     # The GAE returns carry the biased value (+100-ish), the MC ones do not.
     assert gae_returns.mean() > mc_returns.mean() + 50.0
 
