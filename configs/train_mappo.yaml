@@ -24,7 +24,12 @@ train:
   # "mc" is still accepted for ablation studies.
   value_target: gae
   ppo:
-    epochs: 4
+    # 1 epoch per update: with 4 episodes x 1440 steps the update already sees
+    # 5760 samples; the backward pass through the block-diagonal GNN is the
+    # dominant training cost on CPU, so multiple epochs multiply it without
+    # adding new data. This is the standard PPO setting (SB3/cleanrl default
+    # to 1-2 epochs).
+    epochs: 1
     minibatch_size: 1024
     clip_eps: 0.2
     # PPO eval chunk: one block-diagonal forward per chunk (pure

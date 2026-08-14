@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 
@@ -17,6 +20,44 @@ from qkd_rl.link.rate_provider import RateNormalizer
 
 _EVER_AVAILABLE_CACHE: dict[tuple, frozenset[str]] = {}
 _RELAY_EDGE_INFO_CACHE: dict[tuple, dict[tuple[str, str], list[tuple[str, int]]]] = {}
+
+
+def _ever_available_cache_file(rate_provider) -> str:
+    """Disk cache path for the ever-available scan, next to the H5 dataset."""
+    path = getattr(rate_provider, "link_data_path", None)
+    if path is None:
+        return ""
+    return str(Path(path).with_name("ever_available_cache.json"))
+
+
+def _load_ever_available_disk_cache(cache_key: tuple, cache_file: str) -> frozenset[str] | None:
+    """Load the persisted ever-available edge set for ``cache_key`` (None on miss)."""
+    if not cache_file:
+        return None
+    key_hash = hashlib.md5(repr(cache_key).encode("utf-8")).hexdigest()
+    try:
+        with open(cache_file, encoding="utf-8") as handle:
+            payload = json.load(handle)
+        edges = payload.get(key_hash)
+        return frozenset(edges) if edges is not None else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _save_ever_available_disk_cache(cache_key: tuple, edges: frozenset[str], cache_file: str) -> None:
+    if not cache_file:
+        return
+    key_hash = hashlib.md5(repr(cache_key).encode("utf-8")).hexdigest()
+    try:
+        payload: dict = {}
+        if Path(cache_file).exists():
+            with open(cache_file, encoding="utf-8") as handle:
+                payload = json.load(handle)
+        payload[key_hash] = sorted(edges)
+        with open(cache_file, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+    except (OSError, ValueError, TypeError):
+        pass
 
 
 @dataclass
@@ -241,6 +282,11 @@ class GraphBuilder:
         )
         if cache_key in _EVER_AVAILABLE_CACHE:
             return _EVER_AVAILABLE_CACHE[cache_key]
+        cache_file = _ever_available_cache_file(self.rate_provider)
+        cached = _load_ever_available_disk_cache(cache_key, cache_file)
+        if cached is not None:
+            _EVER_AVAILABLE_CACHE[cache_key] = cached
+            return cached
         link_ids = self.rate_provider.edge_link_ids(list(edge_ids))
         edge_ids_np = np.asarray(edge_ids)
         available: set[str] = set()
@@ -251,6 +297,7 @@ class GraphBuilder:
             available.update(edge_ids_np[present].tolist())
         result = frozenset(available)
         _EVER_AVAILABLE_CACHE[cache_key] = result
+        _save_ever_available_disk_cache(cache_key, result, cache_file)
         return result
 
     def build(

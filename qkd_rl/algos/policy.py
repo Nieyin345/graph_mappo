@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 
 from qkd_rl.env.graph_builder import GraphObservation
@@ -62,40 +63,58 @@ class MAPPOPolicy:
         matching sizes instead of growing with every matched edge.
         """
         endpoints = self._endpoints()
-        edge_ids = list(edge_scores.keys())
-        remaining = set(edge_ids)
+        edge_ids_list = list(edge_scores.keys())
+        if not edge_ids_list:
+            joint_lp = torch.zeros((), dtype=torch.float32, device=self.device)
+            joint_entropy = torch.zeros((), dtype=torch.float32, device=self.device)
+            return {}, {}, [], joint_lp, joint_entropy
+        temperature = float(self.model.actor.temperature)
+        raw = torch.stack([edge_scores[edge_id] for edge_id in edge_ids_list])
+        if temperature != 1.0:
+            raw = raw / temperature
+        # Rollout path stores a detached joint log prob, so the sequential
+        # softmax can be evaluated in numpy (one small kernel instead of one
+        # per decision). Gumbel noise is still drawn from the torch RNG to
+        # keep seed-based reproducibility identical to the old path.
+        scores_np = raw.detach().cpu().numpy()
+        n_edges = len(edge_ids_list)
+        if deterministic:
+            gumbel_np = None
+        else:
+            u = torch.rand(n_edges, dtype=raw.dtype, device=raw.device).clamp_min(torch.finfo(raw.dtype).tiny)
+            gumbel_np = (-torch.log(-torch.log(u))).cpu().numpy()
+        remaining = set(range(n_edges))
         used_nodes: set[str] = set()
         matched_edges: list[str] = []
-        joint_lp = torch.zeros((), dtype=torch.float32, device=self.device)
-        joint_entropy = torch.zeros((), dtype=torch.float32, device=self.device)
+        joint_lp = 0.0
+        joint_entropy = 0.0
         while remaining:
-            avail = sorted(
-                edge_id
-                for edge_id in remaining
-                if endpoints[edge_id][0] not in used_nodes and endpoints[edge_id][1] not in used_nodes
-            )
+            avail = [
+                i
+                for i in remaining
+                if endpoints[edge_ids_list[i]][0] not in used_nodes
+                and endpoints[edge_ids_list[i]][1] not in used_nodes
+            ]
             if not avail:
                 break
-            raw_scores = torch.stack([edge_scores[edge_id] for edge_id in avail])
-            temperature = float(self.model.actor.temperature)
-            scores = raw_scores / temperature if temperature != 1.0 else raw_scores
-            logp = torch.log_softmax(scores, dim=0)
-            ent = -(logp.exp() * logp).sum()
+            s = scores_np[avail]
+            s_max = float(s.max())
+            logp = s - (s_max + float(np.log(np.exp(s - s_max).sum())))
             if deterministic:
-                idx = torch.argmax(scores)
-                selected = avail[int(idx)]
+                k = int(np.argmax(s))
             else:
-                u = torch.rand_like(scores).clamp_min(torch.finfo(scores.dtype).tiny)
-                gumbel = -torch.log(-torch.log(u))
-                idx = torch.argmax(scores + gumbel)
-                selected = avail[int(idx)]
-            joint_lp = joint_lp + logp[int(idx)]
-            joint_entropy = joint_entropy + ent
+                k = int(np.argmax(s + gumbel_np[avail]))
+            joint_lp += float(logp[k])
+            p = np.exp(logp)
+            joint_entropy -= float((p * logp).sum())
+            selected = edge_ids_list[avail[k]]
             matched_edges.append(selected)
             used_nodes.update(endpoints[selected])
-            remaining.remove(selected)
+            remaining.remove(avail[k])
         n_decisions = max(1, len(matched_edges))
         joint_entropy = joint_entropy / n_decisions
+        joint_lp_t = torch.tensor(joint_lp, dtype=torch.float32, device=self.device)
+        joint_entropy_t = torch.tensor(joint_entropy, dtype=torch.float32, device=self.device)
 
         actions: dict[str, str] = {}
         action_scores: dict[str, dict[str, float]] = {}
@@ -109,7 +128,7 @@ class MAPPOPolicy:
             score = float(edge_scores[edge_id].detach().cpu())
             action_scores[src] = {dst: score}
             action_scores[dst] = {src: score}
-        return actions, action_scores, matched_edges, joint_lp, joint_entropy
+        return actions, action_scores, matched_edges, joint_lp_t, joint_entropy_t
 
     @staticmethod
     def _fill_node_tensors(

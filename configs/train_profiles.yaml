@@ -19,7 +19,7 @@ train_profiles:
       rollout_batch: true
       value_target: gae
       ppo:
-        epochs: 2
+        epochs: 1  # single epoch per update (see train_mappo.yaml note)
         minibatch_size: 1024
         batch_chunk: 256
         clip_eps: 0.1
@@ -60,7 +60,7 @@ train_profiles:
       rollout_batch: true
       value_target: gae
       ppo:
-        epochs: 2
+        epochs: 1  # single epoch per update (see train_mappo.yaml note)
         minibatch_size: 1024
         batch_chunk: 512
         clip_eps: 0.1
@@ -113,7 +113,7 @@ train_profiles:
       gae_lambda: 0.95
       value_target: gae
       ppo:
-        epochs: 3
+        epochs: 1  # single epoch per update (see train_mappo.yaml note)
         minibatch_size: 1024
         clip_eps: 0.2
         batch_chunk: 512
