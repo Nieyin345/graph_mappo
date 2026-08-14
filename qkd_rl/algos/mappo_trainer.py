@@ -136,9 +136,8 @@ class MAPPOTrainer:
         self._validation_seeds: list[int] = []
         self.best_validation_success = -float("inf")
         self._rollout_debug: dict[str, float] = {}
-        # Critic target mode: "gae" (default) or "mc" (bootstrap-free returns,
-        # see RolloutBuffer). "mc" breaks the value-normalizer feedback loop
-        # that drifted GAE returns to ~5x the true return scale.
+        # Critic target mode: "gae" (default, standard PPO returns) or "mc"
+        # (bootstrap-free returns, kept only for ablation; see RolloutBuffer).
         self.value_target = str(train_cfg.get("value_target", "gae"))
         # Optional curriculum: a list of stages that lengthen the rollout and
         # adjust the number of parallel episodes as training progresses. The
@@ -484,6 +483,14 @@ class MAPPOTrainer:
 
     # -------------------------------------------------------------------- update
     def _remember_replay(self, buffer: RolloutBuffer) -> None:
+        """Append the latest rollout to the replay ring (disabled by default).
+
+        ``replay_days=0`` (the recommended default) keeps PPO on-policy; the
+        replay path is retained only as a legacy/ablation option. Replayed
+        steps keep advantages computed by an older critic, so re-enabling it
+        makes the update approximately off-policy without importance
+        correction -- prefer raising ``episodes_per_update`` instead.
+        """
         if self.replay_days <= 0:
             return
         self._replay_buffers.append(list(buffer.steps))
@@ -847,6 +854,7 @@ class MAPPOTrainer:
                 rollout_finished = time.perf_counter()
                 # Remember BEFORE updating so this rollout's steps train this
                 # update (replay data is otherwise always one rollout stale).
+                # No-op when replay_days=0 (the recommended on-policy default).
                 self._remember_replay(buffer)
                 stats = self.update(buffer)
                 update_finished = time.perf_counter()

@@ -15,13 +15,14 @@ train:
   rollout_batch: true
   gamma: 0.99
   gae_lambda: 0.95
-  # Critic target: "mc" = bootstrap-free Monte-Carlo returns. The default
-  # "gae" target (returns = advantage + bootstrapped value) feeds the value
-  # normalizer's own bias back into the returns, drifting the training return
-  # to ~5x the true scale (measured: true ~-1390/step vs logged ~-5276/step).
-  # In "mc" mode only the CRITIC target uses MC returns (decoupled from the
-  # bootstrap); the actor keeps the GAE advantages.
-  value_target: mc
+  # Critic target: "gae" (default) = standard GAE returns (advantage +
+  # bootstrapped value). This is the canonical PPO critic target: low variance
+  # from the bootstrap, and the per-batch Huber beta (critic_beta = batch
+  # return std) already absorbs return-scale drift, so the old "mc" workaround
+  # (bootstrap-free MC returns, which were added to break a value-normalizer
+  # feedback loop that no longer exists in this code) is no longer needed.
+  # "mc" is still accepted for ablation studies.
+  value_target: gae
   ppo:
     epochs: 4
     minibatch_size: 1024

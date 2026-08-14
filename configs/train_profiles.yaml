@@ -49,7 +49,12 @@ train_profiles:
       num_updates: 30
       rollout_steps: 1440
       episodes_per_update: 1
-      replay_days: 7
+      # Replay disabled (replay_days: 0): PPO is an on-policy algorithm, and
+      # replaying old trajectories whose advantages were computed by an older
+      # critic makes the update approximately off-policy without any
+      # correction. If more data per update is wanted, raise
+      # episodes_per_update instead of re-enabling replay.
+      replay_days: 0
       continuous_session_days: 30
       n_rollout_workers: 1
       rollout_batch: true
@@ -85,7 +90,7 @@ train_profiles:
       episodes_per_update: 1
       n_rollout_workers: 1
       rollout_batch: true
-      value_target: mc
+      value_target: gae
       ppo:
         epochs: 1
         minibatch_size: 1024

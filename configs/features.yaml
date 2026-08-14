@@ -42,8 +42,8 @@ features:
     # edges are found by bidirectional shortest-hop reachability up to
     # max_path_links; weight decays with total hops and scales with each link's
     # own remaining-capacity ratio (capacity - level) / capacity. The per-edge
-    # accumulated value is log1p-normalized because it is a cumulative demand
-    # signal.
+    # accumulated value is normalized by the current-step maximum so it stays
+    # in [0, 1] regardless of how much historical demand is queued.
     include_relay_importance: true
     relay_importance:
       max_path_links: 3
@@ -54,9 +54,16 @@ features:
       # Use original request amount instead of remaining-after-service, so
       # importance reflects demand itself rather than key consumption.
       ignore_consumption: false
-      # Include currently-unavailable edges that still hold key stock in the
-      # BFS potential graph; importance is still only assigned to selectable
-      # edges.
+      # Design choice: currently-unavailable edges that still hold key stock
+      # (recently active, keys not yet expired) are included in the BFS
+      # potential graph, so they can act as relay path intermediates and keep
+      # their importance from dropping to zero the moment they go dark. This
+      # is intentional: a link that held keys a moment ago will likely be
+      # usable again soon and should keep some presence in the features.
+      # Importance is still only assigned to selectable (currently legal)
+      # edges. NOTE: this deliberately deviates from the strict "G_t only"
+      # definition in the algorithm doc (SS 3.2.1); that doc is updated to
+      # match.
       include_stocked_unavailable: true
       availability_sample_stride: 600
       availability_sample_limit: 876

@@ -27,11 +27,12 @@ Current implementation target:
 - `qkd_rl.algos.mappo_trainer` supports a curriculum schedule that starts with short episodes and gradually
   lengthens to the full-day rollout.
 
-Important config files:
+Important config files: see [configs/README.md](configs/README.md) for the full
+index (every yaml's purpose, load order, and who references it). Highlights:
 
 - `configs/global.yaml`: global training/validation windows and shared request seeds.
 - `configs/features.yaml`: node, physical edge, and GS-GS demand edge feature switches and resolved dimensions.
-- `configs/env_small.yaml`: scenario size, link-level QKP capacity, requests, routing, reward, and action resolver mode.
+- `configs/env_small.yaml` / `configs/env_full.yaml`: scenario size, link-level QKP capacity, requests, routing, reward, and action resolver mode (small vs full scale).
 - `configs/graph_mappo.yaml`: encoder, shared actor, critic, and masked categorical settings.
 - `configs/train_mappo.yaml`: rollout length, GAE/PPO hyper-parameters, learning rates, logging and checkpoint intervals.
 - `configs/train_profiles.yaml`: all training modes (`continuous`, `fixed_day`, `curriculum`, `demand_edge`).

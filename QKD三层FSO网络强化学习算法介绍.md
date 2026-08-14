@@ -172,7 +172,7 @@ $$
 a=\min(d(p,u),d(p,v)),\qquad b=\min(d(q,u),d(q,v)),
 $$
 
-其中 $d(\cdot,\cdot)$ 是**在 $G_t$ 上**的 BFS 最短跳数，因此不可见的链路不会参与扩散。若 $a,b$ 均连通且 $a+b+1\le K$，则该请求对向边 $i$ 累积：
+其中 $d(\cdot,\cdot)$ 是 BFS 最短跳数，因此不可见的链路不会缩短中继路径。**实现细节（`include_stocked_unavailable=true`，设计选择）**：当前不可用但仍持有密钥库存的链路（近期激活过、密钥未过期）也会加入 BFS 邻接表，可作为中继路径的中间节点——这样一条刚停用的链路不会立刻失去全部存在感，便于策略在它恢复可用前保持关注。重要性仍只赋给当前合法可选（可见）的边；该开关与"仅在 $G_t$ 上扩散"的严格定义有出入，属于有意的工程取舍（见 `configs/features.yaml`）。若 $a,b$ 均连通且 $a+b+1\le K$，则该请求对向边 $i$ 累积：
 
 $$
 \mathrm{relay}_i \mathrel{+}= B_{pq}(t)\cdot \eta^{\max(0,\,a+b-1)}\cdot \mathrm{cap\_left}_i,
@@ -411,7 +411,7 @@ $$
 \mathcal{L} = \mathcal{L}^{\mathrm{clip}} + w_v\,\mathcal{L}^{\mathrm{value}} - w_e\,\mathbb{E}[\mathcal{H}(\pi_\theta(\cdot\mid s_t))],
 $$
 
-默认 $w_v=0.5$，$w_e=0.001$（熵使用全局匹配的 per-decision 平均熵，因此系数保持较小）。
+默认 $w_v=0.5$。熵系数 $w_e$ 在默认训练配置（`train_mappo.yaml`）为 $0.01$，各训练 profile（`train_profiles.yaml` 的 `random_episode`/`continuous`/`fixed_day`/`curriculum`）统一为 $0.001$（熵使用全局匹配的 per-decision 平均熵，因此系数保持较小）。
 
 ### 7.4 参数更新流程
 
@@ -442,7 +442,7 @@ $$
 | $\gamma$ | 0.99 | 折扣因子 |
 | $\lambda$ | 0.95 | GAE 平滑系数 |
 | $\epsilon$ | 0.2 | PPO 裁剪幅度 |
-| $w_v$ / $w_e$ | 0.5 / 0.001 | 价值系数 / 熵系数 |
+| $w_v$ / $w_e$ | 0.5 / 0.01（默认）、0.001（各 profile） | 价值系数 / 熵系数 |
 | $R_{\mathrm{served}}$ | 100000 | shaped reward 固定需求参考值 |
 | 梯度范数上限 | 0.5 | 梯度裁剪 |
 | target KL | 0.03 | 早停阈值 |

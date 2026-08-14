@@ -165,10 +165,16 @@ class RequestQueue:
 
         def _priority(req: KeyRequest):
             remaining = max(0.0, req.amount - req.served_amount)
-            # FIFO by arrival first; deadline/route length only break ties.
+            # EDF: earliest deadline first, matching routing.serve_order and the
+            # config validation (config.py rejects any other serve_order). With
+            # the fixed-deadline generator (deadline = arrival + constant) this
+            # ordering is identical to FIFO; it becomes a true EDF as soon as
+            # deadlines vary per request. Arrival time only breaks deadline
+            # ties, so newly-arrived urgent requests are not starved by old
+            # requests whose deadlines are still far away.
             return (
-                req.arrival_t,
                 req.deadline_t,
+                req.arrival_t,
                 routing.hop_distance(req.src_gs, req.dst_gs),
                 remaining,
             )

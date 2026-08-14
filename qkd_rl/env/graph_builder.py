@@ -764,7 +764,17 @@ class GraphBuilder:
 
     @property
     def last_relay_importance(self) -> dict[str, float]:
-        """Relay importance cached during the most recent graph build."""
+        """Relay importance cached during the most recent graph build.
+
+        Timing note (why the reward and the model share this cache): the cache
+        is refreshed only in ``GraphBuilder.build``, which runs at the END of
+        ``QKDEnv.step`` (after serve/expire, t += 1). The reward for the NEXT
+        step reads this cache BEFORE ``_build_observation`` refreshes it, so
+        the importance used by ``dense_reward`` reflects the state the policy
+        actually observed when it made the decision (pre-service snapshot),
+        not the post-service state. Do not recompute it mid-step or the dense
+        reward would no longer match the model input.
+        """
         return self._last_relay_importance
 
     def _relay_importance(

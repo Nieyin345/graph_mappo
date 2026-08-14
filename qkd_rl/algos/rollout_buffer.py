@@ -48,14 +48,14 @@ class RolloutBuffer:
         self.gamma = float(gamma)
         self.gae_lambda = float(gae_lambda)
         self.device = torch.device(device)
-        # Critic target: "gae" stores the standard GAE return (advantages +
-        # bootstrapped value); "mc" stores bootstrap-free Monte-Carlo returns
-        # instead. "mc" breaks the positive-feedback loop where a biased
-        # value normalizer biases the bootstrap, which biases the returns that
-        # re-train the normalizer (measured drift to ~5x the true return
-        # scale). Only the CRITIC target is switched to MC returns; the
-        # actor's GAE advantages are kept in both modes, so the policy
-        # gradient keeps GAE's variance reduction and a value baseline.
+        # Critic target: "gae" (default) stores the standard GAE return
+        # (advantages + bootstrapped value); "mc" stores bootstrap-free
+        # Monte-Carlo returns instead. Only the CRITIC target is switched in
+        # "mc" mode; the actor's GAE advantages are kept in both modes, so the
+        # policy gradient keeps GAE's variance reduction and a value baseline.
+        # "mc" was introduced to break a value-normalizer feedback loop that
+        # no longer exists in this code (returns are not normalized anywhere),
+        # so "gae" is the recommended default; "mc" is kept for ablations.
         if value_target not in ("gae", "mc"):
             raise ValueError(f"value_target must be 'gae' or 'mc', got {value_target!r}")
         self.value_target = value_target

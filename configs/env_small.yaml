@@ -35,7 +35,7 @@ scenario:
 
 # Small-scenario calibration: synthetic H5 rates are ~uniform(0,50) bps so one
 # link generates ~1.5 Kbit/slot and ~3 links are activated -> ~4.5 Kbit/slot.
-# Capacity holds ~1 hour (60 slots); requests offer ~45% of the generated load.
+# Key TTL is 1920 slots (32 h); requests offer ~45% of the generated load.
 qkp:
   type: link
   initial_level: 1000.0

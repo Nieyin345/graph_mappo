@@ -36,6 +36,24 @@ def test_servable_request_is_served_and_removed():
     assert len(expired) == 0
 
 
+def test_serve_order_is_edf_not_fifo():
+    # routing.serve_order claims earliest_deadline_first; the serve priority
+    # must therefore process the later-arriving, soon-to-expire request before
+    # the earlier-arriving one with a far deadline. Both requests are small
+    # enough to be fully served, so served_requests preserves processing order
+    # (FIFO ordering would put REQ_OLD first).
+    env = build_test_env(".")
+    env.reset()
+    t = env.t
+    old = KeyRequest("REQ_OLD", "GS_001", "GS_002", 100.0, t, t + 100)       # arrived first, deadline far
+    urgent = KeyRequest("REQ_URG", "GS_001", "GS_002", 100.0, t + 5, t + 6)  # arrived later, deadline imminent
+    env.requests.add_arrivals([old, urgent])
+
+    serve_result = env.requests.serve(env.qkp, env.routing, t)
+
+    assert [r.request_id for r in serve_result.served_requests] == ["REQ_URG", "REQ_OLD"]
+
+
 def test_request_generator_priority_modes():
     common = {"arrival_rate": 3.0, "amount_mean": 10.0, "deadline_steps": 12}
     uniform = RequestGenerator(["GS_001", "GS_002"], {**common, "priority_mode": "uniform"}, seed=0)
