@@ -61,11 +61,11 @@ scenario:
 # Calibration (scripts/calibrate_demand.py + full-env sweeps on the real H5):
 # the greedy relay policy's serving throughput is ~0.1-0.15 Mbit/slot while
 # raw generation is ~4.6 Mbit/slot, so sizing requests off generation makes
-# every policy fail. 0.8 requests/slot x 0.1 Mbit (0.08 Mbit/slot) with long
-# request/key lifetimes puts the relay baseline at ~70% full-day success with
-# a clear gap to the other baselines (random ~49%, rate-greedy ~56%), leaving
-# headroom for the trained RL agent. Keys live 32 h and requests 16 h
-# (1920 / 960 slots) so relay paths form and persist; capacities unchanged.
+# every policy fail. 0.8 requests/slot x 0.1 Mbit (0.08 Mbit/slot) with short
+# request lifetime (deadline_steps=30) makes requests completable inside the
+# short curriculum episodes; baseline success rates must be re-measured after
+# changing the deadline. Keys live 32 h (1920 slots) so relay paths form and
+# persist; capacities unchanged.
 qkp:
   type: link
   initial_level: 0.0
@@ -87,11 +87,11 @@ requests:
   type: poisson
   # 0.8 requests/slot x 0.1 Mbit mean -> ~0.08 Mbit/slot mean offered load,
   # with a truncated exponential (amount_max = 5x mean) so no single request
-  # is unserviceable inside the deadline. Requests live 960 slots (16 h).
+  # is unserviceable inside the deadline. Requests live 30 slots (30 min).
   arrival_rate: 0.8
   amount_mean: 100000.0
   amount_max: 500000.0
-  deadline_steps: 960
+  deadline_steps: 30
   priority_mode: uniform
   # Realistic, learnable intra-day profile: 24 hourly weights, arrival_rate is
   # the daily mean, so peak hours (~1.3x) amplify and night hours (~0.1x)
@@ -120,10 +120,10 @@ reward:
   # Dense-flow mode (B1): per-step reward is a weighted combination of
   # *supply-side* generation and *demand-side* service quality.
   #
-  #   + served_reward = served_weight * served_keys / arrived_win   (success service)
+  #   + served_reward = served_weight * served_keys / served_reference   (success service)
   #   + dense_reward  = dense_w * sum(added*relay_importance) / dense_reference
   #                    (keys stored on high-importance relay paths; supply-side)
-  #   - waiting/failed/expired/overflow/conflict penalties / arrived_win
+  #   - waiting/failed/expired/overflow/conflict penalties / served_reference
   #   - switch_penalty = switch_weight * switch_count               (count, O(1))
   #
   # Unlike the old success_rate mode (whose success_delta was 0 on ~every step
@@ -131,16 +131,14 @@ reward:
   # on every step: generation anywhere on the demand path is dense (nonzero on
   # ~all steps) and served_keys adds an explicit reward for actually serving.
   #
-  # Baselines: demand-side terms are normalized by the sliding-window mean of
-  # arrived key demand (normalize_by_arrived_demand), the supply-side generation
-  # term by its own dense_reference; the switch count is O(1) and needs no /1e6.
+  # Demand-side terms (served and penalties) are divided by the fixed
+  # served_reference so the same served/penalty volume has the same reward at
+  # any time of day; the supply-side generation term is normalized by its own
+  # dense_reference; the switch count is O(1) and needs no /1e6.
   mode: shaped
   # Success-service reward: reward actually served keys directly instead of the
   # sparse, mostly-zero cumulative success-rate delta.
   served_weight: 20.0
-  # Normalize served keys by current queued demand (served + still-waiting),
-  # so reward reflects link-selection quality instead of raw request volume.
-  normalize_served_by_queue: true
   # Raw stored-key term (independent of demand path) -- leave 0; B1 uses the
   # relay-importance-weighted dense term below so we only reward keys that help
   # reach demand, not wholesale generation into the pools.
@@ -150,8 +148,6 @@ reward:
   # dense larger than served (0.1-0.24 vs 0.04-0.10 per step) and the policy
   # started optimizing key generation instead of service. 0.2/1e6 keeps the
   # term ~1e-3/step, meaningful but clearly below the served reward.
-  # Lower dense weight so served stays dominant even when queue backlog
-  # dilutes the served/queue ratio.
   dense_generation_importance_weight: 0.02
   dense_low_importance_penalty: 0.01
   dense_reference: 1000000.0

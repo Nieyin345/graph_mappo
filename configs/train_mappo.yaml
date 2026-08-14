@@ -19,7 +19,8 @@ train:
   # "gae" target (returns = advantage + bootstrapped value) feeds the value
   # normalizer's own bias back into the returns, drifting the training return
   # to ~5x the true scale (measured: true ~-1390/step vs logged ~-5276/step).
-  # The actor still uses GAE advantages; only the critic target is decoupled.
+  # In "mc" mode only the CRITIC target uses MC returns (decoupled from the
+  # bootstrap); the actor keeps the GAE advantages.
   value_target: mc
   ppo:
     epochs: 4

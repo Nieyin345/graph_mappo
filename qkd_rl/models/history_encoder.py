@@ -6,9 +6,10 @@ entities (``critic`` and ``actor`` use the same encoder object). Because the
 three entity types have different channel counts, each type gets its own input
 projection to the shared hidden dimension.
 
-Sequences are left-padded on cold start: ``history_valid`` carries the actual
+Sequences are right-padded on cold start: ``history_valid`` carries the actual
 number of observed steps and is used to pack the LSTM input, so partially
-filled windows are not treated as zeros inside the recurrence.
+filled windows are not treated as zeros inside the recurrence (the valid
+prefix enters the LSTM, the zero padding is dropped by the pack).
 """
 
 from __future__ import annotations

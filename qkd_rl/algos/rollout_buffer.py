@@ -53,7 +53,9 @@ class RolloutBuffer:
         # instead. "mc" breaks the positive-feedback loop where a biased
         # value normalizer biases the bootstrap, which biases the returns that
         # re-train the normalizer (measured drift to ~5x the true return
-        # scale). GAE advantages for the actor are unchanged in both modes.
+        # scale). Only the CRITIC target is switched to MC returns; the
+        # actor's GAE advantages are kept in both modes, so the policy
+        # gradient keeps GAE's variance reduction and a value baseline.
         if value_target not in ("gae", "mc"):
             raise ValueError(f"value_target must be 'gae' or 'mc', got {value_target!r}")
         self.value_target = value_target
@@ -82,8 +84,10 @@ class RolloutBuffer:
         )
         if self.value_target == "mc":
             # Bootstrap-free Monte-Carlo returns: R_t = sum_k gamma^k r_{t+k}
-            # truncated at the episode end. No value bootstrap -> no feedback
-            # from the (possibly biased) critic into its own target.
+            # truncated at the episode end. Only the critic target is swapped
+            # to MC (no value bootstrap -> no feedback from the possibly
+            # biased critic into its own target); the actor keeps the GAE
+            # advantages computed above.
             mc_returns = torch.zeros_like(returns)
             acc = torch.zeros((), dtype=torch.float32, device=self.device)
             rewards_t = torch.as_tensor(
@@ -93,9 +97,6 @@ class RolloutBuffer:
                 acc = rewards_t[t] + self.gamma * acc
                 mc_returns[t] = acc
             returns = mc_returns
-            # The actor also uses the raw MC returns (whitened per minibatch
-            # in PPO), so an imperfect critic cannot bias the policy gradient.
-            advantages = mc_returns
         for step, ret, adv in zip(episode, returns, advantages):
             step.returns = ret.detach()
             step.advantages = adv.detach()

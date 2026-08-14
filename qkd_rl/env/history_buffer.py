@@ -204,16 +204,19 @@ class HistoryBuffer:
     ) -> tuple[list[list[list[float]]], list[int]]:
         if n_channels <= 0:
             return [], []
-        # Return left-padded fixed-length windows ([entity][time][channel]) plus
-        # per-entity valid lengths, so the encoder always receives a dense
-        # tensor even on cold start.
+        # Return right-padded fixed-length windows ([entity][time][channel])
+        # plus per-entity valid lengths, so the encoder always receives a
+        # dense tensor even on cold start. The valid data leads and the zeros
+        # trail, matching ``pack_padded_sequence`` semantics (valid prefix,
+        # padding suffix): a left-padded layout would make the encoder pack
+        # the zero prefix as "valid" and drop the real history instead.
         seqs, valids = [], []
         for key in keys:
             dq = store.get(key)
             rows = [list(row) for row in dq] if dq is not None else []
             valid = len(rows)
             if valid < self.seq_len:
-                rows = [[0.0] * n_channels] * (self.seq_len - valid) + rows
+                rows = rows + [[0.0] * n_channels] * (self.seq_len - valid)
             seqs.append(rows)
             valids.append(valid)
         return seqs, valids

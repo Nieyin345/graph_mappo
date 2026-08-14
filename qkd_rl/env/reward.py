@@ -356,28 +356,13 @@ class RewardFunction:
             conflict_penalty /= denom
             generated_reward = raw_n + dense_reward
             total = key_total / denom + dense_reward - switch_penalty
-        if self.config.get("normalize_served_by_queue", False):
-            # Served reward relative to the current demand pressure:
-            # served / (served + still-waiting). waiting_keys is measured
-            # after service, so served + waiting is the total queued demand
-            # including requests that arrived this step.
-            demand_before = max(0.0, served_keys + waiting_keys)
-            denom = max(demand_before, self.normalize_floor)
-            served_reward = (
-                float(self.config["served_weight"]) * served_keys / denom
-                if self._enabled(self.config, "served")
-                else 0.0
-            )
-            total = (
-                served_reward
-                + generated_reward
-                - failed_penalty
-                - waiting_penalty
-                - overflow_penalty
-                - expired_key_penalty
-                - conflict_penalty
-                - switch_penalty
-            )
+        # Note: the former normalize_served_by_queue branch (served / (served +
+        # waiting), saturated at ~1 once the queue drains) was removed. It
+        # silently overrode served_reference and made the served reward
+        # insensitive to absolute served volume. Served keys are now always
+        # normalized by the fixed served_reference, so every bit of service
+        # has a constant marginal reward and the reward scale is uniform
+        # across the episode.
         if self.clip_abs > 0.0:
             served_reward = self._clip(served_reward)
             generated_reward = self._clip(generated_reward)

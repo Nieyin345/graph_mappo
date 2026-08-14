@@ -109,6 +109,47 @@ def test_fixed_served_reference_is_time_invariant() -> None:
     assert early.served_reward == pytest.approx(late.served_reward, rel=1e-9)
 
 
+def test_served_reward_scales_linearly_with_served_keys() -> None:
+    # Fixed served_reference gives every served bit a constant marginal reward:
+    # 10x the served keys -> exactly 10x the served reward (no queue-ratio
+    # saturation that capped the old normalize_served_by_queue path at ~1).
+    fn = _reward_fn(served_reference=100000.0)
+    fn.reset()
+    small = _compute(fn, arrived=0.0, served_keys=5000.0)
+    large = _compute(fn, arrived=0.0, served_keys=500000.0)
+    assert small.served_reward == pytest.approx(1.0 * 5000.0 / 100000.0, rel=1e-6)
+    assert large.served_reward == pytest.approx(1.0 * 500000.0 / 100000.0, rel=1e-6)
+    assert large.served_reward == pytest.approx(100.0 * small.served_reward, rel=1e-6)
+
+
+def test_stale_normalize_served_by_queue_flag_has_no_effect() -> None:
+    # The normalize_served_by_queue branch was removed (it silently overrode
+    # served_reference and saturated once the queue drained). A stale config
+    # flag must not change the served reward: 20 * 50000 / 100000 = 10.0,
+    # where the old branch returned 20.0 (saturated ratio of 1).
+    fn = RewardFunction(
+        {
+            "served_weight": 20.0,
+            "served_reference": 100000.0,
+            "normalize_served_by_queue": True,
+            "failed_weight": 2.0,
+            "waiting_weight": 0.05,
+            "waiting_stock_weight": 0.01,
+            "overflow_weight": 0.1,
+            "expired_key_weight": 0.1,
+            "conflict_weight": 0.01,
+            "normalize_by_arrived_demand": False,
+            "normalize_window": 5,
+            "normalize_floor": 10000.0,
+            "clip_abs": 0.0,
+        }
+    )
+    fn.reset()
+    detail = _compute(fn, arrived=0.0, served_keys=50000.0, waiting_keys=0.0)
+    assert detail.served_reward == pytest.approx(10.0, rel=1e-6)
+    assert detail.total == pytest.approx(10.0, rel=1e-6)
+
+
 def test_generated_reward_scales_with_added_keys() -> None:
     fn = _reward_fn(generated_weight=0.01)
     for _ in range(5):

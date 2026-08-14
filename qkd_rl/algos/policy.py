@@ -227,20 +227,22 @@ class MAPPOPolicy:
         self,
         obs: GraphObservation,
         actions: dict[str, str],
-        matched_edges: list[str] | None = None,
+        matched_edges: list[str],
     ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], torch.Tensor]:
         """Recompute the joint matching log prob / entropy and global value.
 
         Used by the PPO update: the returned log probs / value carry gradients
         so actor and critic losses can be back-propagated.
+
+        ``matched_edges`` is REQUIRED: the joint log prob is only defined for
+        the exact sampled edge sequence (it depends on the order), which cannot
+        be reconstructed from the actions dict alone.
         """
         output = self.model(obs, self.device, build_logits_dict=False)
         node_ids = output.logits_node_order if output.logits_node_order is not None else list(output.logits.keys())
         if not node_ids:
             return {}, {}, output.value
         edge_scores = output.edge_scores or {}
-        if matched_edges is None:
-            matched_edges = self._matched_edges_from_actions(actions)
         joint_lp, joint_entropy = self._matching_log_prob_entropy(edge_scores, matched_edges)
         log_probs, entropies = self._fill_node_tensors(node_ids, joint_lp, joint_entropy)
         return log_probs, entropies, output.value
@@ -250,16 +252,15 @@ class MAPPOPolicy:
         self,
         obs_list: list[GraphObservation],
         actions_list: list[dict[str, str]],
-        matched_edges_list: list[list[str]] | None = None,
+        matched_edges_list: list[list[str]],
     ) -> list[tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], torch.Tensor]]:
         """Batched PPO evaluation: one block-diagonal model forward for many
         graphs instead of one forward per step. Per-graph math is identical to
         ``evaluate_actions``; returns (log_probs, entropies, value) per obs."""
         outputs = self.model.batched_forward(obs_list, self.device)
         results: list[tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], torch.Tensor]] = []
-        for i, (obs, actions, value) in enumerate(zip(
+        for i, (obs, value) in enumerate(zip(
             obs_list,
-            actions_list,
             outputs.values,
         )):
             node_order = list(obs.node_ids)
@@ -267,10 +268,7 @@ class MAPPOPolicy:
                 results.append(({}, {}, value))
                 continue
             edge_scores = outputs.edge_score_maps[i] or {}
-            matched_edges = matched_edges_list[i] if matched_edges_list is not None else None
-            if matched_edges is None:
-                matched_edges = self._matched_edges_from_actions(actions)
-            joint_lp, joint_entropy = self._matching_log_prob_entropy(edge_scores, matched_edges)
+            joint_lp, joint_entropy = self._matching_log_prob_entropy(edge_scores, matched_edges_list[i])
             log_probs, entropies = self._fill_node_tensors(node_order, joint_lp, joint_entropy)
             results.append((log_probs, entropies, value))
         return results
@@ -291,20 +289,6 @@ class MAPPOPolicy:
             for edge_id, score in edge_scores.items()
         }
         return self._matching_log_prob_entropy(edge_score_tensors, matched_edges)
-
-    def _matched_edges_from_actions(self, actions: dict[str, str]) -> list[str]:
-        """Reconstruct the matched edge sequence from mutual actions."""
-        endpoints = self._endpoints()
-        matched: list[str] = []
-        for node_id, action in actions.items():
-            if action == self.model.action_space.IDLE:
-                continue
-            if actions.get(action) != node_id:
-                continue
-            edge_id = self.model.action_space.edge_by_pair.get(tuple(sorted((node_id, action))))
-            if edge_id is not None and edge_id not in matched:
-                matched.append(edge_id)
-        return matched
 
     def _matching_log_prob_entropy(
         self,

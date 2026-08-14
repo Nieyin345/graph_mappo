@@ -175,6 +175,12 @@ class MAPPOTrainer:
     def collect_rollout(self) -> RolloutBuffer:
         self._reset_rollout_debug()
         n_workers = int(self.config["train"].get("n_rollout_workers", 1))
+        if self.env.continuous and n_workers > 1:
+            raise ValueError(
+                "continuous RL requires n_rollout_workers=1: worker envs call "
+                "env.reset() every episode and would break the cross-episode "
+                "continuity (use rollout_batch + episodes_per_update=1 instead)."
+            )
         if n_workers <= 1:
             if (
                 self.episodes_per_update > 1
@@ -616,18 +622,19 @@ class MAPPOTrainer:
                 node_ids = step.obs.node_ids
                 if node_ids:
                     # PPO is now evaluated on the whole matching action, not on
-                    # the per-node copies of that same scalar.
-                    new_lp = torch.stack([log_probs[node_id] for node_id in node_ids])[0]
+                    # the per-node copies of that same scalar. Every node shares
+                    # the same joint scalar, so any node id yields it.
+                    new_lp = log_probs[node_ids[0]]
                     old_lp = (
                         step.joint_log_prob.to(self.device)
                         if step.joint_log_prob is not None
-                        else torch.stack([step.log_probs[node_id].to(self.device) for node_id in node_ids])[0]
+                        else step.log_probs[node_ids[0]].to(self.device)
                     )
                     ratios = torch.exp(new_lp - old_lp)
                     surr1 = ratios * adv
                     surr2 = torch.clamp(ratios, 1.0 - clip_eps, 1.0 + clip_eps) * adv
                     actor_loss = actor_loss - torch.min(surr1, surr2)
-                    entropy_sum = entropy_sum + torch.stack([ent for ent in entropies.values()])[0]
+                    entropy_sum = entropy_sum + entropies[node_ids[0]]
                     kl_sum = kl_sum + (ratios - 1.0 - (new_lp - old_lp))
                     ratio_sum = ratio_sum + ratios
                 returns_target = step.returns.to(self.device)
@@ -827,7 +834,9 @@ class MAPPOTrainer:
 
     # ------------------------------------------------------------------- control
     def train(self, num_updates: int | None = None) -> dict:
-        num_updates = int(num_updates or self.num_updates)
+        if num_updates is None:
+            num_updates = self.num_updates
+        num_updates = int(num_updates)
         target_updates = self.update_count + num_updates
         log_path = self.output_dir / "metrics.jsonl"
         try:
@@ -836,6 +845,9 @@ class MAPPOTrainer:
                 iteration_started = time.perf_counter()
                 buffer = self.collect_rollout()
                 rollout_finished = time.perf_counter()
+                # Remember BEFORE updating so this rollout's steps train this
+                # update (replay data is otherwise always one rollout stale).
+                self._remember_replay(buffer)
                 stats = self.update(buffer)
                 update_finished = time.perf_counter()
                 stats.rollout_s = rollout_finished - iteration_started
@@ -843,7 +855,6 @@ class MAPPOTrainer:
                 stats.elapsed_s = update_finished - iteration_started
                 self.update_count += 1
                 stats.update = self.update_count
-                self._remember_replay(buffer)
                 if (
                     self.env.continuous
                     and self.continuous_session_updates > 0

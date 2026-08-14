@@ -31,3 +31,4 @@ Thumbs.db
 .pytest_tmp2/
 .pytest_tmp3/
 
+.reasonix/
