@@ -619,6 +619,7 @@ class GraphBuilder:
             all_edge_ids=(
                 list(env_state.edge_windows.keys()) if include_stocked_unavailable else None
             ),
+            link_type_bonus=relay_cfg.get("link_type_bonus", None),
         )
         self._last_relay_importance = relay_importance or {}
         ewindows = env_state.edge_windows

@@ -1,0 +1,46 @@
+# curriculum: 课程学习，逐步加长 rollout 步长
+# 阶段1: 240步 → 阶段2: 480步 → 阶段3: 720步 → 阶段4: 1440步
+# 适合从短步长开始逐步训练的渐进式学习
+train:
+  num_updates: 400
+  rollout_steps: 240
+  episodes_per_update: 4
+  rollout_batch: true
+  n_rollout_workers: 1
+  gamma: 0.99
+  gae_lambda: 0.95
+  value_target: gae
+  ppo:
+    epochs: 1
+    # 960 samples (240步×4局) / 256 = 4 minibatches
+    minibatch_size: 256
+    clip_eps: 0.2
+    batch_chunk: 256
+    normalize_advantages: true
+    entropy_coef: 0.001
+    value_coef: 0.5
+    max_grad_norm: 0.5
+    target_kl: 0.03
+  optimizer:
+    type: adam
+    actor_lr: 0.0003
+    critic_lr: 0.001
+  logging:
+    log_interval: 1
+    checkpoint_interval: 10
+    eval_interval: 10
+    eval_episodes: 2
+  curriculum:
+    stages:
+      - until_update: 60
+        rollout_steps: 240
+        episodes_per_update: 4
+      - until_update: 120
+        rollout_steps: 480
+        episodes_per_update: 4
+      - until_update: 200
+        rollout_steps: 720
+        episodes_per_update: 2
+      - until_update: 400
+        rollout_steps: 1440
+        episodes_per_update: 2

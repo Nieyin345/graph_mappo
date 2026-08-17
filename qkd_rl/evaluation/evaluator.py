@@ -186,3 +186,82 @@ def write_summary_json(records: list[EpisodeRecord], path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(aggregate_episodes(records), indent=2, ensure_ascii=False), encoding="utf-8")
     return path
+
+
+def merge_eval_summary(
+    records: list[EpisodeRecord],
+    path: Path,
+    seeds: list[int] | None = None,
+    meta: dict | None = None,
+) -> Path:
+    """Incrementally merge a new run of episode records into a persistent
+    summary JSON at `path`.
+
+    The file accumulates every run so the same eval directory can be re-used:
+      {
+        "meta": {..., "runs": N},
+        "policies": {
+          "<policy>": {
+            <aggregate fields for all runs>,
+            "runs": [ {timestamp, seeds, episode_log: [per-episode dicts]} ]
+          }
+        }
+      }
+
+    Each episode dict carries the full EpisodeRecord fields (episode/seed/
+    steps/total_reward/arrived_keys/served_keys/failed_keys/success_rate/
+    conflict_count), so every algorithm, every episode, every seed and every
+    run timestamp is preserved for later analysis.
+    """
+    import time as _time
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing: dict = {}
+    if path.is_file():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            existing = {}
+
+    by_policy: dict[str, list[EpisodeRecord]] = {}
+    for record in records:
+        by_policy.setdefault(record.policy, []).append(record)
+
+    policies = existing.get("policies", {})
+    run_ts = _time.strftime("%Y-%m-%dT%H:%M:%S")
+    for policy_name, items in sorted(by_policy.items()):
+        blob = policies.setdefault(policy_name, {"runs": []})
+        run_meta = {
+            "timestamp": run_ts,
+            "episodes": len(items),
+            "seeds": [int(r.seed) for r in items],
+            "episode_log": [asdict(r) for r in items],
+        }
+        if seeds:
+            run_meta["seeds_requested"] = [int(s) for s in seeds]
+        blob["runs"].append(run_meta)
+        # Re-aggregate across ALL episodes of this policy (all runs)
+        all_items: list[EpisodeRecord] = []
+        for run in blob.get("runs", []):
+            for e in run.get("episode_log", []):
+                try:
+                    all_items.append(EpisodeRecord(**e))
+                except Exception:
+                    pass
+        if all_items:
+            agg = aggregate_episodes(all_items)
+            for k, v in agg[policy_name].items():
+                blob[k] = v
+            blob["n_episodes"] = len(all_items)
+
+    merged_meta = dict(existing.get("meta", {}))
+    merged_meta.update({"last_run": run_ts, "eval_dir": str(path.parent)})
+    if meta:
+        merged_meta.update(meta)
+    merged_meta["total_runs"] = max(
+        [len(p.get("runs", [])) for p in policies.values()] or [0]
+    )
+
+    out = {"meta": merged_meta, "policies": policies}
+    path.write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
+    return path

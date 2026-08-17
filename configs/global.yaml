@@ -8,7 +8,7 @@ global:
     window:
       start_day: 330
       end_day: 365
-    request_seeds: [7]
+    request_seeds:
+    - 7
     episodes: 1
-    episode_days: 2
-    start_seed: 1000
+    episode_steps: 240

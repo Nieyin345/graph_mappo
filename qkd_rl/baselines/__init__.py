@@ -10,7 +10,6 @@ from qkd_rl.baselines.greedy_relay_diffusion import GreedyRelayDiffusionPolicyV2
 from qkd_rl.baselines.greedy_relay_diffusion import GreedyRelayDiffusionPolicyV3
 from qkd_rl.baselines.greedy_rate import GreedyRatePolicy
 from qkd_rl.baselines.greedy_static_relay import GreedyStaticRelayPolicy
-from qkd_rl.baselines.ilp_optimal import ILPOptimalPolicy
 from qkd_rl.baselines.random_policy import RandomPolicy
 
 __all__ = [
@@ -23,6 +22,5 @@ __all__ = [
     "GreedyRelayDiffusionPolicyV2",
     "GreedyRelayDiffusionPolicyV3",
     "GreedyStaticRelayPolicy",
-    "ILPOptimalPolicy",
     "RandomPolicy",
 ]

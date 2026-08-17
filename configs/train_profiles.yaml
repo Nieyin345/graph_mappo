@@ -114,9 +114,13 @@ train_profiles:
       value_target: gae
       ppo:
         epochs: 1  # single epoch per update (see train_mappo.yaml note)
-        minibatch_size: 1024
+        # 960 samples (240 steps x 4 episodes) / 256 = 4 minibatches per
+        # update. With 1024 the whole rollout fit one batch, so PPO degenerated
+        # to a single parameter step per update (ratio=1, kl=0, clip dead) and
+        # the policy drifted toward higher entropy instead of converging.
+        minibatch_size: 256
         clip_eps: 0.2
-        batch_chunk: 512
+        batch_chunk: 256
         normalize_advantages: true
         entropy_coef: 0.001
         value_coef: 0.5

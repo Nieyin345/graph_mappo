@@ -170,9 +170,8 @@ conda run -n pytorch python scripts/run_baselines.py `
 - `greedy_demand`：按需求/速率混合
 - `greedy_relay`：按请求路径补库存，参数含 `rate_weight / demand_weight / completion_multiplier / keep_weight / deadline_window`
 - `greedy_matching`：速率/库存/需求/保持的综合匹配
-- `ilp_optimal`：ILP 参考，参数含 `max_requests / max_paths_per_request / time_limit_s / mip_rel_gap`
 
-每个策略都有 `enabled: true/false`，不需要的策略可以直接关闭。
+每个策略都有 `enabled: true/false`，不需要的策略可以直接关闭。离线上界（`scripts/run_rh_milp_upper_bound.py`）单独运行。
 
 ## 5. 单独评估某个 RL Checkpoint
 

@@ -2,9 +2,9 @@
 
 All testers read the same ``global.validation`` block from
 ``configs/global.yaml`` and build the same environment config, so RL,
-greedy baselines and MILP are compared under identical conditions:
-window, request seeds, episode length, random-start mode and scenario
-time limit.
+greedy baselines and the receding-horizon MILP upper bound are compared under
+identical conditions: window, request seeds, episode length, random-start mode
+and scenario time limit.
 """
 
 from __future__ import annotations

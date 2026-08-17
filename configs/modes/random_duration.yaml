@@ -1,0 +1,36 @@
+# random_duration: 随机起点 + 随机时长
+# 起点在训练窗口内随机，时长在 episode_days_min~max 范围内随机天
+env:
+  episode_start_mode: random_day
+  day_steps: 1440
+  episode_steps: 4320
+train:
+  num_updates: 100
+  rollout_steps: 4320
+  episodes_per_update: 1
+  episode_days_min: 1
+  episode_days_max: 2
+  n_rollout_workers: 2
+  rollout_worker_device: cpu
+  rollout_batch: true
+  value_target: gae
+  ppo:
+    epochs: 1
+    minibatch_size: 1024
+    batch_chunk: 256
+    clip_eps: 0.1
+    normalize_advantages: true
+    entropy_coef: 0.001
+    value_coef: 0.5
+    max_grad_norm: 0.5
+    target_kl: 0.02
+  optimizer:
+    type: adam
+    actor_lr: 0.0003
+    critic_lr: 0.0003
+  logging:
+    log_interval: 1
+    checkpoint_interval: 10
+    eval_interval: 10
+    eval_steps: 1440
+    eval_episodes: 1

@@ -73,6 +73,8 @@ reward:
   # Component switches: set any of these to false to disable that reward term
   # entirely; the *_weight keys still control the term when enabled.
   success_enabled: true
+  success_delta_enabled: true
+  success_delta_weight: 5000
   served_enabled: true
   raw_generation_enabled: true
   dense_enabled: true

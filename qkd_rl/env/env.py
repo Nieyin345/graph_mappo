@@ -204,6 +204,7 @@ class QKDEnv:
             waiting_keys=serve_result.waiting_keys,
             waiting_delta=waiting_delta,
             switch_count=len(set(resolved.activated_edges) - set(self.last_activated_edges)),
+            keep_active_count=len(set(resolved.activated_edges) & set(self.last_activated_edges)),
             added_by_edge=allocation.added_by_edge,
             relay_importance=relay_importance,
             baseline_reward=baseline_reward,

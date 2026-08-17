@@ -11,12 +11,14 @@ from qkd_rl.env.routing import AllocationResult
 
 _ENABLED_FLAG_KEYS = {
     "success_enabled",
+    "success_delta_enabled",
     "served_enabled",
     "raw_generation_enabled",
     "dense_enabled",
     "failed_enabled",
     "waiting_enabled",
     "switch_enabled",
+    "keep_active_enabled",
     "overflow_enabled",
     "expired_key_enabled",
     "conflict_enabled",
@@ -35,6 +37,7 @@ class RewardDetail:
     conflict_penalty: float
     dense_reward: float = 0.0
     switch_penalty: float = 0.0
+    keep_active_reward: float = 0.0
     baseline_reward: float = 0.0
 
 
@@ -137,6 +140,7 @@ class RewardFunction:
         waiting_keys: float = 0.0,
         waiting_delta: float = 0.0,
         switch_count: int = 0,
+        keep_active_count: int = 0,
         added_by_edge: dict[str, float] | None = None,
         relay_importance: dict[str, float] | None = None,
         baseline_reward: float = 0.0,
@@ -314,12 +318,17 @@ class RewardFunction:
             if self._enabled(self.config, "switch")
             else 0.0
         )
+        keep_active_reward = (
+            float(self.config.get("keep_active_weight", 0.0)) * max(0, int(keep_active_count))
+            if self._enabled(self.config, "keep_active")
+            else 0.0
+        )
         raw_n = 0.0
         key_total = (
             served_reward + raw_generation
             - failed_penalty - waiting_penalty - overflow_penalty - expired_key_penalty - conflict_penalty
         )
-        total = key_total - switch_penalty
+        total = key_total - switch_penalty + keep_active_reward
         fixed_reference = float(self.config.get("served_reference", 0.0) or 0.0)
         if fixed_reference > 0.0:
             # Fixed demand-side reference: the same served/penalty volume has
@@ -363,6 +372,20 @@ class RewardFunction:
         # normalized by the fixed served_reference, so every bit of service
         # has a constant marginal reward and the reward scale is uniform
         # across the episode.
+        # Success-rate delta: reward the *increase* in the cumulative episode
+        # success rate (served / arrived) contributed by this step, so the
+        # policy is directly incentivised to improve the final metric, not
+        # just the per-step served volume. The delta is multiplied by a
+        # configurable weight (default 5000) so its scale is comparable to
+        # the other shaped reward components.
+        if self._enabled(self.config, "success_delta"):
+            self._arrived_total += float(arrived_keys)
+            self._served_total += float(served_keys)
+            current = self._served_total / self._arrived_total if self._arrived_total > 0.0 else 0.0
+            delta = current - self._prev_success_rate
+            self._prev_success_rate = current
+            sw = float(self.config.get("success_delta_weight", 5000.0))
+            total += delta * sw
         if self.clip_abs > 0.0:
             served_reward = self._clip(served_reward)
             generated_reward = self._clip(generated_reward)
@@ -383,4 +406,5 @@ class RewardFunction:
             conflict_penalty=conflict_penalty,
             dense_reward=dense_reward,
             switch_penalty=switch_penalty,
+            keep_active_reward=keep_active_reward,
         )

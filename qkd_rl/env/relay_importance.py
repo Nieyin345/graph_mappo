@@ -23,6 +23,7 @@ def compute_relay_importance(
     ignore_consumption: bool = False,
     include_stocked_unavailable: bool = True,
     all_edge_ids: list[str] | None = None,
+    link_type_bonus: dict[str, float] | None = None,
 ) -> dict[str, float]:
     """BFS relay importance with queue-age weighting.
 
@@ -141,6 +142,23 @@ def compute_relay_importance(
     if not np.any(totals > 0.0):
         return {}
     max_value = float(totals.max())
+    # Apply link-type bonus (e.g. SAT-SAT: 1.5, GS-SAT: 1.2)
+    if link_type_bonus:
+        for i, edge_id in enumerate(active_ids):
+            if totals[i] > 0.0:
+                body = edge_id[2:] if edge_id.startswith("E_") else edge_id
+                if "__" in body:
+                    src, dst = body.split("__", 1)
+                    def _typ(n):
+                        if n.startswith("Sat_") or n.startswith("SAT_"):
+                            return "SAT"
+                        if n.startswith("HAP_"):
+                            return "HAP"
+                        return "GS"
+                    key = f"{_typ(src)}-{_typ(dst)}"
+                    bonus = link_type_bonus.get(key, 1.0)
+                    totals[i] *= bonus
+        max_value = float(totals.max())
     return {
         edge_id: float(totals[i]) / max_value
         for i, edge_id in enumerate(active_ids)

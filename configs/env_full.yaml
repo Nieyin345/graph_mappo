@@ -55,7 +55,7 @@ scenario:
   # 0 = no limit (full rate_provider.time window).
   time_limit:
     # 30-day window for stable training/evaluation and comparison with the
-    # existing MILP reference (30 days). Set to 0 for the full year.
+    # receding-horizon MILP upper bound. Set to 0 for the full year.
     days: 30
 
 # Calibration (scripts/calibrate_demand.py + full-env sweeps on the real H5):
@@ -108,12 +108,18 @@ reward:
   # Component switches: set any of these to false to disable that reward term
   # entirely; the *_weight keys still control the term when enabled.
   success_enabled: true
+  success_delta_enabled: true
+  # Success-rate delta weight: delta * weight / 1 (not divided by served_reference)
+  # so 1% improvement in a step adds 50 to the total. Adjust to balance against
+  # served_reward (~20 per step).
+  success_delta_weight: 50
   served_enabled: true
   raw_generation_enabled: true
   dense_enabled: true
   failed_enabled: true
   waiting_enabled: false
-  switch_enabled: true
+  switch_enabled: false
+  keep_active_enabled: true
   overflow_enabled: false
   expired_key_enabled: true
   conflict_enabled: false
@@ -138,7 +144,7 @@ reward:
   mode: shaped
   # Success-service reward: reward actually served keys directly instead of the
   # sparse, mostly-zero cumulative success-rate delta.
-  served_weight: 20.0
+  served_weight: 50.0
   # Raw stored-key term (independent of demand path) -- leave 0; B1 uses the
   # relay-importance-weighted dense term below so we only reward keys that help
   # reach demand, not wholesale generation into the pools.
@@ -163,6 +169,7 @@ reward:
   waiting_weight: 0.0
   waiting_stock_weight: 0.0
   switch_weight: 0.001
+  keep_active_weight: 0.001
   overflow_weight: 0.0
   conflict_weight: 0.0
   expired_key_weight: 0.01

@@ -3,9 +3,6 @@ features:
     include_node_type_one_hot: true
     node_type_dim: 3
     normalize_amount_by: 1000.0
-    # Demand amounts grow unboundedly over an episode (pending demand / window
-    # sums reach millions of bits), so they use log1p normalization instead of
-    # a linear division. Reference = 1,000,000 bits maps to 1.0.
     normalize_amount_log1p: true
     normalize_amount_reference: 1000000.0
     normalize_count_by: 10.0
@@ -18,7 +15,10 @@ features:
     include_demand_out: true
     include_queue_pressure: true
     include_recent_demand: true
-    recent_demand_windows: [15, 60, 240]
+    recent_demand_windows:
+    - 15
+    - 60
+    - 240
     include_is_available: true
     include_time_features: true
     time_features:
@@ -38,64 +38,29 @@ features:
     include_rate_mean: true
     include_rate_max: true
     include_last_activated: true
-    # Relay demand importance. Enabled by the demand_edge model mode; candidate
-    # edges are found by bidirectional shortest-hop reachability up to
-    # max_path_links; weight decays with total hops and scales with each link's
-    # own remaining-capacity ratio (capacity - level) / capacity. The per-edge
-    # accumulated value is normalized by the current-step maximum so it stays
-    # in [0, 1] regardless of how much historical demand is queued.
     include_relay_importance: true
     relay_importance:
       max_path_links: 3
       hop_decay_factor: 0.25
-      # tau = deadline_steps * ratio. Longer queue time makes the edge more
-      # important; 0.8 means urgency reaches e^1 at 80% of the deadline.
       wait_urgency_tau_ratio: 0.8
-      # Use original request amount instead of remaining-after-service, so
-      # importance reflects demand itself rather than key consumption.
       ignore_consumption: false
-      # Design choice: currently-unavailable edges that still hold key stock
-      # (recently active, keys not yet expired) are included in the BFS
-      # potential graph, so they can act as relay path intermediates and keep
-      # their importance from dropping to zero the moment they go dark. This
-      # is intentional: a link that held keys a moment ago will likely be
-      # usable again soon and should keep some presence in the features.
-      # Importance is still only assigned to selectable (currently legal)
-      # edges. NOTE: this deliberately deviates from the strict "G_t only"
-      # definition in the algorithm doc (SS 3.2.1); that doc is updated to
-      # match.
       include_stocked_unavailable: true
       availability_sample_stride: 600
       availability_sample_limit: 876
       capacity_decay_strength: 1.0
       min_scarcity: 0.0
-    # Per-link remaining QKP capacity ratio (capacity - level) / capacity.
-    # The switch flag is not a separate feature: switch = activated now AND
-    # NOT last_activated, so last_activated plus the agent's own activation
-    # decision already carries that information (rate decay still applies in
-    # QKDEnv when env.switch_cost.enabled).
     include_qkp_capacity_left: true
   demand_edge:
     enabled: true
-    # active_pairs: only currently pending requests create demand edges.
-    # Served (success) and expired (failure) requests are removed from the
-    # graph immediately; their history still feeds features on active edges.
     build_mode: active_pairs
     include_pending_amount: true
     include_pending_count: true
     include_min_deadline_left: true
     include_mean_deadline_left: true
-    # Already-queued time: t - arrival_t, normalized by requests.deadline_steps.
-    # This distinguishes new requests from long-waiting ones (deadline_left is
-    # the remaining time, wait_time is the elapsed time).
     include_mean_wait_time: true
     include_priority_sum: true
-    # Pending requests are bucketed by already-queued time: the deadline is
-    # split into wait_bucket_count equal buckets (rounded), and each bucket
-    # stores the remaining demand of requests whose wait time falls in it.
     include_wait_bucket_amounts: true
     wait_bucket_count: 10
-    # 0 = no time decay; positive tau = exp(-wait_time / tau).
     wait_decay_tau: 0
     normalize_amount_by: 1000.0
     normalize_amount_log1p: true
@@ -103,8 +68,6 @@ features:
     normalize_count_by: 10.0
     normalize_count_log1p: true
     normalize_count_reference: 100.0
-    # Deadline-left features are scaled to [0, 1] by requests.deadline_steps.
-    # 0 = auto (use requests.deadline_steps); set a positive value to override.
     normalize_deadline_by: 0
   action:
     include_idle_action: true
@@ -112,11 +75,6 @@ features:
     mask_below_min_rate: true
     mask_full_qkp_edges: false
     mask_disallowed_link_types: true
-  # Demand-side history encoder (shared LSTM), form A: explicit wait-bucket
-  # weight plus a learned predicted-demand term. Node / physical-edge history
-  # channels are disabled because their future is already available in the
-  # rate/availability features. Enabled later; disabled keeps it out of the
-  # active model.
   history_encoder:
     enabled: false
     type: lstm
@@ -137,4 +95,3 @@ features:
   dims:
     node_dim: auto
     edge_dim: auto
-

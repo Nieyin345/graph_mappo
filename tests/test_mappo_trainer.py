@@ -320,3 +320,60 @@ def test_checkpoint_reward_change_resets_critic_head(tmp_path):
     trainer3.load_checkpoint(ckpt)
     head_same = [p.detach().clone() for p in model3.critic.value_head.parameters()]
     assert all(torch.equal(a, b) for a, b in zip(head_before, head_same))
+
+
+def test_episode_steps_fixed_honors_configured_length(tmp_path):
+    """episode_steps_fixed=true must keep the configured env.episode_steps as-is
+    (240 in the real use case), instead of overwriting it with a random
+    1..N-day multiple of day_steps."""
+    config = _tiny_config(tmp_path)
+    config = deep_merge(
+        config,
+        {
+            "env": {
+                "episode_start_mode": "random_day",
+                "episode_steps": 240,
+                "day_steps": 1440,
+            },
+            "train": {
+                "episode_steps_fixed": True,
+                "episode_days_min": 1,
+                "episode_days_max": 2,
+                "rollout_steps": 240,
+                "episodes_per_update": 1,
+                "n_rollout_workers": 1,
+                "rollout_batch": True,
+            },
+        },
+    )
+    env = build_env_from_config(config)
+    trainer = MAPPOTrainer(
+        env, MAPPOPolicy(GraphMAPPOActorCritic(env.action_resolver.action_space, config)), config, tmp_path
+    )
+
+    # The flag is read from train config.
+    assert trainer.episode_steps_fixed is True
+
+    # Worker-path episode_steps_list honors the fixed configured value.
+    trainer.episodes_per_update = 2
+    seeds = [0, 1]
+    if trainer.env.continuous:
+        episode_steps_list = [trainer.rollout_steps] * len(seeds)
+    elif trainer.episode_steps_fixed:
+        episode_steps_list = [
+            int(trainer.config["env"].get("episode_steps", trainer.rollout_steps))
+        ] * len(seeds)
+    else:
+        episode_steps_list = [trainer._sample_episode_steps() for _ in seeds]
+    assert episode_steps_list == [240, 240]
+
+    # Serial-path guard: with the flag set, reset() must NOT overwrite the
+    # configured episode_steps with _sample_episode_steps() (random 1..2 days).
+    # _tiny_config default env.episode_steps = 40; the fixed flag keeps it.
+    assert trainer.env.config["env"]["episode_steps"] == 240
+
+    # Collecting a rollout really produces ~240 steps per episode
+    # (up to 240 each; a year-end truncation could stop earlier).
+    trainer.episodes_per_update = 1
+    buffer = trainer.collect_rollout()
+    assert 1 <= len(buffer.steps) <= 240

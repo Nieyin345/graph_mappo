@@ -114,7 +114,7 @@ flowchart LR
 ```
 
 - **编码器**：先由历史编码器（共享 LSTM，可选）把每个实体的历史窗口编码为向量，再与手工特征拼接，最后经图编码器（GNN）消息传递得到每个节点、每条边的嵌入。
-- **Actor**：参数在所有边/节点间共享。默认 `demand_edge` 模式直接读取物理边特征（含 relay importance）打分；`mixed` 模式拼接两端节点嵌入与边嵌入打分。再按这些分数**顺序采样一个匹配**（每步只在两端点仍空闲的边中选一条）；确定性评估时按分数贪心选边。
+- **Actor**：参数在所有边/节点间共享。对每条合法物理边，用两端节点嵌入与边嵌入拼接打分（见 §5.1）；默认 `demand_edge` 模式下节点嵌入只携带需求信号（物理边不更新节点），链路能力与 relay importance 由边嵌入直接提供。再按分数**顺序采样一个匹配**（每步只在两端点仍空闲的边中选一条）；确定性评估时按分数贪心选边。
 - **Critic**：对节点嵌入和两类边嵌入分别做全局池化，拼上规模计数，输出全局标量价值 $V(s)$。
 - **训练**：环境 rollout 收集轨迹 → GAE 计算优势与回报 → PPO 裁剪目标更新共享参数。
 
@@ -160,11 +160,13 @@ flowchart LR
 
 #### 3.2.1 relay importance 的计算（动态 BFS 扩散）
 
-设当前时隙合法可见的物理边构成图 $G_t$，所有有 pending 请求的 GS-GS 对构成需求边集合。对每个请求对 $(p,q)$，定义其剩余需求为
+设当前时隙合法可见的物理边构成图 $G_t$，所有有 pending 请求的 GS-GS 对构成需求边集合。对每个请求对 $(p,q)$，定义其**紧迫度加权剩余需求**为
 
 $$
-B_{pq}(t)=\sum_{\text{req}\in(p,q)}\max(0,\ \text{amount}-\text{served}),
+B_{pq}(t)=\sum_{\text{req}\in(p,q)}\underbrace{\max(0,\ \text{amount}-\text{served})}_{\text{剩余量}}\cdot \underbrace{\exp\!\Big(\tfrac{\mathrm{age}}{\tau}\Big)}_{\text{紧迫度}},\qquad \tau=\mathrm{deadline\_length}\cdot \mathrm{wait\_urgency\_tau\_ratio},
 $$
+
+其中 $\mathrm{age}=t-\mathrm{arrival\_t}$ 是已等待时长，$\mathrm{deadline\_length}=\mathrm{deadline\_t}-\mathrm{arrival\_t}$，$\mathrm{wait\_urgency\_tau\_ratio}=0.8$（`features.yaml`）——请求排队越久、越接近 deadline，其压力被指数放大（在 deadline 的 80% 处达到 $e^1$）。
 
 当前配置 $K=3$（`max_path_links`），即一条物理边要成为该请求对的候选，两端地面站经过它连通的**总跳数**不超过 $K$。对边 $i=(u,v)$，令
 
@@ -281,21 +283,13 @@ $$
 
 ### 5.1 Actor：边级打分
 
-所有物理边共享同一打分器。**默认 `demand_edge` 模式**对每条合法物理边 $(u,v)$ 打分：
-
-$$
-s_{(u,v)} = \mathrm{MLP}^{edge}\big(e_{(u,v)}\big),
-$$
-
-其中 $e_{(u,v)}$ 是物理边经过投影后的边嵌入，包含速率、剩余容量、可用性和 relay importance。这样设计的原因是：**决策最终落在链路上**，而需求如何影响链路已经被 relay importance 显式算好了，Actor 只需学会“重要性高且速率/容量合适的边值得选”。
-
-`mixed` 模式使用拼接后的节点与边嵌入：
+所有物理边共享同一打分器。两种模式都从**两端节点嵌入 + 物理边嵌入**拼接后打分：
 
 $$
 s_{(u,v)} = \mathrm{MLP}^{edge}\big(\,[\,h_u\;;\; h_v\;;\; e_{(u,v)}\,]\,\big),
 $$
 
-其中 $h_u,h_v$ 是 GNN 输出的两端节点嵌入。两种模式下同一条边两端共享同一个分数，因此分数在全图范围内可比。
+其中 $e_{(u,v)}$ 是物理边经过投影后的边嵌入（含速率、剩余容量、可用性和 relay importance），$h_u,h_v$ 是 GNN 输出的两端节点嵌入。两种模式的区别在节点嵌入的**语义**：默认 `demand_edge` 模式下物理边不参与节点消息传递（见 §4.2），因此 $h_u,h_v$ 只携带需求侧信号（不会混入"高速率但与需求无关"的链路能力），链路能力与 relay importance 由边嵌入直接提供；`mixed` 模式则两类边都更新节点。这样设计的原因是：**决策最终落在链路上**，而需求如何影响链路已经被 relay importance 显式算好了，Actor 只需学会"重要性高且速率/容量合适的边值得选"。同一条边两端共享同一个分数，因此分数在全图范围内可比。
 
 ### 5.2 Mask 与全局匹配策略
 
@@ -332,21 +326,22 @@ $$
 
 $$
 r_t = \underbrace{\frac{w_s\,S_t}{R_{\mathrm{served}}}}_{\text{服务成功}}
-\;+\;\underbrace{\frac{w_g}{R_{\mathrm{dense}}}\sum_{i\in\mathcal{M}_t} \mathrm{added}_i\cdot I_i}_{\text{重要性加权生成}}
+\;+\;\underbrace{w_g\cdot \frac{\sum_{i\in\mathcal{M}_t}\big[\mathrm{added}_i\,I_i - w_{\mathrm{low}}\,\mathrm{added}_i(1-I_i)\big]}{\sum_{i\in\mathcal{M}_t}\mathrm{added}_i}}_{\text{重要性加权生成（占比）}}
 \;-\;\underbrace{\frac{w_f\,F_t + w_e\,E_t}{R_{\mathrm{served}}}}_{\text{失败/过期}}
 \;-\;\underbrace{w_c\,C_t}_{\text{切换惩罚}},
 $$
 
 | 分量 | 含义 | 默认权重 |
 | --- | --- | --- |
-| $S_t$ | 本步成功服务的密钥量 | $w_s=5.0$ |
-| $\mathrm{added}_i\cdot I_i$ | 物理边 $i$ 实际存入 QKP 池的密钥量 × relay importance | $w_g=0.001$，$R_{\mathrm{dense}}=10^6$ |
+| $S_t$ | 本步成功服务的密钥量 | $w_s=20.0$ |
+| $\mathrm{added}_i$ | 物理边 $i$ 本步实际存入 QKP 池的密钥量 | $w_g=0.02$（`dense_generation_importance_weight`） |
+| $I_i$ | 该边 relay importance（§3.2.1，$[0,1]$） | $w_{\mathrm{low}}=0.01$（`dense_low_importance_penalty`） |
 | $F_t$ | 失败密钥量（含过期请求） | $w_f=0.01$ |
 | $E_t$ | 过期密钥量 | $w_e=0.01$ |
 | $C_t$ | 切换链路条数（当前激活但上一时隙未激活） | $w_c=0.001$ |
 | $R_{\mathrm{served}}$ | 固定需求参考值 `served_reference=100000` | — |
 
-需求侧分量统一除以**固定的** $R_{\mathrm{served}}$，不再使用滑动到达均值。固定参考值保证“同样 1 bit 服务量”在开局、深夜、高峰时期获得相同的奖励尺度，避免奖励在 episode 内部随时间漂移。
+dense 项在 `dense_normalize_by_added=true`（当前配置）下是**占比形式**：分母为本步存入总量，分子为重要性加权和再减去"低重要性惩罚"（存入低重要性链路的密钥被扣分），因此该项取值在 $[-w_g w_{\mathrm{low}},\,w_g]$ 之间，只奖励"生成在重要中继路径上且实际存入池中"的密钥份额，避免大额原始生成主导奖励；配置 `dense_normalize_by_added=false` 时退回绝对值形式（除以 `dense_reference=10^6`）。需求侧分量统一除以**固定的** $R_{\mathrm{served}}$，不再使用滑动到达均值。固定参考值保证"同样 1 bit 服务量"在开局、深夜、高峰时期获得相同的奖励尺度，避免奖励在 episode 内部随时间漂移。
 
 供应侧 dense 项只奖励“生成在重要中继路径上且实际存入池中”的密钥，权重较小，主要作为每步都非零的稠密信号；生成但溢出、或生成在低重要性链路上的密钥不获得奖励。切换惩罚是链路切换计数，按自身 $O(1)$ 权重计算，不再除以百万级参考值。
 
@@ -419,7 +414,7 @@ $$
 
 1. **Rollout**：用当前策略收集 $T \times$ episode 数 的轨迹（动作采样、价值评估均为 $no\_grad$）。
 2. **GAE**：从后向前计算 $\{A_t\},\{\hat R_t\}$。
-3. **多轮 minibatch 优化**：将轨迹打乱分成 minibatch（固定日配置默认 256，课程配置默认 512），对每个 minibatch：
+3. **多轮 minibatch 优化**：将轨迹打乱分成 minibatch（`train_mappo.yaml` 默认 1024，`curriculum` 配置 256；960 样本 = 240 步 × 4 局时拆成 4 个 minibatch，保证每次 update 有多次参数更新），对每个 minibatch：
    - 重算 $\log\pi_\theta$、熵与 $V_\psi$（块对角批量前向）；
    - 计算 $\mathcal{L}$，反向传播；
    - 梯度裁剪：$\|g\|_2 \le 0.5$；
@@ -447,7 +442,7 @@ $$
 | 梯度范数上限 | 0.5 | 梯度裁剪 |
 | target KL | 0.03 | 早停阈值 |
 | 学习率 | 3e-4 / 1e-3 | Actor(含encoder) / Critic |
-| minibatch | 256 / 512 | 固定日 / 课程配置默认 |
+| minibatch | 1024（train_mappo）/ 256（curriculum） | 每次 update 的 minibatch 大小 |
 | PPO epochs | 1 | 当前固定日/课程配置默认 |
 
 > 说明：所有"优化速度/实现"层面的改动（向量化、批量前向、零拷贝等）都不改变上述任何数学定义，本文档描述的算法与代码语义严格一致。

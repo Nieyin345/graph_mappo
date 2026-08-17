@@ -16,6 +16,9 @@ import os
 # workaround prevents the OMP Error #15 crash at import/exit.
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
+import warnings
+warnings.filterwarnings("ignore", message=".*iCCP.*")
+
 import argparse
 import sys
 from pathlib import Path

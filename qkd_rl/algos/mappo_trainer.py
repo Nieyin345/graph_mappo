@@ -125,6 +125,19 @@ class MAPPOTrainer:
         self.episode_days_max = int(train_cfg.get("episode_days_max", 1) or 1)
         if self.episode_days_max < self.episode_days_min:
             self.episode_days_max = self.episode_days_min
+        # Fixed episode length mode: when True, the env's configured
+        # episode_steps is honored as-is (no random 1..N-day resampling). The
+        # episode start is still randomized inside the training window by
+        # episode_start_mode: random_day, and requests stay per-episode random.
+        self.episode_steps_fixed = bool(train_cfg.get("episode_steps_fixed", False))
+        # Temperature annealing: actor logits are divided by temperature, so >
+        # 1.0 = more exploratory, < 1.0 = more greedy. Linearly anneal from
+        # `start` to `end` over `updates` updates (both default 1.0 = no anneal).
+        ts = train_cfg.get("temperature_schedule", {}) or {}
+        self.temp_start = float(ts.get("start", 1.0))
+        self.temp_end = float(ts.get("end", 1.0))
+        self.temp_updates = max(1, int(ts.get("updates", 1) or 1))
+        self.model.actor.temperature = self.temp_start
         if getattr(env, "continuous", False) and self.episodes_per_update != 1:
             raise ValueError("continuous RL training requires episodes_per_update=1.")
         # Lockstep batched-rollout envs (episodes_per_update instances), built
@@ -144,6 +157,16 @@ class MAPPOTrainer:
         # trainer starts on short episodes (frequent updates, easy horizon)
         # and gradually transitions to the full-day schedule.
         self.curriculum_stages = list(train_cfg.get("curriculum", {}).get("stages", []) or [])
+        # Fixed stride for episode seeds: base_seed = env_seed + update * stride.
+        # Using the *current* episodes_per_update would shift the multiplier
+        # when the curriculum changes it (e.g. 4 -> 2), so stage 3 would reuse
+        # stage 2's exact request seeds (verified: update 120 base = 120*2 =
+        # 240 = 60*4). The max across stages keeps seeds globally unique while
+        # staying stateless (checkpoint resumes update_count -> seeds continue).
+        seed_stride = int(train_cfg.get("episodes_per_update", 1))
+        for stage in self.curriculum_stages:
+            seed_stride = max(seed_stride, int(stage.get("episodes_per_update", seed_stride)))
+        self._seed_stride = max(1, seed_stride)
 
     def _apply_curriculum(self) -> None:
         """Apply the active curriculum stage for the current update count."""
@@ -192,10 +215,14 @@ class MAPPOTrainer:
 
             worker_device = self.config["train"].get("rollout_worker_device", str(self.device))
             self._rollout_pool = RolloutWorkerPool(self.config, worker_device, n_workers)
-        base_seed = int(self.config["seed"]["env_seed"]) + self.update_count * self.episodes_per_update
+        base_seed = int(self.config["seed"]["env_seed"]) + self.update_count * self._seed_stride
         seeds = [base_seed + ep for ep in range(self.episodes_per_update)]
         if self.env.continuous:
             episode_steps_list = [self.rollout_steps] * len(seeds)
+        elif self.episode_steps_fixed:
+            episode_steps_list = [
+                int(self.config["env"].get("episode_steps", self.rollout_steps))
+            ] * len(seeds)
         else:
             episode_steps_list = [self._sample_episode_steps() for _ in seeds]
         weights = {k: v.detach().cpu() for k, v in self.model.state_dict().items()}
@@ -301,14 +328,14 @@ class MAPPOTrainer:
     def _collect_rollout_serial(self) -> RolloutBuffer:
         buffer = RolloutBuffer(self.gamma, self.gae_lambda, self.device, value_target=self.value_target)
         self.model.eval()
-        base_seed = int(self.config["seed"]["env_seed"]) + self.update_count * self.episodes_per_update
+        base_seed = int(self.config["seed"]["env_seed"]) + self.update_count * self._seed_stride
         episode_rewards: list[float] = []
         episode_summaries: list[dict] = []
         for ep_idx in range(self.episodes_per_update):
             if self.env.continuous and self._continuous_obs is not None:
                 obs = self._continuous_obs
             else:
-                if not self.env.continuous:
+                if not self.env.continuous and not self.episode_steps_fixed:
                     self.env.config["env"]["episode_steps"] = self._sample_episode_steps()
                 obs = self.env.reset(seed=base_seed + ep_idx)
             ep_reward = 0.0
@@ -394,8 +421,9 @@ class MAPPOTrainer:
             self._rollout_envs = [build_env_from_config(self.config) for _ in range(n_ep)]
         envs = self._rollout_envs
         for env in envs:
-            env.config["env"]["episode_steps"] = self._sample_episode_steps()
-        base_seed = int(self.config["seed"]["env_seed"]) + self.update_count * n_ep
+            if not self.episode_steps_fixed:
+                env.config["env"]["episode_steps"] = self._sample_episode_steps()
+        base_seed = int(self.config["seed"]["env_seed"]) + self.update_count * self._seed_stride
         if envs[0].continuous and self._continuous_obs_list is not None:
             obs_list = list(self._continuous_obs_list)
         else:
@@ -760,8 +788,8 @@ class MAPPOTrainer:
         window = self.validation_cfg.get("window", {}) or {}
         return window.get("start_day") is not None and window.get("end_day") is not None
 
-    def _build_validation_envs(self) -> list[QKDEnv]:
-        if self._validation_envs is not None:
+    def _build_validation_envs(self, num_episodes: int | None = None, step_limit: int | None = None) -> list[object]:
+        if self._validation_envs is not None and num_episodes is None and step_limit is None:
             return self._validation_envs
 
         import copy
@@ -772,12 +800,27 @@ class MAPPOTrainer:
         seeds = [int(s) for s in (self.validation_cfg.get("request_seeds", []) or [])]
         if not seeds:
             seeds = list(range(7, 7 + int(self.validation_cfg.get("episodes", 3) or 3)))
-        episode_days = int(self.validation_cfg.get("episode_days", 1) or 1)
+        # Optional override: number of eval episodes (REUSE the seed list by
+        # cycling, exactly like the evaluator: seed = seeds[ep % len(seeds)]).
+        if num_episodes is not None and num_episodes > 0:
+            cycles = max(1, int(num_episodes))
+            seeds = [seeds[i % len(seeds)] for i in range(cycles)]
+        episode_steps = int(step_limit) if (step_limit is not None and step_limit > 0) else 0
+        if episode_steps <= 0:
+            episode_steps = int(self.validation_cfg.get("episode_steps", 0) or 0)
+        if episode_steps <= 0:
+            # Back-compat: derive from episode_days if episode_steps not set
+            episode_days = int(self.validation_cfg.get("episode_days", 1) or 1)
+            day_steps = int(self.config["env"].get("day_steps", 1440))
+            episode_steps = episode_days * day_steps
         day_steps = int(self.config["env"].get("day_steps", 1440))
-        episode_steps = episode_days * day_steps
 
         config = copy.deepcopy(self.config)
-        config["env"]["episode_start_mode"] = "random_day"
+        # Use the canonical validation start mode (default random_day), NOT a
+        # hardcoded value, so trainer validation matches the evaluator.
+        config["env"]["episode_start_mode"] = str(
+            self.validation_cfg.get("start_mode", "random_day")
+        )
         config["env"]["episode_steps"] = episode_steps
         config["env"]["continuous"] = False
         config["env"]["activation_window_start_day"] = start_day
@@ -794,9 +837,9 @@ class MAPPOTrainer:
         self._validation_envs = [build_env_from_config(config) for _ in seeds]
         return self._validation_envs
 
-    def evaluate_validation(self) -> dict:
+    def evaluate_validation(self, num_episodes: int | None = None, step_limit: int | None = None) -> dict:
         """Deterministic rollouts on the held-out validation window."""
-        envs = self._build_validation_envs()
+        envs = self._build_validation_envs(num_episodes=num_episodes, step_limit=step_limit)
         self.model.eval()
         start_seed_base = int(self.validation_cfg.get("start_seed", 0) or 0)
         obs_list = [
@@ -863,6 +906,12 @@ class MAPPOTrainer:
                 stats.elapsed_s = update_finished - iteration_started
                 self.update_count += 1
                 stats.update = self.update_count
+                # Temperature annealing (exploration -> exploitation)
+                if self.temp_start != self.temp_end:
+                    frac = min(1.0, self.update_count / self.temp_updates)
+                    self.model.actor.temperature = self.temp_start + frac * (self.temp_end - self.temp_start)
+                elif self.temp_start != 1.0:
+                    self.model.actor.temperature = self.temp_start
                 if (
                     self.env.continuous
                     and self.continuous_session_updates > 0
@@ -875,10 +924,14 @@ class MAPPOTrainer:
                 if self.update_count % self.checkpoint_interval == 0 or self.update_count == target_updates:
                     self.save_checkpoint(self.output_dir / f"checkpoint_update_{self.update_count:06d}.pt", stats)
                 if self.eval_interval and self.update_count % self.eval_interval == 0:
-                    eval_stats = self.evaluate(self.eval_episodes)
-                    self._append_log({"eval": eval_stats}, log_path)
                     if self.validation_enabled:
-                        val_stats = self.evaluate_validation()
+                        # Validated ONLY on the held-out validation config, so
+                        # trainer validation is always aligned with the evaluator:
+                        # episodes = validation.episodes, seeds cycle from
+                        # validation.request_seeds, steps = validation.episode_steps.
+                        val_stats = self.evaluate_validation(
+                            num_episodes=int(self.validation_cfg.get("episodes", 1) or 1)
+                        )
                         self._append_log({"eval_validation": val_stats}, log_path)
                         val_success = float(val_stats["mean_success_rate"])
                         if val_success > self.best_validation_success:

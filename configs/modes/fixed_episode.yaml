@@ -1,0 +1,54 @@
+env:
+  episode_steps: 240
+  episode_start_mode: random_day
+  day_steps: 1440
+train:
+  num_updates: 20
+  rollout_steps: 240
+  episodes_per_update: 4
+  episode_steps_fixed: true
+  n_rollout_workers: 1
+  rollout_batch: true
+  gamma: 0.99
+  gae_lambda: 0.95
+  value_target: gae
+  ppo:
+    epochs: 1
+    minibatch_size: 256
+    batch_chunk: 256
+    entropy_coef: 0.001
+    clip_eps: 0.2
+    normalize_advantages: true
+    value_coef: 0.5
+    max_grad_norm: 0.5
+    target_kl: 0.03
+  optimizer:
+    type: adam
+    actor_lr: 0.0003
+    critic_lr: 0.0003
+  logging:
+    log_interval: 1
+    checkpoint_interval: 10
+    eval_interval: 10
+    eval_episodes: 1
+    eval_steps: 240
+  temperature_schedule:
+    start: 1.0
+    end: 1.0
+    updates: 1000
+features:
+  history_encoder:
+    enabled: true
+    hidden_dim: 64
+    seq_len: 240
+    node:
+      include_arrived: false
+      include_served: false
+      include_failed: false
+      include_qkp_total: false
+    physical_edge:
+      include_qkp_level: true
+      include_available: true
+      include_activated: true
+    demand_edge:
+      include_pending_wait_buckets: true

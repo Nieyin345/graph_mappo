@@ -66,7 +66,6 @@ def test_all_config_files_merge_and_validate() -> None:
     config = load_config([ROOT / "configs" / name for name in names])
     ConfigValidator().validate(config)
     assert config["env"]["name"] == "qkd_full"  # env_full overrides env_small
-    assert config["baselines"]["ilp_optimal"]["enabled"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +276,6 @@ def test_baselines_yaml_policies_constructible() -> None:
     from qkd_rl.baselines.greedy_rate import GreedyRatePolicy
     from qkd_rl.baselines.greedy_relay import GreedyRelayPolicy
     from qkd_rl.baselines.greedy_relay_diffusion import GreedyRelayDiffusionPolicyV3
-    from qkd_rl.baselines.ilp_optimal import ILPOptimalPolicy
     from qkd_rl.baselines.random_policy import RandomPolicy
 
     base_cfg = load_config([ROOT / "configs" / "baselines.yaml"]).get("baselines", {})
@@ -289,7 +287,6 @@ def test_baselines_yaml_policies_constructible() -> None:
         "greedy_matching",
         "greedy_relay",
         "greedy_relay_diffusion_v3",
-        "ilp_optimal",
     }
     # Construct every enabled policy exactly like run_baselines.py does.
     if base_cfg["random"]["enabled"]:
@@ -324,14 +321,6 @@ def test_baselines_yaml_policies_constructible() -> None:
         wait_urgency_tau_ratio=base_cfg["greedy_relay_diffusion_v3"]["wait_urgency_tau_ratio"],
         ignore_consumption=base_cfg["greedy_relay_diffusion_v3"]["ignore_consumption"],
         include_stocked_unavailable=base_cfg["greedy_relay_diffusion_v3"]["include_stocked_unavailable"],
-    )
-    ILPOptimalPolicy(
-        slot_seconds=base_cfg["ilp_optimal"]["slot_seconds"],
-        max_requests=base_cfg["ilp_optimal"]["max_requests"],
-        max_paths_per_request=base_cfg["ilp_optimal"]["max_paths_per_request"],
-        max_path_hops=base_cfg["ilp_optimal"]["max_path_hops"],
-        time_limit_s=base_cfg["ilp_optimal"]["time_limit_s"],
-        mip_rel_gap=base_cfg["ilp_optimal"]["mip_rel_gap"],
     )
 
 

@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+
+# Suppress harmless libpng iCCP warnings from matplotlib figure saves
+warnings.filterwarnings("ignore", message=".*iCCP.*")
 
 from qkd_rl.evaluation.evaluator import EpisodeRecord
 from qkd_rl.evaluation.style import POLICY_COLORS, apply_paper_style
