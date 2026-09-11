@@ -3,11 +3,11 @@ from __future__ import annotations
 import torch
 import pytest
 
-from qkd_rl.algos.policy import MAPPOPolicy
+from qkd_rl.rl.algos.policy import MAPPOPolicy
 from qkd_rl.core.config import ConfigValidator
 from qkd_rl.env.factory import build_env_from_config, load_default_config
 from tests.helpers import build_test_env, point_config_to_h5
-from qkd_rl.models.graph_mappo import GraphMAPPOActorCritic
+from qkd_rl.rl.models.graph_mappo import GraphMAPPOActorCritic
 import numpy as np
 
 

@@ -19,12 +19,12 @@ Current implementation target:
 - `ActionResolver` supports multiple YAML-selected matching modes.
 - Tests exercise the same `H5RateProvider` code path against a small generated H5 dataset (`tests/helpers.py`).
 - `qkd_rl.env.factory` is the package-level environment assembly entry.
-- `qkd_rl.models.graph_mappo` contains the pure-PyTorch GNN actor-critic.
-- `qkd_rl.algos.policy.MAPPOPolicy` samples a **global matching** action directly: the actor scores every
+- `qkd_rl.rl.models.graph_mappo` contains the pure-PyTorch GNN actor-critic.
+- `qkd_rl.rl.algos.policy.MAPPOPolicy` samples a **global matching** action directly: the actor scores every
   legal edge, a sequential sampler picks disjoint edges until no free endpoints remain, and the executed
   action is exactly that matching. PPO optimizes the joint log probability of the sampled matching.
-- `qkd_rl.algos.mappo_trainer` implements the full MAPPO loop: rollout -> GAE -> PPO update -> checkpoint.
-- `qkd_rl.algos.mappo_trainer` supports a curriculum schedule that starts with short episodes and gradually
+- `qkd_rl.rl.algos.mappo_trainer` implements the full MAPPO loop: rollout -> GAE -> PPO update -> checkpoint.
+- `qkd_rl.rl.algos.mappo_trainer` supports a curriculum schedule that starts with short episodes and gradually
   lengthens to the full-day rollout.
 
 Important config files: see [configs/README.md](configs/README.md) for the full

@@ -5,7 +5,7 @@ from __future__ import annotations
 from qkd_rl.core.config import ConfigValidator, deep_merge
 from qkd_rl.env.factory import build_env_from_config, load_default_config
 from tests.helpers import point_config_to_h5
-from qkd_rl.models.graph_mappo import GraphMAPPOActorCritic
+from qkd_rl.rl.models.graph_mappo import GraphMAPPOActorCritic
 
 
 def _build_with_switches(switches: dict):

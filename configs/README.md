@@ -6,10 +6,10 @@
 
 - **默认链**（`qkd_rl/env/factory.py::DEFAULT_CONFIG_FILES`，任何入口/测试先加载这 6 个，按顺序合并）：
   `default.yaml → rate_provider.yaml → features.yaml → env_small.yaml → graph_mappo.yaml → train_mappo.yaml`
-- **RL 训练主入口** `scripts/train_graph_mappo.py`：
+- **RL 训练主入口** `scripts/rl/train_graph_mappo.py`：
   默认链 → 显式覆盖 `env_full.yaml` → `global.yaml`（训练/验证窗口）→ `train_profiles.yaml`（`--mode` 选训练模式）→ 可选 `--configs` 追加
-- **基线** `scripts/run_baselines.py`：`global.yaml`（`--config`）+ `baselines.yaml`
-- **监督预热** `scripts/supervised_train_bfs_greedy.py`：`supervised_train.yaml`
+- **基线** `scripts/baselines/run_baselines.py`：`global.yaml`（`--config`）+ `baselines.yaml`
+- **监督预热** `scripts/rl/supervised_train_bfs_greedy.py`：`supervised_train.yaml`
 
 ## 文件清单
 
@@ -24,7 +24,7 @@
 | `env_full.yaml` | 全规模场景（真实 H5）：请求/奖励/QKP 标定 | `train_graph_mappo.py` 显式覆盖 | RL 训练主流程 | 注意：deadline_steps=30 与 env_small 的 960 尺度不同，参数族不同 |
 | `global.yaml` | 全局训练/验证时间窗口、请求种子 | `train_graph_mappo.py` / `run_baselines.py` | 训练、基线 | 全局实验窗口，所有算法共用 |
 | `train_profiles.yaml` | `--mode` 训练模式：`random_episode`/`continuous`/`fixed_day`/`curriculum`/`demand_edge` | `train_graph_mappo.py --mode` | RL 训练 | 覆盖 `train` 段（含 `value_target`、`replay_days`、PPO 参数） |
-| `baselines.yaml` | 基线策略开关与参数（greedy 系列） | `run_baselines.py` / `supervised_train_bfs_greedy.py` | 基线对比 | 离线理想上界由 `scripts/compute_milp_upper_bound.py` 单独运行（UI "milp" 勾选） |
+| `baselines.yaml` | 基线策略开关与参数（greedy 系列） | `run_baselines.py` / `supervised_train_bfs_greedy.py` | 基线对比 | 离线理想上界由 `scripts/milp/compute_milp_upper_bound.py` 单独运行（UI "milp" 勾选） |
 | `supervised_train.yaml` | 监督预热：BFS+greedy expert 的评估窗口与输出 | `supervised_train_bfs_greedy.py` | 可选预热工作流 | 独立工作流，与 RL 训练无关 |
 
 ## 调参提醒

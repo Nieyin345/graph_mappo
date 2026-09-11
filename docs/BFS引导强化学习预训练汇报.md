@@ -48,8 +48,8 @@ L = 平均e ( 模型打的e的分 − 专家打的e的分 )²
 预训练产出的 checkpoint 就成了 actor 的**初始权重**，我们把这个权重加载进去，接着跑真正的强化学习：
 
 ```
-python scripts/supervised_train_bfs_greedy.py --run-name supervised_bfs   # 1. 先预训练
-python scripts/train_graph_mappo.py --checkpoint outputs/supervised_bfs/supervised_bfs_greedy.pt  # 2. 再续跑RL
+python scripts/rl/supervised_train_bfs_greedy.py --run-name supervised_bfs   # 1. 先预训练
+python scripts/rl/train_graph_mappo.py --checkpoint outputs/supervised_bfs/supervised_bfs_greedy.pt  # 2. 再续跑RL
 ```
 
 好处有三点：
@@ -62,10 +62,10 @@ python scripts/train_graph_mappo.py --checkpoint outputs/supervised_bfs/supervis
 
 ```
 # 基本预训练
-python scripts/supervised_train_bfs_greedy.py --run-name supervised_bfs
+python scripts/rl/supervised_train_bfs_greedy.py --run-name supervised_bfs
 
 # 覆盖窗口每一天 + 从旧权重续训
-python scripts/supervised_train_bfs_greedy.py --cover-all-days true --checkpoint outputs/old/supervised_bfs_greedy.pt
+python scripts/rl/supervised_train_bfs_greedy.py --cover-all-days true --checkpoint outputs/old/supervised_bfs_greedy.pt
 ```
 
 ## 6. 一句话总结

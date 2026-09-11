@@ -5,7 +5,7 @@ from qkd_rl.env.action_resolver import ActionResolver
 from qkd_rl.env.action_space import NodeActionSpace
 from qkd_rl.env.state import EnvState
 from qkd_rl.link.rate_provider import EdgeWindow
-from qkd_rl.algos.policy import _masked_log_prob_entropy
+from qkd_rl.rl.algos.policy import _masked_log_prob_entropy
 
 import torch
 

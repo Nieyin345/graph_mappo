@@ -7,14 +7,14 @@ from pathlib import Path
 
 import torch
 
-from qkd_rl.algos.mappo_trainer import MAPPOTrainer
-from qkd_rl.algos.policy import MAPPOPolicy
+from qkd_rl.rl.algos.mappo_trainer import MAPPOTrainer
+from qkd_rl.rl.algos.policy import MAPPOPolicy
 from qkd_rl.core.config import ConfigValidator
 from qkd_rl.core.types import KeyRequest
 from qkd_rl.env.factory import build_env_from_config, load_default_config
 from qkd_rl.env.history_buffer import HistoryBuffer
-from qkd_rl.models.graph_mappo import GraphMAPPOActorCritic
-from qkd_rl.models.history_encoder import HistoryEncoder
+from qkd_rl.rl.models.graph_mappo import GraphMAPPOActorCritic
+from qkd_rl.rl.models.history_encoder import HistoryEncoder
 from tests.helpers import ROOT, point_config_to_h5
 
 

@@ -18,8 +18,8 @@ from qkd_rl.core.types import LinkType
 from qkd_rl.env.factory import build_env_from_config, load_default_config
 from qkd_rl.env.graph_builder import GraphObservation
 from qkd_rl.env.state import EnvState
-from qkd_rl.models.graph_mappo import GraphMAPPOActorCritic
-from qkd_rl.models.history_encoder import HistoryEncoder
+from qkd_rl.rl.models.graph_mappo import GraphMAPPOActorCritic
+from qkd_rl.rl.models.history_encoder import HistoryEncoder
 from tests.helpers import ROOT, point_config_to_h5
 
 def _yaml_leaf_keys() -> set[str]:
@@ -44,7 +44,7 @@ def _yaml_leaf_keys() -> set[str]:
 
 def test_all_yaml_leaf_keys_referenced_in_code() -> None:
     """No YAML setting may be dead: each leaf key must appear in qkd_rl/scripts."""
-    code_files = list((ROOT / "qkd_rl").glob("**/*.py")) + list((ROOT / "scripts").glob("*.py"))
+    code_files = list((ROOT / "qkd_rl").glob("**/*.py")) + list((ROOT / "scripts").glob("**/*.py"))
     code = "\n".join(p.read_text(encoding="utf-8") for p in code_files)
     missing = sorted(k for k in _yaml_leaf_keys() if k not in code)
     assert not missing, f"YAML keys never referenced in code: {missing}"

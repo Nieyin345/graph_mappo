@@ -6,8 +6,8 @@ import random
 
 import torch
 
-from qkd_rl.algos.gae import compute_gae
-from qkd_rl.algos.rollout_buffer import RolloutBuffer, RolloutStep
+from qkd_rl.rl.algos.gae import compute_gae
+from qkd_rl.rl.algos.rollout_buffer import RolloutBuffer, RolloutStep
 
 
 def _step(reward: float, value: float, terminated: bool = False) -> RolloutStep:

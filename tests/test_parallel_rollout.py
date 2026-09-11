@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from qkd_rl.algos.mappo_trainer import MAPPOTrainer
-from qkd_rl.algos.policy import MAPPOPolicy
-from qkd_rl.models.graph_mappo import GraphMAPPOActorCritic
+from qkd_rl.rl.algos.mappo_trainer import MAPPOTrainer
+from qkd_rl.rl.algos.policy import MAPPOPolicy
+from qkd_rl.rl.models.graph_mappo import GraphMAPPOActorCritic
 from tests.helpers import ROOT, build_test_env, point_config_to_h5
 
 torch = pytest.importorskip("torch")

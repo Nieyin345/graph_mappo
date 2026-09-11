@@ -15,10 +15,10 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 
-from qkd_rl.algos.policy import MAPPOPolicy
+from qkd_rl.rl.algos.policy import MAPPOPolicy
 from qkd_rl.core.config import ConfigValidator, deep_merge, load_config
 from qkd_rl.env.factory import build_env_from_config, load_default_config
-from qkd_rl.models.graph_mappo import GraphMAPPOActorCritic
+from qkd_rl.rl.models.graph_mappo import GraphMAPPOActorCritic
 
 
 def _build(device: str = "cpu"):

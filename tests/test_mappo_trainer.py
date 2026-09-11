@@ -7,12 +7,12 @@ import json
 import pytest
 import torch
 
-from qkd_rl.algos.mappo_trainer import MAPPOTrainer
-from qkd_rl.algos.policy import MAPPOPolicy
+from qkd_rl.rl.algos.mappo_trainer import MAPPOTrainer
+from qkd_rl.rl.algos.policy import MAPPOPolicy
 from qkd_rl.core.config import deep_merge
 from qkd_rl.env.factory import build_env_from_config, load_default_config
 from tests.helpers import point_config_to_h5
-from qkd_rl.models.graph_mappo import GraphMAPPOActorCritic
+from qkd_rl.rl.models.graph_mappo import GraphMAPPOActorCritic
 
 
 def _tiny_config(tmp_path):
