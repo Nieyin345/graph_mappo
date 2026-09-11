@@ -3,7 +3,7 @@ env:
   episode_start_mode: random_day
   day_steps: 1440
 train:
-  num_updates: 20
+  num_updates: 1000
   rollout_steps: 240
   episodes_per_update: 4
   episode_steps_fixed: true
@@ -47,8 +47,8 @@ features:
       include_failed: false
       include_qkp_total: false
     physical_edge:
-      include_qkp_level: true
-      include_available: true
-      include_activated: true
+      include_qkp_level: false
+      include_available: false
+      include_activated: false
     demand_edge:
       include_pending_wait_buckets: true

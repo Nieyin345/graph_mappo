@@ -15,24 +15,45 @@ class ResolvedAction:
     rejected_actions: dict[str, str]
     illegal_actions: dict[str, str]
     conflict_count: int
+    # The directed arcs ``(src, dst)`` actually matched this slot. The policy
+    # verifies / reconstructs its sampled matching from these; key generation
+    # uses ``activated_edges`` (undirected pair ids) so routing/QKP are unchanged.
+    matched_arcs: list[tuple[str, str]] = None
 
 
 class ActionResolver:
+    """Resolve per-node ``(tx_target, rx_source)`` proposals into a feasible set
+    of directed arcs subject to the dual-port physical constraints:
+
+    - ``Tx``-out <= 1 per node (a node transmits to at most one peer);
+    - ``Rx``-in <= 1 per node (a node receives from at most one peer);
+    - a pair never carries both ``u->v`` and ``v->u`` in the same slot.
+
+    ``activated_edges`` reports the matched arcs as deduplicated **undirected
+    pair edge ids** so key generation / routing / QKP read the same ids as
+    before; ``matched_arcs`` carries the directional detail for the policy.
+    """
+
     def __init__(self, action_space: NodeActionSpace, config: dict):
         self.action_space = action_space
         self.config = config
         self.mode = config["mode"]
         # action -> candidate index per node, so _find_illegal avoids an O(n)
-        # list.index() per submitted action every step.
+        # list.index() per submitted action every step. Candidates (neighbors +
+        # idle) are shared by the tx and rx options.
         self._action_index: dict[str, dict[str, int]] = {
-            node_id: {action: i for i, action in enumerate(self.action_space.candidates_for_node(node_id))}
+            node_id: {
+                action: i
+                for i, action in enumerate(self.action_space.candidates_for_node(node_id))
+            }
             for node_id in self.action_space.node_ids
         }
         self._edge_by_id = {edge.edge_id: edge for edge in self.action_space.edges}
 
+    # ------------------------------------------------------------------ resolve
     def resolve(
         self,
-        actions: dict[str, str],
+        actions: dict[str, tuple[str, str]],
         env_state: EnvState,
         masks: dict[str, list[bool]],
         action_scores: dict[str, dict[str, float]] | None = None,
@@ -41,18 +62,18 @@ class ActionResolver:
         illegal = self._find_illegal(actions, masks)
         valid_actions = {node: action for node, action in actions.items() if node not in illegal}
         if self.mode == "mutual_choice":
-            activated = self._resolve_mutual_choice(valid_actions)
+            matched_arcs = self._resolve_mutual_choice(valid_actions)
         elif self.mode == "priority_matching":
-            activated = self._resolve_priority_matching(
+            matched_arcs = self._resolve_priority_matching(
                 valid_actions,
                 action_scores or {},
                 env_state,
                 edge_scores=edge_scores,
             )
         elif self.mode == "greedy_rate_matching":
-            activated = self._resolve_greedy_rate_matching(env_state)
+            matched_arcs = self._resolve_greedy_rate_matching(env_state)
         elif self.mode == "max_weight_matching":
-            activated = self._resolve_max_weight_matching(
+            matched_arcs = self._resolve_max_weight_matching(
                 masks,
                 action_scores or {},
                 env_state,
@@ -60,104 +81,103 @@ class ActionResolver:
             )
         else:
             raise ValueError(f"Unknown action resolver mode: {self.mode}")
-        intended_edges = {
-            edge_id
-            for node, action in valid_actions.items()
-            if (edge_id := self.action_space.action_to_edge(node, action)) is not None
-        }
-        rejected = {
-            node: action
-            for node, action in valid_actions.items()
-            if (edge_id := self.action_space.action_to_edge(node, action)) is not None and edge_id not in activated
-        }
+        matched_arcs = sorted(set(matched_arcs))
+        activated = self.action_space.arcs_to_edges(matched_arcs)
+        activated_set = set(activated)
+        rejected: dict[str, str] = {}
+        conflict = 0
+        for u, (tx, rx) in valid_actions.items():
+            dropped = set()
+            for v in {tx, rx}:  # dedup: (B, B) is a single proposed edge
+                if v == NodeActionSpace.IDLE or v == u:
+                    continue
+                eid = self.action_space.arc_to_edge(u, v)
+                if eid is not None and eid not in activated_set:
+                    conflict += 1
+                    dropped.add(v)
+            if dropped:
+                rejected[u] = (tuple(sorted(dropped)) if len(dropped) > 1 else next(iter(dropped)))
         return ResolvedAction(
             activated_edges=activated,
             rejected_actions=rejected,
             illegal_actions=illegal,
-            conflict_count=len(set(intended_edges).symmetric_difference(set(activated))),
+            conflict_count=conflict,
+            matched_arcs=matched_arcs,
         )
 
-    def _find_illegal(self, actions: dict[str, str], masks: dict[str, list[bool]]) -> dict[str, str]:
+    def _find_illegal(self, actions: dict[str, tuple[str, str]], masks: dict[str, list[bool]]) -> dict[str, str]:
         illegal: dict[str, str] = {}
         for node_id, action in actions.items():
-            action_idx = self._action_index[node_id].get(action)
-            if action_idx is None or not masks[node_id][action_idx]:
+            tx, rx = action
+            if self._option_illegal(node_id, tx, masks) or self._option_illegal(node_id, rx, masks):
                 illegal[node_id] = action
         return illegal
 
-    def _resolve_mutual_choice(self, actions: dict[str, str]) -> list[str]:
-        activated: list[str] = []
-        used: set[str] = set()
-        for node_id, action in actions.items():
-            if action == NodeActionSpace.IDLE or node_id in used:
-                continue
-            if actions.get(action) != node_id:
-                continue
-            edge_id = self.action_space.action_to_edge(node_id, action)
-            if edge_id is not None:
-                activated.append(edge_id)
-                used.update({node_id, action})
-        return activated
+    def _option_illegal(self, node_id: str, option: str, masks: dict[str, list[bool]]) -> bool:
+        if option == NodeActionSpace.IDLE:
+            return False
+        action_idx = self._action_index[node_id].get(option)
+        if action_idx is None:
+            return True
+        return not masks[node_id][action_idx]
 
+    # ------------------------------------------------------------------ mutual choice
+    def _resolve_mutual_choice(self, actions: dict[str, tuple[str, str]]) -> list[tuple[str, str]]:
+        """Directed arcs agreed by both endpoints: ``u->v`` is active iff ``u``'s
+        Tx targets ``v`` and ``v``'s Rx accepts from ``u``."""
+        tx_of: dict[str, str] = {}
+        rx_of: dict[str, str] = {}
+        for u, (tx, rx) in actions.items():
+            if tx != NodeActionSpace.IDLE:
+                tx_of[u] = tx
+            if rx != NodeActionSpace.IDLE:
+                rx_of[u] = rx
+        agreed: list[tuple[str, str]] = []
+        for u, v in tx_of.items():
+            if rx_of.get(v) == u and self.action_space.is_neighbor(u, v):
+                agreed.append((u, v))
+        # Tx-out<=1 / Rx-in<=1 hold automatically (one tx / one rx per node).
+        # Only a mirrored pair needs disambiguation (对端不同): keep one.
+        result: dict[tuple[str, str], tuple[str, str]] = {}
+        for arc in agreed:
+            key = self.action_space.pair_key(*arc)
+            if key not in result or arc < result[key]:
+                result[key] = arc
+        return sorted(result.values())
+
+    # ------------------------------------------------------------------ priority
     def _resolve_priority_matching(
         self,
-        actions: dict[str, str],
+        actions: dict[str, tuple[str, str]],
         action_scores: dict[str, dict[str, float]],
         env_state: EnvState,
         edge_scores: dict[str, float] | None = None,
-    ) -> list[str]:
+    ) -> list[tuple[str, str]]:
         score_merge = self.config.get("score_merge", "mean")
-        tie_break = self.config.get("tie_break", "rate_then_edge_id")
         score_source = self.config.get("score_source", "edge")
-        if score_source not in ("edge", "action"):
-            raise ValueError(f"Unsupported action_resolver.score_source: {score_source!r}")
         use_edge_scores = score_source == "edge" and edge_scores is not None
-        if use_edge_scores:
-            score_merge = "edge_score"
-        if score_merge not in ("mean", "max", "edge_score"):
-            raise ValueError(f"Unsupported action_resolver.score_merge: {score_merge!r}")
-        if tie_break not in ("rate_then_edge_id", "edge_id"):
-            raise ValueError(f"Unsupported action_resolver.tie_break: {tie_break!r}")
-        candidates: list[tuple[float, str, str, str]] = []
-        edge_ids: list[str] = []
-        for node_id, action in actions.items():
-            edge_id = self.action_space.action_to_edge(node_id, action)
-            if edge_id is None:
-                continue
-            if use_edge_scores:
-                # Raw actor edge score: one learned scalar per physical edge,
-                # shared by both endpoints, so the greedy matching compares
-                # edges on the same scale. Falls back to the action score only
-                # when no edge scores were supplied (manual policies/tests).
-                score = edge_scores.get(edge_id, 0.0)
-            else:
-                self_score = action_scores.get(node_id, {}).get(action, 0.0)
-                peer_score = action_scores.get(action, {}).get(node_id, 0.0)
-                if score_merge == "mean":
-                    score = 0.5 * (self_score + peer_score)
+        candidates: list[tuple[float, str, str]] = []  # (score, edge_id, src, dst)
+        for u, (tx, rx) in actions.items():
+            for v in (tx, rx):
+                if v == NodeActionSpace.IDLE or v == u or not self.action_space.is_neighbor(u, v):
+                    continue
+                edge_id = self.action_space.arc_to_edge(u, v)
+                if edge_id is None:
+                    continue
+                if use_edge_scores:
+                    score = edge_scores.get(edge_id, 0.0)
                 else:
-                    score = max(self_score, peer_score)
-            candidates.append((score, edge_id, node_id, action))
-            edge_ids.append(edge_id)
-        if tie_break == "rate_then_edge_id":
-            windows = env_state.edge_windows
-            if hasattr(windows, "rates0"):
-                rate_map = dict(zip(edge_ids, (float(r) for r in windows.rates0(edge_ids))))
-            else:
-                rate_map = {edge_id: windows[edge_id].rates[0] for edge_id in edge_ids}
-            candidates.sort(
-                key=lambda item: (
-                    -item[0],
-                    -rate_map[item[1]],
-                    item[1],
-                )
-            )
-        else:
-            candidates.sort(key=lambda item: (-item[0], item[1]))
+                    if score_merge not in ("mean", "max"):
+                        raise ValueError(f"Unsupported action_resolver.score_merge: {score_merge!r}")
+                    self_score = action_scores.get(u, {}).get(v, 0.0)
+                    peer_score = action_scores.get(v, {}).get(u, 0.0)
+                    score = 0.5 * (self_score + peer_score) if score_merge == "mean" else max(self_score, peer_score)
+                candidates.append((score, edge_id, u, v))
+        candidates = self._sort_candidates(candidates, env_state)
         return self._greedy_match(candidates)
 
-    def _resolve_greedy_rate_matching(self, env_state: EnvState) -> list[str]:
-        candidates: list[tuple[float, str, str, str]] = []
+    def _resolve_greedy_rate_matching(self, env_state: EnvState) -> list[tuple[str, str]]:
+        candidates: list[tuple[float, str, str]] = []
         for edge_id, window in env_state.edge_windows.items():
             if not window.available[0]:
                 continue
@@ -166,106 +186,98 @@ class ActionResolver:
         candidates.sort(key=lambda item: (-item[0], item[1]))
         return self._greedy_match(candidates)
 
+    def _sort_candidates(
+        self, candidates: list[tuple[float, str, str, str]], env_state: EnvState
+    ) -> list[tuple[float, str, str, str]]:
+        tie_break = self.config.get("tie_break", "rate_then_edge_id")
+        if tie_break == "rate_then_edge_id":
+            rate_map: dict[str, float] = {}
+            for item in candidates:
+                window = env_state.edge_windows.get(item[1])
+                rate_map[item[1]] = float(window.rates[0]) if window is not None else 0.0
+            return sorted(candidates, key=lambda item: (-item[0], -rate_map[item[1]], item[1]))
+        return sorted(candidates, key=lambda item: (-item[0], item[1]))
+
+    # ------------------------------------------------------------------ max weight
     def _resolve_max_weight_matching(
         self,
         masks: dict[str, list[bool]],
         action_scores: dict[str, dict[str, float]],
         env_state: EnvState,
         edge_scores: dict[str, float] | None = None,
-    ) -> list[str]:
-        score_merge = self.config.get("score_merge", "mean")
+    ) -> list[tuple[str, str]]:
         tie_break = self.config.get("tie_break", "rate_then_edge_id")
-        score_source = self.config.get("score_source", "edge")
-        if score_source not in ("edge", "action"):
-            raise ValueError(f"Unsupported action_resolver.score_source: {score_source!r}")
-        use_edge_scores = score_source == "edge" and edge_scores is not None
-        if score_merge not in ("mean", "max", "edge_score"):
-            raise ValueError(f"Unsupported action_resolver.score_merge: {score_merge!r}")
-        if tie_break not in ("rate_then_edge_id", "edge_id"):
-            raise ValueError(f"Unsupported action_resolver.tie_break: {tie_break!r}")
+        use_edge_scores = self.config.get("score_source", "edge") == "edge" and edge_scores is not None
+        score_merge = self.config.get("score_merge", "mean")
 
-        candidates: list[tuple[float, float, str, str, str]] = []
-        edge_iter = (
-            (self._edge_by_id[edge_id], float(score))
-            for edge_id, score in (edge_scores or {}).items()
-            if edge_id in self._edge_by_id
-        ) if use_edge_scores else ((edge, None) for edge in self.action_space.edges)
-        for edge, supplied_score in edge_iter:
-            src = edge.src
-            dst = edge.dst
-            edge_id = edge.edge_id
-            if not self._edge_is_legal(src, dst, masks):
+        directed: list[tuple[float, float, str, str]] = []
+        for edge in self.action_space.edges:
+            if not self._edge_is_legal(edge.src, edge.dst, masks):
                 continue
+            eid = edge.edge_id
             if use_edge_scores:
-                base_score = float(supplied_score)
+                base = float(edge_scores.get(eid, 0.0))
             else:
-                base_score = self._merge_action_scores(src, dst, action_scores, score_merge)
-            if tie_break == "rate_then_edge_id":
-                window = env_state.edge_windows.get(edge_id)
-                rate = float(window.rates[0]) if window is not None else 0.0
-            else:
-                rate = 0.0
-            candidates.append((base_score, rate, edge_id, src, dst))
-
-        candidates = self._prune_matching_candidates(candidates)
-        edge_meta: dict[str, tuple[float, float]] = {
-            edge_id: (base_score, rate)
-            for base_score, rate, edge_id, _src, _dst in candidates
-        }
-
-        if not edge_meta:
+                base = self._merge_action_scores(edge.src, edge.dst, action_scores, score_merge)
+            window = env_state.edge_windows.get(eid)
+            rate = float(window.rates[0]) if window is not None else 0.0
+            directed.append((base, rate, edge.src, edge.dst))
+            directed.append((base, rate, edge.dst, edge.src))
+        directed = self._prune_matching_candidates(directed)
+        if not directed:
             return []
 
         graph = nx.Graph()
-        graph.add_nodes_from(self.action_space.node_ids)
-        for base_score, _rate, edge_id, src, dst in candidates:
-            graph.add_edge(src, dst, edge_id=edge_id, base_score=base_score)
-
-        edge_rank = {edge_id: i for i, edge_id in enumerate(sorted(edge_meta))}
-        max_abs = max((abs(score) for score, _rate in edge_meta.values()), default=1.0)
-        eps = max(1.0e-12, max_abs * 1.0e-9)
-        max_rate = max((abs(rate) for _score, rate in edge_meta.values()), default=1.0)
-        max_rate = max(1.0, max_rate)
-        for u, v, data in graph.edges(data=True):
-            edge_id = data["edge_id"]
-            base_weight = self._positive_weight(float(data["base_score"]))
+        for src in self.action_space.node_ids:
+            graph.add_node(("L", src))
+            graph.add_node(("R", src))
+        rank = {f"{s}->{t}": i for i, (_b, _r, s, t) in enumerate(sorted(directed, key=lambda item: item[3]))}
+        max_rate = max((float(item[1]) for item in directed), default=1.0) or 1.0
+        for base, rate, u, v in directed:
+            data = dict(base=float(base), rate=float(rate), rank=rank[f"{u}->{v}"], arc=(u, v))
+            w = self._positive_weight(float(base))
             if tie_break == "rate_then_edge_id":
-                rate_tie = edge_meta[edge_id][1] / max_rate
-                tie_score = rate_tie + (
-                    float(len(edge_rank) - edge_rank[edge_id]) / max(1.0, float(len(edge_rank)))
-                ) * 1.0e-9
+                data["weight"] = w + max(1.0e-12, abs(w) * 1.0e-9) * (rate / max_rate + data["rank"] * 1.0e-12)
             else:
-                tie_score = float(len(edge_rank) - edge_rank[edge_id]) * 1.0e-9
-            data["weight"] = base_weight + eps * tie_score
-
+                data["weight"] = w + data["rank"] * 1.0e-12
+            graph.add_edge(("L", u), ("R", v), **data)
         matching = nx.max_weight_matching(graph, maxcardinality=False, weight="weight")
-        activated = [graph.edges[u, v]["edge_id"] for u, v in matching]
-        return self._sorted_matching_edges(activated, edge_meta, tie_break)
+        # 对端不同: the bipartite graph models A->C and C->A with different left
+        # nodes, so both could be matched; a physical pair has one light path per
+        # slot, so keep only the higher-weight direction per undirected pair.
+        best_by_pair: dict[tuple[str, str], tuple[tuple[str, str], float]] = {}
+        for e1, e2 in matching:
+            data = graph.edges[e1, e2]
+            arc = data["arc"]
+            key = self.action_space.pair_key(*arc)
+            w = float(data["weight"])
+            if key not in best_by_pair or w > best_by_pair[key][1]:
+                best_by_pair[key] = (arc, w)
+        arcs = [best_by_pair[key][0] for key in best_by_pair]
+        return sorted(arcs)
 
     def _prune_matching_candidates(
-        self,
-        candidates: list[tuple[float, float, str, str, str]],
-    ) -> list[tuple[float, float, str, str, str]]:
+        self, directed: list[tuple[float, float, str, str]]
+    ) -> list[tuple[float, float, str, str]]:
         max_per_node = int(self.config.get("max_candidates_per_node", 0) or 0)
         max_edges = int(self.config.get("max_candidate_edges", 0) or 0)
-        if max_per_node <= 0 and (max_edges <= 0 or len(candidates) <= max_edges):
-            return candidates
-
-        ranked = sorted(candidates, key=lambda item: (-item[0], -item[1], item[2]))
-        keep: set[str] = set()
-        kept_by_node: dict[str, int] = {}
-        for _score, _rate, edge_id, src, dst in ranked:
-            if max_per_node > 0:
-                if kept_by_node.get(src, 0) >= max_per_node:
-                    continue
-                if kept_by_node.get(dst, 0) >= max_per_node:
-                    continue
+        if max_per_node <= 0 and (max_edges <= 0 or len(directed) <= max_edges):
+            return directed
+        ranked = sorted(directed, key=lambda item: (-item[0], -item[1], item[3]))
+        keep: set[tuple[str, str]] = set()
+        kept_tx: dict[str, int] = {}
+        kept_rx: dict[str, int] = {}
+        for _score, _rate, u, v in ranked:
+            if max_per_node > 0 and (
+                kept_tx.get(u, 0) >= max_per_node or kept_rx.get(v, 0) >= max_per_node
+            ):
+                continue
             if max_edges > 0 and len(keep) >= max_edges:
                 break
-            keep.add(edge_id)
-            kept_by_node[src] = kept_by_node.get(src, 0) + 1
-            kept_by_node[dst] = kept_by_node.get(dst, 0) + 1
-        return [item for item in candidates if item[2] in keep]
+            keep.add((u, v))
+            kept_tx[u] = kept_tx.get(u, 0) + 1
+            kept_rx[v] = kept_rx.get(v, 0) + 1
+        return [item for item in directed if (item[2], item[3]) in keep]
 
     def _edge_is_legal(self, src: str, dst: str, masks: dict[str, list[bool]]) -> bool:
         src_idx = self._action_index[src].get(dst)
@@ -289,48 +301,25 @@ class ActionResolver:
 
     @staticmethod
     def _positive_weight(score: float) -> float:
-        """Map raw actor scores to positive matching weights.
-
-        The actor emits unconstrained real-valued scores. NetworkX treats the
-        empty matching (weight 0) as a legal solution, so a graph whose raw
-        scores are all negative would otherwise collapse to no activated edges.
-        A stable softplus keeps the ordering of edges while ensuring every legal
-        edge contributes positive weight.
-        """
         if score >= 0.0:
             return score + math.log1p(math.exp(-score))
         return math.log1p(math.exp(score))
 
-    @staticmethod
-    def _sorted_matching_edges(
-        edge_ids: list[str],
-        edge_meta: dict[str, tuple[float, float]],
-        tie_break: str,
-    ) -> list[str]:
-        if tie_break == "rate_then_edge_id":
-            return sorted(
-                edge_ids,
-                key=lambda edge_id: (
-                    -edge_meta[edge_id][0],
-                    -edge_meta[edge_id][1],
-                    edge_id,
-                ),
-            )
-        return sorted(
-            edge_ids,
-            key=lambda edge_id: (
-                -edge_meta[edge_id][0],
-                edge_id,
-            ),
-        )
-
-    def _greedy_match(self, candidates: list[tuple[float, str, str, str]]) -> list[str]:
-        used_nodes: set[str] = set()
-        activated: list[str] = []
-        for _score, edge_id, src, dst in candidates:
-            if src in used_nodes or dst in used_nodes:
+    def _greedy_match(self, candidates: list[tuple[float, str, str, str]]) -> list[tuple[str, str]]:
+        """Greedy over (score, edge_id, src, dst) enforcing used_tx / used_rx /
+        used_pair (对端不同)."""
+        used_tx: set[str] = set()
+        used_rx: set[str] = set()
+        used_pair: set[tuple[str, str]] = set()
+        activated: list[tuple[str, str]] = []
+        for _score, _edge_id, src, dst in sorted(candidates, key=lambda item: (-item[0], item[3])):
+            if src in used_tx or dst in used_rx:
                 continue
-            activated.append(edge_id)
-            used_nodes.update({src, dst})
+            pair = self.action_space.pair_key(src, dst)
+            if pair in used_pair:
+                continue
+            activated.append((src, dst))
+            used_tx.add(src)
+            used_rx.add(dst)
+            used_pair.add(pair)
         return activated
-

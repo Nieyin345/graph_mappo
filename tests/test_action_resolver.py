@@ -69,8 +69,10 @@ def _weighted_state() -> EnvState:
 
 def test_mutual_choice_requires_both_endpoints_to_choose_each_other():
     resolver = _resolver("mutual_choice")
+    # A and B each transmit to AND accept from the peer -> both directions agreed
+    # (对端不同 keeps a single one); C only transmits to B with no Rx acceptance.
     result = resolver.resolve(
-        {"A": "B", "B": "A", "C": "B"},
+        {"A": ("B", "B"), "B": ("A", "A"), "C": ("B", NodeActionSpace.IDLE)},
         _state(),
         _all_valid_masks(resolver),
     )
@@ -97,14 +99,14 @@ def test_max_candidates_per_node_is_a_hard_cap():
         {"mode": "max_weight_matching", "max_candidates_per_node": 2},
     )
     candidates = [
-        (3.0, 1.0, "e_ab", "A", "B"),
-        (2.0, 1.0, "e_ac", "A", "C"),
-        (1.0, 1.0, "e_ad", "A", "D"),
-        (0.9, 1.0, "e_be", "B", "E"),
+        (3.0, 1.0, "A", "B"),
+        (2.0, 1.0, "A", "C"),
+        (1.0, 1.0, "A", "D"),
+        (0.9, 1.0, "B", "E"),
     ]
     kept = resolver._prune_matching_candidates(candidates)
     kept_by_node: dict[str, int] = {}
-    for _score, _rate, _edge_id, src, dst in kept:
+    for _score, _rate, src, dst in kept:
         kept_by_node[src] = kept_by_node.get(src, 0) + 1
         kept_by_node[dst] = kept_by_node.get(dst, 0) + 1
     assert kept_by_node["A"] <= 2
@@ -113,21 +115,23 @@ def test_max_candidates_per_node_is_a_hard_cap():
 
 def test_priority_matching_uses_actor_scores_to_break_conflicts():
     resolver = _resolver("priority_matching")
+    # A and C both target B -> they contend for B's single Rx; the higher-score
+    # C->B arc wins (actor scores break the conflict).
     result = resolver.resolve(
-        {"A": "B", "B": "A", "C": "B"},
+        {"A": ("B", NodeActionSpace.IDLE), "C": ("B", NodeActionSpace.IDLE)},
         _state(),
         _all_valid_masks(resolver),
-        action_scores={"A": {"B": 1.0}, "B": {"A": 0.5}, "C": {"B": 2.0}},
+        action_scores={"A": {"B": 1.0}, "C": {"B": 2.0}},
     )
 
     assert result.activated_edges == ["e_bc"]
-    assert result.rejected_actions == {"A": "B", "B": "A"}
+    assert result.rejected_actions == {"A": "B"}
 
 
 def test_priority_scores_are_invariant_to_per_node_logit_offsets():
     """Equivalent categorical policies must not resolve the same proposals differently."""
     resolver = _resolver("priority_matching")
-    actions = {"A": "B", "B": "A", "C": "B"}
+    actions = {"A": ("B", NodeActionSpace.IDLE), "B": ("A", NodeActionSpace.IDLE), "C": ("B", NodeActionSpace.IDLE)}
     indices = torch.tensor([1, 1, 1])
     logits = torch.tensor([[0.0, 1.0], [0.0, 0.5], [0.0, 2.0]])
     shifted = logits.clone()
@@ -161,19 +165,22 @@ def test_priority_scores_are_invariant_to_per_node_logit_offsets():
 
 def test_greedy_rate_matching_can_be_selected_from_config():
     resolver = _resolver("greedy_rate_matching")
+    # Under the dual-port model A->B->C is feasible in one slot (A Tx + B Rx,
+    # then B Tx + C Rx): B can relay while transmitting, so both keep-active
+    # high-rate edges activate.
     result = resolver.resolve(
-        {"A": "B", "B": "A", "C": "B"},
+        {"A": ("B", NodeActionSpace.IDLE), "B": ("C", NodeActionSpace.IDLE), "C": ("B", NodeActionSpace.IDLE)},
         _state(),
         _all_valid_masks(resolver),
     )
 
-    assert result.activated_edges == ["e_bc"]
+    assert result.activated_edges == ["e_ab", "e_bc"]
 
 
 def test_max_weight_matching_prefers_global_optimum_over_single_best_edge():
     resolver = _weighted_resolver()
     result = resolver.resolve(
-        {"A": "B", "B": "A", "C": "A", "D": "B"},
+        {"A": ("B", "B"), "B": ("A", "A"), "C": ("A", "A"), "D": ("B", "B")},
         _weighted_state(),
         _all_valid_masks(resolver),
         edge_scores={"e_ab": 10.0, "e_ac": 6.0, "e_bd": 6.0},
@@ -191,7 +198,7 @@ def test_max_weight_matching_rate_tiebreak_cannot_override_scores():
     state.edge_windows["e_bd"].rates[0] = 1.0
 
     result = resolver.resolve(
-        {"A": "B", "B": "A", "C": "A", "D": "B"},
+        {"A": ("B", "B"), "B": ("A", "A"), "C": ("A", "A"), "D": ("B", "B")},
         state,
         _all_valid_masks(resolver),
         edge_scores={"e_ab": 1.0, "e_ac": 1.01, "e_bd": 1.01},
@@ -207,7 +214,7 @@ def test_max_weight_matching_does_not_collapse_to_empty_when_scores_are_negative
     )
     resolver = ActionResolver(action_space, {"mode": "max_weight_matching"})
     result = resolver.resolve(
-        {"A": "B", "B": "A"},
+        {"A": ("B", "B")},
         EnvState(
             t=0,
             qkp_snapshot={},

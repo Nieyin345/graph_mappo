@@ -58,7 +58,6 @@ def main() -> None:
     parser.add_argument("--episode-start-mode", type=str, default=None, help="Override env.episode_start_mode (e.g. fixed for a deterministic t=0 comparison).")
     parser.add_argument("--time-limit-days", type=int, default=None, help="Override scenario.time_limit.days.")
     parser.add_argument("--policies", type=str, default=None, help="Comma-separated list of policies to run (overrides baselines.yaml enabled flag).")
-    parser.add_argument("--skip-ilp", action="store_true", help="Skip the slow MILP baseline (run it separately with compute_milp_reference.py).")
     args = parser.parse_args()
 
     profile = load_validation_profile(ROOT / args.config)

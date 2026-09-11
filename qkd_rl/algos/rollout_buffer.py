@@ -21,7 +21,7 @@ from qkd_rl.env.graph_builder import GraphObservation
 @dataclass
 class RolloutStep:
     obs: GraphObservation
-    actions: dict[str, str]
+    actions: dict[str, tuple[str, str]]
     log_probs: dict[str, torch.Tensor]
     entropies: dict[str, torch.Tensor]
     value: torch.Tensor
@@ -32,7 +32,7 @@ class RolloutStep:
     joint_entropy: torch.Tensor | None = None
     returns: torch.Tensor | None = None
     advantages: torch.Tensor | None = None
-    matched_edges: list[str] | None = None
+    matched_edges: list[tuple[str, str]] | None = None
 
 
 class RolloutBuffer:

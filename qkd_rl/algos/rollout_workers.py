@@ -63,7 +63,7 @@ def _run_episode(
             ),
         )
         if resolver_mode == "max_weight_matching":
-            matched_edges = list(env.last_activated_edges)
+            matched_edges = list(env.last_matched_arcs)
             joint_lp, joint_entropy = policy.log_prob_entropy_for_matching(
                 step.edge_scores, matched_edges
             )

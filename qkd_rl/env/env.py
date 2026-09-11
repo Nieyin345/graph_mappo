@@ -52,6 +52,9 @@ class QKDEnv:
         self.t = scenario.start_t
         self.steps = 0
         self.last_activated_edges: list[str] = []
+        # Directed arcs actually matched last step (from ResolvedAction), for
+        # max_weight_matching re-evaluation of the joint log probability.
+        self.last_matched_arcs: list[tuple[str, str]] = []
         self._prev_activated_edges: list[str] = []
         # (t, observation, masks) cache: the observation built at the end of a
         # step (t+1) is exactly what the next step would rebuild at its start.
@@ -130,6 +133,7 @@ class QKDEnv:
         self.reward_fn.reset()
         self.steps = 0
         self.last_activated_edges = []
+        self.last_matched_arcs = []
         self._prev_activated_edges = []
         self._obs_cache = None
         self._prev_waiting_keys = 0.0
@@ -137,11 +141,18 @@ class QKDEnv:
 
     def step(
         self,
-        actions: dict[str, str],
+        actions: dict[str, tuple[str, str]],
         action_scores: dict[str, dict[str, float]] | None = None,
         edge_scores: dict[str, float] | None = None,
-        expected_matched_edges: list[str] | None = None,
+        expected_matched_edges: list[tuple[str, str]] | None = None,
     ) -> tuple[GraphObservation, float, bool, bool, dict]:
+        """Advance one slot given each node's ``(tx_target, rx_source)`` action.
+
+        The resolver turns the proposals into a feasible set of directed arcs
+        subject to the dual-port constraints and reports them as deduplicated
+        undirected pair edge ids in ``resolved.activated_edges``, so key
+        generation / routing / QKP consume the same pair ids as before.
+        """
         arrivals = self.request_generator.generate(self.t)
         self.requests.add_arrivals(arrivals)
         self.request_history.record_arrivals(arrivals, self.t)
@@ -155,10 +166,10 @@ class QKDEnv:
             action_scores,
             edge_scores=edge_scores,
         )
-        if expected_matched_edges is not None and set(resolved.activated_edges) != set(expected_matched_edges):
+        if expected_matched_edges is not None and set(resolved.matched_arcs) != set(expected_matched_edges):
             raise RuntimeError(
                 "Resolver executed a different matching than the policy sampled: "
-                f"executed={sorted(resolved.activated_edges)} sampled={sorted(expected_matched_edges)}. "
+                f"executed={sorted(resolved.matched_arcs)} sampled={sorted(expected_matched_edges)}. "
                 "Use action_resolver.mode=mutual_choice for the global matching policy."
             )
 
@@ -213,6 +224,7 @@ class QKDEnv:
 
         self._prev_activated_edges = list(self.last_activated_edges)
         self.last_activated_edges = resolved.activated_edges
+        self.last_matched_arcs = list(resolved.matched_arcs)
         if self.history_buffer is not None:
             self.history_buffer.push(
                 arrivals=arrivals,

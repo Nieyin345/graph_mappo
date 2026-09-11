@@ -172,9 +172,11 @@ def list_checkpoints() -> list[dict]:
 
 def get_baselines() -> list[str]:
     """Return available baseline policy names from run_baselines.py."""
+    # "milp" first so the offline-ideal-upper-bound checkbox is visible in the
+    # eval tab without scrolling.
     return [
-        "random", "greedy_demand", "greedy_matching", "greedy_qkp",
-        "greedy_rate", "greedy_relay", "greedy_relay_diffusion_v3", "milp",
+        "milp", "random", "greedy_demand", "greedy_matching", "greedy_qkp",
+        "greedy_rate", "greedy_relay", "greedy_relay_diffusion_v3",
     ]
 
 

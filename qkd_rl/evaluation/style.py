@@ -31,7 +31,7 @@ POLICY_COLORS = {
     "greedy_demand": PALETTE["orange"],
     "greedy_qkp": PALETTE["green"],
     "graph_mappo": PALETTE["red"],
-    "rolling_milp": PALETTE["sky"],
+    "milp_ub": PALETTE["sky"],
     "MAPPO-MLP": PALETTE["pink"],
 }
 

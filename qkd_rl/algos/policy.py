@@ -13,7 +13,7 @@ from qkd_rl.models.graph_mappo import GraphMAPPOActorCritic
 
 @dataclass
 class PolicyStep:
-    actions: dict[str, str]
+    actions: dict[str, tuple[str, str]]
     action_scores: dict[str, dict[str, float]]
     log_probs: dict[str, torch.Tensor]
     entropies: dict[str, torch.Tensor]
@@ -27,10 +27,10 @@ class PolicyStep:
     # resolver. The model computes one global score per physical edge, so
     # these are comparable across nodes (unlike per-node log probabilities).
     edge_scores: dict[str, float] | None = None
-    # Ordered list of edges selected by the sequential global-matching
-    # sampler. The order is part of the sampled action: PPO recomputes the
-    # joint log probability in this exact order during the update.
-    matched_edges: list[str] | None = None
+    # Ordered list of directed arcs ``(src, dst)`` selected by the sequential
+    # global-matching sampler. The order is part of the sampled action: PPO
+    # recomputes the joint log probability in this exact order during update.
+    matched_edges: list[tuple[str, str]] | None = None
 
 
 class MAPPOPolicy:
@@ -52,15 +52,16 @@ class MAPPOPolicy:
         self,
         edge_scores: dict[str, torch.Tensor],
         deterministic: bool = False,
-    ) -> tuple[dict[str, str], dict[str, dict[str, float]], list[str], torch.Tensor, torch.Tensor]:
-        """Sample one global matching by sequentially picking edges.
+    ) -> tuple[dict[str, tuple[str, str]], dict[str, dict[str, float]], list[tuple[str, str]], torch.Tensor, torch.Tensor]:
+        """Sample one global directed matching by sequentially picking arcs.
 
-        At every step the remaining legal edges (those whose endpoints are
-        still free) are scored by the actor's edge scorer and one edge is
-        sampled from their softmax. The joint log probability is the sum over
-        the selected sequence; the returned entropy is the per-decision
-        average entropy so the entropy regularizer stays comparable across
-        matching sizes instead of growing with every matched edge.
+        Each undirected pair contributes two directed arcs ``(src->dst)`` and
+        ``(dst->src)``, both scored by the pair edge score. At every step the
+        remaining feasible arcs (its transmitter not yet used, its receiver not
+        yet used, and the pair not already matched in either direction — 对端
+        不同) are scored by the actor's edge scorer and one is sampled from
+        their softmax. Returns the directed ``matched_edges`` and per-node
+        ``(tx_target, rx_source)`` actions.
         """
         endpoints = self._endpoints()
         edge_ids_list = list(edge_scores.keys())
@@ -69,32 +70,45 @@ class MAPPOPolicy:
             joint_entropy = torch.zeros((), dtype=torch.float32, device=self.device)
             return {}, {}, [], joint_lp, joint_entropy
         temperature = float(self.model.actor.temperature)
+        arcs: list[tuple[str, str]] = []
+        arc_edge: list[str] = []
+        for edge_id in edge_ids_list:
+            src, dst = endpoints[edge_id]
+            arcs.append((src, dst))
+            arc_edge.append(edge_id)
+            arcs.append((dst, src))
+            arc_edge.append(edge_id)
         raw = torch.stack([edge_scores[edge_id] for edge_id in edge_ids_list])
         if temperature != 1.0:
             raw = raw / temperature
-        # Rollout path stores a detached joint log prob, so the sequential
-        # softmax can be evaluated in numpy (one small kernel instead of one
-        # per decision). Gumbel noise is still drawn from the torch RNG to
-        # keep seed-based reproducibility identical to the old path.
-        scores_np = raw.detach().cpu().numpy()
-        n_edges = len(edge_ids_list)
+        # One raw score per undirected pair; every pair maps to two arc ids.
+        pair_score_np = raw.detach().cpu().numpy()
+        n_arcs = len(arcs)
+        scores_np = np.empty(n_arcs, dtype=np.float64)
+        for i, edge_id in enumerate(arc_edge):
+            pair_pos = edge_ids_list.index(edge_id)
+            scores_np[i] = pair_score_np[pair_pos]
         if deterministic:
             gumbel_np = None
         else:
-            u = torch.rand(n_edges, dtype=raw.dtype, device=raw.device).clamp_min(torch.finfo(raw.dtype).tiny)
+            u = torch.rand(n_arcs, dtype=raw.dtype, device=raw.device).clamp_min(torch.finfo(raw.dtype).tiny)
             gumbel_np = (-torch.log(-torch.log(u))).cpu().numpy()
-        remaining = set(range(n_edges))
-        used_nodes: set[str] = set()
-        matched_edges: list[str] = []
+        remaining = set(range(n_arcs))
+        used_tx: set[str] = set()
+        used_rx: set[str] = set()
+        used_pair: set[tuple[str, str]] = set()
+        matched_edges: list[tuple[str, str]] = []
         joint_lp = 0.0
         joint_entropy = 0.0
         while remaining:
-            avail = [
-                i
-                for i in remaining
-                if endpoints[edge_ids_list[i]][0] not in used_nodes
-                and endpoints[edge_ids_list[i]][1] not in used_nodes
-            ]
+            avail = []
+            for i in remaining:
+                src, dst = arcs[i]
+                if src in used_tx or dst in used_rx:
+                    continue
+                if (src, dst) in used_pair or (dst, src) in used_pair:
+                    continue
+                avail.append(i)
             if not avail:
                 break
             s = scores_np[avail]
@@ -107,28 +121,46 @@ class MAPPOPolicy:
             joint_lp += float(logp[k])
             p = np.exp(logp)
             joint_entropy -= float((p * logp).sum())
-            selected = edge_ids_list[avail[k]]
-            matched_edges.append(selected)
-            used_nodes.update(endpoints[selected])
-            remaining.remove(avail[k])
+            sel = avail[k]
+            src, dst = arcs[sel]
+            matched_edges.append((src, dst))
+            used_tx.add(src)
+            used_rx.add(dst)
+            pair = (src, dst) if src < dst else (dst, src)
+            used_pair.add(pair)
+            remaining.remove(sel)
         n_decisions = max(1, len(matched_edges))
         joint_entropy = joint_entropy / n_decisions
         joint_lp_t = torch.tensor(joint_lp, dtype=torch.float32, device=self.device)
         joint_entropy_t = torch.tensor(joint_entropy, dtype=torch.float32, device=self.device)
 
-        actions: dict[str, str] = {}
+        return self._matching_to_actions(matched_edges, edge_scores), matched_edges, joint_lp_t, joint_entropy_t
+
+    def _matching_to_actions(
+        self,
+        matched_edges: list[tuple[str, str]],
+        edge_scores: dict[str, torch.Tensor],
+    ) -> tuple[dict[str, tuple[str, str]], dict[str, dict[str, float]]]:
+        """Derive per-node ``(tx_target, rx_source)`` actions from matched arcs."""
+        actions: dict[str, tuple[str, str]] = {}
         action_scores: dict[str, dict[str, float]] = {}
+        tx_of: dict[str, str] = {}
+        rx_of: dict[str, str] = {}
         for node_id in self.model.action_space.node_ids:
-            actions[node_id] = self.model.action_space.IDLE
+            actions[node_id] = (self.model.action_space.IDLE, self.model.action_space.IDLE)
             action_scores[node_id] = {self.model.action_space.IDLE: 0.0}
-        for edge_id in matched_edges:
-            src, dst = endpoints[edge_id]
-            actions[src] = dst
-            actions[dst] = src
-            score = float(edge_scores[edge_id].detach().cpu())
-            action_scores[src] = {dst: score}
-            action_scores[dst] = {src: score}
-        return actions, action_scores, matched_edges, joint_lp_t, joint_entropy_t
+        for src, dst in matched_edges:
+            tx_of[src] = dst
+            rx_of[dst] = src
+            edge_id = self.model.action_space.arc_to_edge(src, dst)
+            score = float(edge_scores.get(edge_id, torch.zeros((), dtype=torch.float32, device=self.device)).detach().cpu())
+            action_scores[src][dst] = score
+            action_scores[dst][src] = score
+        for node_id in self.model.action_space.node_ids:
+            tx = tx_of.get(node_id, self.model.action_space.IDLE)
+            rx = rx_of.get(node_id, self.model.action_space.IDLE)
+            actions[node_id] = (tx, rx)
+        return actions, action_scores
 
     @staticmethod
     def _fill_node_tensors(
@@ -245,8 +277,8 @@ class MAPPOPolicy:
     def evaluate_actions(
         self,
         obs: GraphObservation,
-        actions: dict[str, str],
-        matched_edges: list[str],
+        actions: dict[str, tuple[str, str]],
+        matched_edges: list[tuple[str, str]],
     ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], torch.Tensor]:
         """Recompute the joint matching log prob / entropy and global value.
 
@@ -270,8 +302,8 @@ class MAPPOPolicy:
     def evaluate_actions_batched(
         self,
         obs_list: list[GraphObservation],
-        actions_list: list[dict[str, str]],
-        matched_edges_list: list[list[str]],
+        actions_list: list[dict[str, tuple[str, str]]],
+        matched_edges_list: list[list[tuple[str, str]]],
     ) -> list[tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], torch.Tensor]]:
         """Batched PPO evaluation: one block-diagonal model forward for many
         graphs instead of one forward per step. Per-graph math is identical to
@@ -295,7 +327,7 @@ class MAPPOPolicy:
     def log_prob_entropy_for_matching(
         self,
         edge_scores: dict[str, float] | None,
-        matched_edges: list[str],
+        matched_edges: list[tuple[str, str]],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Evaluate a stored executed matching from detached rollout scores."""
         if not edge_scores:
@@ -312,38 +344,55 @@ class MAPPOPolicy:
     def _matching_log_prob_entropy(
         self,
         edge_scores: dict[str, torch.Tensor],
-        matched_edges: list[str],
+        matched_edges: list[tuple[str, str]],
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Joint log prob and per-decision average entropy of a stored matching.
-
-        The joint log probability is accumulated across every matched edge.
-        Entropy is returned per decision so the regularizer does not grow
-        with the number of matched edges (see ``_sample_matching``).
-        """
+        """Joint log prob and per-decision average entropy of a stored directed
+        matching, replaying the dual-port feasibility rules ``Tx-out<=1``,
+        ``Rx-in<=1`` and 对端不同 (a pair matched once in either direction)."""
         endpoints = self._endpoints()
-        remaining = set(edge_scores.keys())
-        used_nodes: set[str] = set()
+        # Candidate directed arcs derived from the scored undirected pairs.
+        arcs: list[tuple[str, str]] = []
+        arc_edge: list[str] = []
+        for edge_id in edge_scores:
+            src, dst = endpoints[edge_id]
+            arcs.append((src, dst))
+            arc_edge.append(edge_id)
+            arcs.append((dst, src))
+            arc_edge.append(edge_id)
+        temp_scores = {
+            edge_id: score / float(self.model.actor.temperature)
+            if float(self.model.actor.temperature) != 1.0
+            else score
+            for edge_id, score in edge_scores.items()
+        }
+        used_tx: set[str] = set()
+        used_rx: set[str] = set()
+        used_pair: set[tuple[str, str]] = set()
         joint_lp = torch.zeros((), dtype=torch.float32, device=self.device)
         joint_entropy = torch.zeros((), dtype=torch.float32, device=self.device)
-        for edge_id in matched_edges:
+        for arc in matched_edges:
+            cur_src = arc[0]
+            cur_dst = arc[1]
+            pair = (cur_src, cur_dst) if cur_src < cur_dst else (cur_dst, cur_src)
             avail = sorted(
-                candidate
-                for candidate in remaining
-                if endpoints[candidate][0] not in used_nodes
-                and endpoints[candidate][1] not in used_nodes
+                i
+                for i in range(len(arcs))
+                if arcs[i][0] not in used_tx
+                and arcs[i][1] not in used_rx
+                and (arcs[i][0], arcs[i][1]) not in used_pair
+                and (arcs[i][1], arcs[i][0]) not in used_pair
             )
-            raw_scores = torch.stack([edge_scores[candidate] for candidate in avail])
-            temperature = float(self.model.actor.temperature)
-            scores = raw_scores / temperature if temperature != 1.0 else raw_scores
-            logp = torch.log_softmax(scores, dim=0)
+            raw_scores = torch.stack([temp_scores[arc_edge[i]] for i in avail])
+            logp = torch.log_softmax(raw_scores, dim=0)
             joint_entropy = joint_entropy - (logp.exp() * logp).sum()
             try:
-                pos = avail.index(edge_id)
+                pos = avail.index(arc)
             except ValueError as exc:
-                raise ValueError(f"Stored matching edge {edge_id!r} is not available for evaluation.") from exc
+                raise ValueError(f"Stored matching arc {arc!r} is not available for evaluation.") from exc
             joint_lp = joint_lp + logp[pos]
-            used_nodes.update(endpoints[edge_id])
-            remaining.remove(edge_id)
+            used_tx.add(cur_src)
+            used_rx.add(cur_dst)
+            used_pair.add(pair)
         n_decisions = max(1, len(matched_edges))
         joint_entropy = joint_entropy / n_decisions
         return joint_lp, joint_entropy

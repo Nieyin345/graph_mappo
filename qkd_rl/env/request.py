@@ -233,6 +233,9 @@ class RequestGenerator:
         self.counter = 0
         self._pairs: list[tuple[str, str]] = []
         self._pair_weights: np.ndarray | None = None
+        # Timezone offset per GS node (hours from UTC, derived from longitude)
+        self._tz_offsets: dict[str, int] = {}
+        self._load_tz_offsets()
         if len(gs_ids) >= 2:
             from itertools import combinations
 
@@ -248,21 +251,65 @@ class RequestGenerator:
             elif mode != "uniform":
                 raise ValueError(f"Unknown pair_hotness: {mode!r}")
 
+    def _load_tz_offsets(self) -> None:
+        """Load timezone offsets from node registry (longitude -> UTC offset)."""
+        import csv
+        from pathlib import Path
+        # Try dataset/global/node_registry.csv relative to the project root
+        for candidate in (
+            Path(__file__).resolve().parents[2] / "dataset" / "global" / "node_registry.csv",
+            Path("dataset/global/node_registry.csv"),
+        ):
+            if candidate.exists():
+                with open(candidate, encoding="utf-8", newline="") as f:
+                    for row in csv.DictReader(f):
+                        name = row.get("name", "").strip()
+                        if name in self.gs_ids:
+                            lon = float(row.get("lon", 0))
+                            self._tz_offsets[name] = int(round(lon / 15))
+                break
+
     def seed(self, seed: int) -> None:
         """Reseed the request stream (used for per-episode diversity)."""
         self.rng.seed(seed)
         self.counter = 0
 
     def _lambda_at(self, t: int) -> float:
+        """Mean request count per slot (global average across all timezones)."""
         base = float(self.config.get("arrival_rate", 0.0))
         weights = self.config.get("hourly_weights")
         if not weights:
             return base
         steps_per_hour = int(self.config.get("steps_per_hour", 60))
+        mean_w = sum(float(x) for x in weights) / len(weights)
+        if mean_w <= 0:
+            return base
+        # If tz_offsets are available, average the per-pair rates; otherwise
+        # use the global hour (backward-compatible).
+        if self._tz_offsets and self._pairs:
+            total = 0.0
+            for src, _dst in self._pairs:
+                tz_off = self._tz_offsets.get(src, 0)
+                local_hour = ((t // steps_per_hour) + tz_off) % 24
+                w = float(weights[local_hour % len(weights)])
+                total += base * w / mean_w
+            return total / len(self._pairs)  # average per-pair rate * n_pairs = total
         hour = (t // steps_per_hour) % 24
         w = float(weights[hour % len(weights)])
+        return base * w / mean_w
+
+    def _pair_rate_at(self, t: int, src: str) -> float:
+        """Request rate for a specific source node at time t (local timezone)."""
+        base = float(self.config.get("arrival_rate", 0.0))
+        weights = self.config.get("hourly_weights")
+        if not weights:
+            return base / max(1, len(self._pairs))
+        steps_per_hour = int(self.config.get("steps_per_hour", 60))
+        tz_off = self._tz_offsets.get(src, 0)
+        local_hour = ((t // steps_per_hour) + tz_off) % 24
+        w = float(weights[local_hour % len(weights)])
         mean_w = sum(float(x) for x in weights) / len(weights)
-        return base * w / mean_w if mean_w > 0 else base
+        return base * w / mean_w / max(1, len(self._pairs)) if mean_w > 0 else 0.0
 
     def _sample_pair(self) -> tuple[str, str]:
         if self._pair_weights is not None and self._pairs:
@@ -274,20 +321,47 @@ class RequestGenerator:
     def generate(self, t: int) -> list[KeyRequest]:
         if len(self.gs_ids) < 2:
             return []
-        n_requests = int(self.rng.poisson(self._lambda_at(t)))
-        if n_requests <= 0:
-            return []
+        weights = self.config.get("hourly_weights")
+        use_tz = bool(self._tz_offsets and weights and len(self._pairs) > 0)
+
+        if use_tz:
+            # Timezone-aware: compute per-pair rates based on each source
+            # node's local hour, then sample pairs proportionally.
+            steps_per_hour = int(self.config.get("steps_per_hour", 60))
+            mean_w = sum(float(x) for x in weights) / len(weights)
+            base = float(self.config.get("arrival_rate", 0.0))
+            if mean_w <= 0:
+                use_tz = False
+
+        if use_tz:
+            pair_rates = np.zeros(len(self._pairs), dtype=np.float64)
+            for i, (src, _dst) in enumerate(self._pairs):
+                tz_off = self._tz_offsets.get(src, 0)
+                local_hour = ((t // steps_per_hour) + tz_off) % 24
+                w = float(weights[local_hour % len(weights)])
+                pair_rates[i] = base * w / mean_w / len(self._pairs)
+            total_rate = float(pair_rates.sum())
+            n_requests = int(self.rng.poisson(total_rate))
+            if n_requests <= 0:
+                return []
+            pair_probs = pair_rates / total_rate if total_rate > 0 else None
+        else:
+            # Fallback: original behavior (global hour, uniform pair sampling)
+            n_requests = int(self.rng.poisson(self._lambda_at(t)))
+            if n_requests <= 0:
+                return []
+            pair_probs = None  # use _sample_pair (Zipf or uniform)
+
         amount_mean = float(self.config.get("amount_mean", 100.0))
-        # Optional hard cap on the request size (``amount_max``). The raw
-        # exponential tail spawns requests of many times the mean that no
-        # relay path can finish inside the deadline, inflating the failure
-        # count for every policy; truncated-exponential rejection sampling
-        # keeps the same body shape without the unbounded tail.
         amount_max = float(self.config.get("amount_max", 0.0) or 0.0)
         deadline = t + int(self.config.get("deadline_steps", 12))
         out: list[KeyRequest] = []
         for _ in range(n_requests):
-            src, dst = self._sample_pair()
+            if use_tz and pair_probs is not None:
+                idx = int(self.rng.choice(len(self._pairs), p=pair_probs))
+                src, dst = self._pairs[idx]
+            else:
+                src, dst = self._sample_pair()
             self.counter += 1
             amount = float(self.rng.exponential(amount_mean))
             if amount_max > 0.0:

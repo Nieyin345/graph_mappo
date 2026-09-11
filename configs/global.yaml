@@ -10,5 +10,9 @@ global:
       end_day: 365
     request_seeds:
     - 7
-    episodes: 1
+    - 8
+    - 9
+    - 10
+    - 11
+    episodes: 5
     episode_steps: 240

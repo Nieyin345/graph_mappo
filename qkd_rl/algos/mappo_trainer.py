@@ -360,7 +360,7 @@ class MAPPOTrainer:
                 if self.resolver_mode == "max_weight_matching":
                     # max-weight is a deterministic resolver action, so the PPO
                     # target follows the matching the environment executed.
-                    matched_edges = list(self.env.last_activated_edges)
+                    matched_edges = list(self.env.last_matched_arcs)
                     joint_lp, joint_entropy = self.policy.log_prob_entropy_for_matching(
                         step.edge_scores, matched_edges
                     )

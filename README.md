@@ -36,7 +36,7 @@ index (every yaml's purpose, load order, and who references it). Highlights:
 - `configs/graph_mappo.yaml`: encoder, shared actor, critic, and masked categorical settings.
 - `configs/train_mappo.yaml`: rollout length, GAE/PPO hyper-parameters, learning rates, logging and checkpoint intervals.
 - `configs/train_profiles.yaml`: all training modes (`continuous`, `fixed_day`, `curriculum`, `demand_edge`).
-- `configs/baselines.yaml`: heuristic / ILP baseline switches and parameters.
+- `configs/baselines.yaml`: heuristic baseline switches and parameters.
 
 Run from this folder:
 

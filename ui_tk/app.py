@@ -388,7 +388,8 @@ class QKDRLApp:
             bl_yaml = bl_cfg.get(bl, {})
             enabled_val = bl_yaml.get("_enabled", 1 if bl in ("greedy_demand","greedy_relay_diffusion_v3") else 0)
             enabled = tk.IntVar(value=enabled_val)
-            ttk.Checkbutton(sf, text=bl, variable=enabled, onvalue=1, offvalue=0).grid(row=algo_row, column=0, sticky="w", padx=4)
+            label = "milp (离线理想上界)" if bl == "milp" else bl
+            ttk.Checkbutton(sf, text=label, variable=enabled, onvalue=1, offvalue=0).grid(row=algo_row, column=0, sticky="w", padx=4)
             self.e_algo_vars[bl] = {"_enabled": enabled, "_type": "baseline"}
             params = [(k, v) for k, v in bl_yaml.items() if k not in ("enabled", "_enabled", "_type")]
             total_cols = _param_cols(len(params))
@@ -527,8 +528,11 @@ class QKDRLApp:
                 if milp_enabled:
                     self.root.after(0, self._append_eval_line, "running MILP offline upper bound (ideal flow)...")
                     ub_out = od / "milp_ub"
+                    # window-steps omitted: compute_milp_upper_bound.py defaults
+                    # to the validation protocol (start_day*1440, episode_steps),
+                    # so the MILP window matches the baseline episodes' scope.
                     cmd2 = [sys.executable, "scripts/compute_milp_upper_bound.py",
-                        "--window-steps", "360", "--time-limit", "120",
+                        "--time-limit", "120",
                         "--max-requests", "512", "--max-paths", "256", "--max-hops", "10",
                         f"--out=outputs/eval/{self.e_ou.get().strip()}/milp_ub"]
                     proc2 = subprocess.Popen(cmd2, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=str(ROOT), text=True, bufsize=1,
@@ -564,6 +568,9 @@ class QKDRLApp:
         served = float(ub.get("total_served", 0.0))
         arrived = float(ub.get("total_arrived", 1e-9))
         sr = float(ub.get("success_rate_upper_bound", 0.0))
+        status = ub.get("status", -1)
+        gap = ub.get("mip_gap", float("nan"))
+        ub_note = f"offline ideal upper bound; status={status}, mip_gap={gap:.4f} @{ub.get('time_limit_s', 0):.0f}s"
         # Same aggregate field set as evaluator.aggregate_episodes, so the row
         # is directly comparable with the other baselines.
         policies["milp"] = {
@@ -580,15 +587,15 @@ class QKDRLApp:
             "success_rate_std": 0.0,
             "conflict_count_mean": 0.0,
             "conflict_count_std": 0.0,
-            "steps_mean": float(ub.get("window_steps", 360)),
+            "steps_mean": float(ub.get("window_steps", 0)),
             "steps_std": 0.0,
-            "note": "offline ideal upper bound (no env replay)",
+            "note": ub_note,
             "runs": [{
                 "timestamp": str(ub.get("seed", 7)),
-                "window_steps": ub.get("window_steps", 360),
+                "window_steps": ub.get("window_steps", 0),
                 "episode_log": [{
                     "policy": "milp", "episode": 0, "seed": ub.get("seed", 7),
-                    "steps": int(ub.get("window_steps", 360)),
+                    "steps": int(ub.get("window_steps", 0)),
                     "total_reward": 0.0,
                     "arrived_keys": arrived,
                     "served_keys": served,
