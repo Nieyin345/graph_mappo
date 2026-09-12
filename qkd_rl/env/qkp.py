@@ -37,6 +37,10 @@ class LinkQKPPool:
         # Live set of edges holding a positive key stock. Routing uses it to
         # avoid per-edge get_level dict lookups in BFS hot loops.
         self.positive: set[str] = set()
+        # Keys generated this slot but not yet consumed (per edge). The serve
+        # phase uses it to attribute consumption between history stock and the
+        # current slot's new keys (see ``consume_path_attributed``).
+        self.slot_new: dict[str, float] = {}
         self.capacities = {
             edge_id: self.capacity_resolver.capacity_for_edge(edge) for edge_id, edge in self.edges.items()
         }
@@ -52,6 +56,7 @@ class LinkQKPPool:
         for edge_id, level in self.levels.items():
             if level > 0:
                 self.batches[edge_id].append((level, t))
+        self.slot_new = {}
 
     def add_keys(self, edge_id: str, amount: float, t: int) -> float:
         amount = max(0.0, amount)
@@ -92,6 +97,35 @@ class LinkQKPPool:
         for edge_id in edge_ids:
             self.consume_keys(edge_id, amount)
         return True
+
+    def set_slot_new(self, added_by_edge: dict[str, float]) -> None:
+        """Mark the keys generated this slot so consumption can be attributed.
+
+        Called right after ``allocate_generated_keys`` and before the serve
+        phase; ``consume_path_attributed`` decrements it as the new keys are
+        consumed, so "history stock" is ``level - slot_new`` for any edge.
+        """
+        self.slot_new = {edge_id: max(0.0, amount) for edge_id, amount in added_by_edge.items()}
+
+    def clear_slot_new(self) -> None:
+        self.slot_new = {}
+
+    def consume_path_attributed(self, edge_ids: list[str], amount: float) -> dict[str, float]:
+        """Consume ``amount`` from every edge, FIFO-attributing to this slot.
+
+        Consumption order is FIFO (old batches first), so an edge's ``level``
+        minus its ``slot_new`` is the history stock that is consumed first.
+        Returns per-edge amounts that came out of this slot's new keys.
+        """
+        from_new: dict[str, float] = {}
+        for edge_id in edge_ids:
+            level = self.levels.get(edge_id, 0.0)
+            new_avail = self.slot_new.get(edge_id, 0.0)
+            fn = max(0.0, amount - max(0.0, level - new_avail))
+            from_new[edge_id] = fn
+            self.slot_new[edge_id] = max(0.0, new_avail - fn)
+            self.consume_keys(edge_id, amount)
+        return from_new
 
     def get_level(self, edge_id: str) -> float:
         return self.levels.get(edge_id, 0.0)

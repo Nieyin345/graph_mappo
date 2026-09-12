@@ -39,6 +39,10 @@ features:
     include_rate_max: true
     include_last_activated: true
     include_relay_importance: true
+    # 通路提示特征：物理边两端点到最近 pending 请求源/宿端点的 hop 数
+    #（当前可见物理边图上的多源 BFS，4 列：src_u, src_v, dst_u, dst_v）。
+    # 给模型显式的"哪条边在请求通路上"的结构提示，帮助可学习扩散快速对齐。
+    include_req_hop: true
     relay_importance:
       max_path_links: 3
       hop_decay_factor: 0.25

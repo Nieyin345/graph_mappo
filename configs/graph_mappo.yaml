@@ -1,10 +1,10 @@
 model:
   name: graph_mappo
   # mixed: physical edges and demand edges both participate in the shared
-  # node/edge GNN (previous behavior). demand_edge: physical edges do not
-  # update nodes; demand pressure is computed on physical edges and embedded
-  # directly into the actor edge scorer.
-  mode: demand_edge
+  # node/edge GNN; demand pressure diffuses along physical links so edge
+  # scoring carries path context (required for path-aware matching).
+  # demand_edge: physical edges do not update nodes (kept for ablation).
+  mode: mixed
   encoder:
     gnn_type: graphsage
     node_dim: auto

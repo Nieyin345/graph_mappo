@@ -13,6 +13,8 @@ _ENABLED_FLAG_KEYS = {
     "success_enabled",
     "success_delta_enabled",
     "served_enabled",
+    "attribution_enabled",
+    "storage_enabled",
     "raw_generation_enabled",
     "dense_enabled",
     "failed_enabled",
@@ -39,6 +41,12 @@ class RewardDetail:
     switch_penalty: float = 0.0
     keep_active_reward: float = 0.0
     baseline_reward: float = 0.0
+    # Attribution diagnostics: served keys traceable to this slot's activation
+    # (``attributed_served``) and history stock unlocked by a mixed channel
+    # (``history_utilized``); storage keys on usable paths (``storage_reward``).
+    attributed_served: float = 0.0
+    history_utilized: float = 0.0
+    storage_reward: float = 0.0
 
 
 class RewardFunction:
@@ -144,6 +152,9 @@ class RewardFunction:
         added_by_edge: dict[str, float] | None = None,
         relay_importance: dict[str, float] | None = None,
         baseline_reward: float = 0.0,
+        serve_events: list[tuple[str, float, float]] | None = None,
+        from_new_by_edge: dict[str, float] | None = None,
+        storage_pathness: dict[str, float] | None = None,
     ) -> RewardDetail:
         dense_reward = (
             self._dense_importance_reward(added_by_edge, relay_importance)
@@ -255,11 +266,39 @@ class RewardFunction:
                 switch_penalty=switch_penalty,
             )
 
-        served_reward = (
-            float(self.config["served_weight"]) * serve_result.served_keys
-            if self._enabled(self.config, "served")
-            else 0.0
-        )
+        served_weight = float(self.config.get("served_weight", 0.0))
+        attributed_served = 0.0
+        history_utilized = 0.0
+        served_reward = 0.0
+        if self._enabled(self.config, "served"):
+            if self._enabled(self.config, "attribution", default=False):
+                # Attribute served keys to the current link choice: keys traced
+                # to this slot's generation count at full weight; history stock
+                # unlocked by a mixed channel (a request served partly by new,
+                # partly by old keys) counts at the discounted ratio. Service
+                # purely from history stock carries no reward: it happened
+                # without this slot's activation.
+                ratio = float(self.config.get("history_utilization_ratio", 0.3))
+                for _req_id, served, from_new in serve_events or []:
+                    attributed_served += from_new
+                    if from_new > 1.0e-9 and (served - from_new) > 1.0e-9:
+                        history_utilized += served - from_new
+                served_reward = served_weight * (attributed_served + ratio * history_utilized)
+            else:
+                served_reward = served_weight * serve_result.served_keys
+        # Storage reward: new keys left unconsumed this slot are rewarded only
+        # if stored on an edge that lies on some pending request's usable path
+        # (activated or stocked), i.e. where they can be consumed later. This
+        # replaces the empirical relay-importance shaping with a structural
+        # "stored on a real channel" signal.
+        storage_reward = 0.0
+        if self._enabled(self.config, "storage", default=False):
+            storage_weight = float(self.config.get("storage_reward_weight", 0.0))
+            storage_reference = float(self.config.get("storage_reference", 1_000_000.0)) or 1.0
+            for edge_id, added in (added_by_edge or {}).items():
+                unused = max(0.0, added - (from_new_by_edge or {}).get(edge_id, 0.0))
+                storage_reward += storage_weight * unused * float((storage_pathness or {}).get(edge_id, 0.0))
+            storage_reward /= storage_reference
         # Useful generation: keys that actually fit into the pools
         # (min(rate x slot, capacity_left)). Rewarding stored keys instead of
         # raw rate makes activation of an already-full link neutral (no
@@ -344,7 +383,7 @@ class RewardFunction:
             expired_key_penalty /= fixed_reference
             conflict_penalty /= fixed_reference
             generated_reward = raw_n + dense_reward
-            total = key_total / fixed_reference + dense_reward - switch_penalty
+            total = key_total / fixed_reference + dense_reward + storage_reward - switch_penalty
         elif self.config.get("normalize_by_arrived_demand", False):
             # Normalize the *demand-side* key-flow terms (served, waiting, ...)
             # by the recent mean of arrived key demand so they stay O(1)-ish
@@ -364,7 +403,7 @@ class RewardFunction:
             expired_key_penalty /= denom
             conflict_penalty /= denom
             generated_reward = raw_n + dense_reward
-            total = key_total / denom + dense_reward - switch_penalty
+            total = key_total / denom + dense_reward + storage_reward - switch_penalty
         # Note: the former normalize_served_by_queue branch (served / (served +
         # waiting), saturated at ~1 once the queue drains) was removed. It
         # silently overrode served_reference and made the served reward
@@ -407,4 +446,7 @@ class RewardFunction:
             dense_reward=dense_reward,
             switch_penalty=switch_penalty,
             keep_active_reward=keep_active_reward,
+            attributed_served=attributed_served,
+            history_utilized=history_utilized,
+            storage_reward=storage_reward,
         )

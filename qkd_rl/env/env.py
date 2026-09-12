@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+from collections import deque
 
 from qkd_rl.data.scenario_builder import Scenario
 from qkd_rl.env.action_resolver import ActionResolver
@@ -175,7 +176,11 @@ class QKDEnv:
 
         generated = self._generate_keys(resolved.activated_edges, state_before.edge_windows)
         allocation = self.routing.allocate_generated_keys(resolved.activated_edges, generated, self.qkp, self.t)
+        # Mark this slot's new keys so the serve phase can attribute each
+        # request's consumption between history stock and current activation.
+        self.qkp.set_slot_new(allocation.added_by_edge)
         serve_result = self.requests.serve(self.qkp, self.routing, self.t)
+        self.qkp.clear_slot_new()
         expired_requests = self.requests.expire(self.t)
         self.request_history.record_served(serve_result.served_requests, self.t)
         self.request_history.record_failed(serve_result.failed_requests + expired_requests, self.t)
@@ -219,6 +224,9 @@ class QKDEnv:
             added_by_edge=allocation.added_by_edge,
             relay_importance=relay_importance,
             baseline_reward=baseline_reward,
+            serve_events=serve_result.serve_events,
+            from_new_by_edge=serve_result.from_new_by_edge,
+            storage_pathness=self._compute_storage_pathness(resolved.activated_edges, self.qkp),
         )
         self.metrics.update(resolved, generated, serve_result, reward_detail, self.qkp, expired_requests)
 
@@ -253,6 +261,53 @@ class QKDEnv:
             masks, self.mask_builder.last_flat_legal
         )
         return [edge.edge_id for edge in active_edges]
+
+    def _compute_storage_pathness(
+        self, activated_edges: list[str], qkp: LinkQKPPool
+    ) -> dict[str, float]:
+        """Mark activated edges that lie on some pending request's usable path.
+
+        A mixed path (activated edges may generate new keys, stocked edges may
+        already hold keys) is built over ``activated ∪ positive-stock`` edges.
+        The returned map is used by the storage reward to pay only for keys
+        stored where they can actually be consumed later.
+        """
+        reward_cfg = self.config.get("reward", {})
+        if not RewardFunction._enabled(reward_cfg, "storage"):
+            return {}
+        activated_set = set(activated_edges)
+        usable = activated_set | set(qkp.positive)
+        adj: dict[str, list[tuple[str, str]]] = {}
+        for edge in self.routing.edges:
+            if edge.edge_id in usable:
+                adj.setdefault(edge.src, []).append((edge.dst, edge.edge_id))
+                adj.setdefault(edge.dst, []).append((edge.src, edge.edge_id))
+        pathness: dict[str, float] = {}
+        for req in self.requests.get_pending():
+            if req.src_gs not in adj or req.dst_gs not in adj:
+                continue
+            parent: dict[str, tuple[str | None, str | None]] = {req.src_gs: (None, None)}
+            queue: deque[str] = deque([req.src_gs])
+            found = False
+            while queue:
+                node_id = queue.popleft()
+                if node_id == req.dst_gs:
+                    found = True
+                    break
+                for neighbor, edge_id in adj.get(node_id, ()):
+                    if neighbor in parent:
+                        continue
+                    parent[neighbor] = (node_id, edge_id)
+                    queue.append(neighbor)
+            if not found:
+                continue
+            cur = req.dst_gs
+            while parent[cur][0] is not None:
+                edge_id = parent[cur][1]
+                if edge_id in activated_set:
+                    pathness[edge_id] = 1.0
+                cur = parent[cur][0]
+        return pathness
 
     def _baseline_edge_scores(
         self,

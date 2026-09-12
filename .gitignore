@@ -6,12 +6,34 @@ __pycache__/
 
 # Test / tooling caches
 .pytest_cache/
+.pytest_tmp*/
+.pytest-tmp*/
+.mypy_cache/
+.ruff_cache/
+.pyright/
 .coverage
 htmlcov/
 
 # Runtime outputs
 outputs/
 *.log
+
+# Model / data artifacts (checkpoints, trajectories, arrays)
+*.pt
+*.pkl
+*.pkl.gz
+*.npy
+*.npz
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Temp dirs
+tmp/
+temp/
+*.tmp
 
 # Large generated data (H5 / weather / reference works)
 dataset/*
@@ -27,8 +49,5 @@ ref_work/
 .idea/
 .DS_Store
 Thumbs.db
-.pytest_tmp/
-.pytest_tmp2/
-.pytest_tmp3/
 
 .reasonix/

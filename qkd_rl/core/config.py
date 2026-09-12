@@ -77,6 +77,9 @@ class ConfigValidator:
             "include_qkp_capacity_left",
         ):
             edge_dim += int(bool(edge_cfg.get(flag, False)))
+        # 通路提示特征：两端点距最近需求源/宿共 4 个 hop 值。
+        if edge_cfg.get("include_req_hop", False):
+            edge_dim += 4
 
         demand_edge_dim = 0
         if demand_edge_cfg.get("enabled", False):

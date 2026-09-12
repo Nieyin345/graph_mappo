@@ -289,7 +289,7 @@ def test_baselines_yaml_policies_constructible() -> None:
         "greedy_relay_diffusion_v3",
     }
     # Construct every enabled policy exactly like run_baselines.py does.
-    if base_cfg["random"]["enabled"]:
+    if base_cfg["random"]["_enabled"]:
         RandomPolicy(seed=0)
     GreedyRatePolicy(use_future_mean_rate=base_cfg["greedy_rate"]["use_future_mean_rate"])
     GreedyQKPPolicy(

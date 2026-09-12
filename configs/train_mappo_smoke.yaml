@@ -1,0 +1,51 @@
+# Fixed-scenario smoke run: validate model + reward design on ONE scenario.
+#
+#   env: day 0 only (episode_start_day=0, single 1440-step episode)
+#   requests: fixed across updates (fixed_episode_seed -> seeds 7..14 replay
+#     every update), so the per-update training mean_success_rate is directly
+#     comparable and isolates learning in one scenario.
+#
+# Usage:
+#   python scripts/rl/train_graph_mappo.py --configs train_mappo_smoke.yaml \
+#       --checkpoint outputs/supervised_pg_phased/supervised_pg_phased_latest.pt \
+#       --run-name rl_smoke_day0
+env:
+  episode_start_mode: fixed
+  episode_start_day: 0
+  episode_steps: 1440
+  continuous: false
+  activation_window_start_day: 0
+  activation_window_days: 0
+  activation_window_end_day: -1
+scenario:
+  time_limit:
+    days: 2
+train:
+  num_updates: 60
+  rollout_steps: 720
+  episodes_per_update: 8
+  episode_steps_fixed: true
+  fixed_episode_seed: true
+  # Single-process lockstep rollout: 8 envs in the main process, one
+  # block-diagonal GPU forward serves them all. Uses ~1 env's RAM instead of
+  # 8 worker processes (~700MB each), which was swapping the 16GB laptop and
+  # inflating the GPU update to 28s/chunk.
+  n_rollout_workers: 1
+  rollout_worker_device: cpu
+  rollout_batch: true
+  temperature_schedule:
+    start: 1.2
+    end: 1.0
+    updates: 60
+  ppo:
+    # 8GB laptop GPU: the 512-graph block-diagonal forward OOMs; 256 halves
+    # the peak update memory while keeping the same math (pure chunk size).
+    batch_chunk: 256
+  logging:
+    log_interval: 1
+    checkpoint_interval: 10
+    # Skip held-out validation during the smoke run: watch the per-update
+    # training mean_success_rate on the fixed scenario instead.
+    eval_interval: 0
+seed:
+  env_seed: 7

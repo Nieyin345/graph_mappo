@@ -53,31 +53,30 @@ class BatchedActorCriticOutput:
 def _edge_score_map(
     plan: tuple,
     node_index: dict[str, int],
-    edge_by_pair: dict[tuple[str, str], str],
     edge_scores: torch.Tensor,
-) -> dict[str, torch.Tensor]:
-    """Map raw edge-scorer outputs back to edge ids for one observation.
+) -> dict[tuple[str, str], torch.Tensor]:
+    """Map raw edge-scorer outputs back to directed arcs for one observation.
 
     ``plan[0]`` / ``plan[1]`` are the source/destination node positions of the
     legal edge candidates in flat candidate order, which is exactly the order
-    of ``edge_scores`` returned by the batched scorer. Both endpoints of a
-    physical edge map to the same edge id and the same learned score, so the
-    resolver can compare edges globally instead of comparing per-node log
-    probabilities that are only identifiable up to a node-wise constant.
+    of ``edge_scores`` returned by the batched scorer. Each candidate is the
+    *directed* proposal of one node (``src -> dst``), so the map is keyed by
+    the arc tuple: ``u -> v`` and ``v -> u`` keep their own learned scores.
+    The global matching sampler can therefore distinguish directions instead
+    of sharing one undirected pair score between both arcs.
     """
-    if node_index is None or edge_by_pair is None:
+    if node_index is None:
         return {}
     index_to_node = {idx: node_id for node_id, idx in node_index.items()}
-    edge_map: dict[str, torch.Tensor] = {}
+    arc_map: dict[tuple[str, str], torch.Tensor] = {}
     srcs = plan[0]
     dsts = plan[1]
     for i in range(int(srcs.size)):
         src = index_to_node[int(srcs[i])]
         dst = index_to_node[int(dsts[i])]
-        edge_id = edge_by_pair.get(tuple(sorted((src, dst))))
-        if edge_id is not None:
-            edge_map[edge_id] = edge_scores[i]
-    return edge_map
+        if src != dst:
+            arc_map[(src, dst)] = edge_scores[i]
+    return arc_map
 
 
 def observation_to_tensors(
@@ -161,6 +160,24 @@ class EdgeConditionedGraphLayer(nn.Module):
             dropout=dropout,
         )
         self.norm = nn.LayerNorm(hidden_dim) if layer_norm else nn.Identity()
+        # 节点→边 更新：边吸收两端点的最新节点上下文，把"需求压力 / 链路能力"
+        # 的扩散结果写回边嵌入，跨层累积后边嵌入即携带通路上下文。
+        # 物理边与需求边语义不同（链路能力 vs 请求压力），各自独立 MLP。
+        self.edge_update_mlp_phys = build_mlp(
+            input_dim=hidden_dim * 3,
+            hidden_dims=[hidden_dim],
+            output_dim=hidden_dim,
+            activation=activation,
+            dropout=dropout,
+        )
+        self.edge_update_mlp_demand = build_mlp(
+            input_dim=hidden_dim * 3,
+            hidden_dims=[hidden_dim],
+            output_dim=hidden_dim,
+            activation=activation,
+            dropout=dropout,
+        )
+        self.edge_norm = nn.LayerNorm(hidden_dim) if layer_norm else nn.Identity()
         self.fuse_physical_to_node = fuse_physical_to_node
 
     def forward(
@@ -188,14 +205,31 @@ class EdgeConditionedGraphLayer(nn.Module):
             # measurably slower on CUDA (~26% in micro-benchmark) and can be
             # numerically unstable for small graphs; the two-kernel version is
             # exactly sum / count with clamp keeping isolated nodes at 0.
-            agg = torch.zeros_like(node_emb)
+            agg = torch.zeros_like(node_emb, dtype=messages.dtype)
             counts = torch.zeros(node_emb.size(0), device=messages.device, dtype=messages.dtype)
             counts.index_add_(0, dst_s, torch.ones_like(messages[:, 0]))
             agg.index_add_(0, dst_s, messages)
             agg = agg / counts.clamp(min=1.0).unsqueeze(-1)
             aggregated = aggregated + agg
         updated = self.update(torch.cat([node_emb, aggregated], dim=-1))
-        return self.norm(updated)
+        new_node = self.norm(updated)
+        # 节点→边：边嵌入吸收两端点的最新上下文（残差 + LayerNorm）。
+        # 需求信息从需求边 → 端点节点 → 物理边逐层"落"到边嵌入上，
+        # 物理边之间通过节点中介完成信息融合（边→节点→边）。
+        edge_new = edge_attr.clone()
+        for edge_mlp, start, end in (
+            (self.edge_update_mlp_phys, 0, int(num_physical_directed)),
+            (self.edge_update_mlp_demand, int(num_physical_directed), edge_index.size(1)),
+        ):
+            if start >= end:
+                continue
+            src_s, dst_s = src[start:end], dst[start:end]
+            msg = edge_mlp(
+                torch.cat([edge_attr[start:end], new_node[src_s], new_node[dst_s]], dim=-1)
+            )
+            edge_new[start:end] = msg + edge_attr[start:end]
+        edge_new = self.edge_norm(edge_new)
+        return new_node, edge_new
 
 
 class GraphEncoder(nn.Module):
@@ -249,7 +283,9 @@ class GraphEncoder(nn.Module):
             else tensors.edge_features_directed.new_zeros((0, node_emb.size(1)))
         )
         for layer in self.layers:
-            next_node_emb = layer(node_emb, tensors.edge_index, edge_emb, tensors.num_physical_directed)
+            next_node_emb, edge_emb = layer(
+                node_emb, tensors.edge_index, edge_emb, tensors.num_physical_directed
+            )
             node_emb = node_emb + next_node_emb if self.residual else next_node_emb
         return node_emb, edge_emb
 
@@ -283,6 +319,11 @@ class SharedNodeActor(nn.Module):
         )
         self.invalid_logit_value = invalid_logit_value
         self.temperature = float(config["actor"].get("temperature", 1.0))
+        # Learnable STOP logit for the sequential global matching sampler: at
+        # every decision the policy chooses among the still-feasible arcs and
+        # STOP, so it can express "activate nothing this slot" instead of
+        # being forced to fill every feasible port.
+        self.stop_logit = nn.Parameter(torch.zeros(()))
         self._node_idx: dict[str, int] | None = None
         self._action_to_edge: dict[tuple[str, str], str] | None = None
 
@@ -530,7 +571,7 @@ class SharedNodeActor(nn.Module):
             # slice+contiguous ops per step (tests request the dict via the
             # default flag).
             logits = {}
-        edge_map = _edge_score_map(plan, self._node_idx, self._action_to_edge, edge_scores)
+        edge_map = _edge_score_map(plan, self._node_idx, edge_scores)
         return logits, masked, list(obs.node_ids), lengths, edge_map
 
 
@@ -837,7 +878,7 @@ class GraphMAPPOActorCritic(nn.Module):
             else edge_features_p.new_zeros((0, node_emb.size(1)))
         )
         for layer in self.encoder.layers:
-            next_node_emb = layer(node_emb, edge_index_p, edge_emb, num_phys_total)
+            next_node_emb, edge_emb = layer(node_emb, edge_index_p, edge_emb, num_phys_total)
             node_emb = node_emb + next_node_emb if self.encoder.residual else next_node_emb
 
         # Actor: merge per-graph candidate plans into one batched scoring pass.
@@ -900,7 +941,6 @@ class GraphMAPPOActorCritic(nn.Module):
                 _edge_score_map(
                     plan,
                     self.actor._node_idx,
-                    self.actor._action_to_edge,
                     graph_scores,
                 )
             )

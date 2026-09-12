@@ -183,7 +183,11 @@ def test_max_weight_matching_prefers_global_optimum_over_single_best_edge():
         {"A": ("B", "B"), "B": ("A", "A"), "C": ("A", "A"), "D": ("B", "B")},
         _weighted_state(),
         _all_valid_masks(resolver),
-        edge_scores={"e_ab": 10.0, "e_ac": 6.0, "e_bd": 6.0},
+        edge_scores={
+            ("A", "B"): 10.0, ("B", "A"): 10.0,
+            ("A", "C"): 6.0, ("C", "A"): 6.0,
+            ("B", "D"): 6.0, ("D", "B"): 6.0,
+        },
     )
 
     assert result.activated_edges == ["e_ac", "e_bd"]
@@ -201,7 +205,11 @@ def test_max_weight_matching_rate_tiebreak_cannot_override_scores():
         {"A": ("B", "B"), "B": ("A", "A"), "C": ("A", "A"), "D": ("B", "B")},
         state,
         _all_valid_masks(resolver),
-        edge_scores={"e_ab": 1.0, "e_ac": 1.01, "e_bd": 1.01},
+        edge_scores={
+            ("A", "B"): 1.0, ("B", "A"): 1.0,
+            ("A", "C"): 1.01, ("C", "A"): 1.01,
+            ("B", "D"): 1.01, ("D", "B"): 1.01,
+        },
     )
 
     assert result.activated_edges == ["e_ac", "e_bd"]
@@ -223,7 +231,7 @@ def test_max_weight_matching_does_not_collapse_to_empty_when_scores_are_negative
             last_activated_edges=[],
         ),
         _all_valid_masks(resolver),
-        edge_scores={"e_ab": -10.0},
+        edge_scores={("A", "B"): -10.0, ("B", "A"): -10.0},
     )
 
     assert result.activated_edges == ["e_ab"]

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import random
 from bisect import bisect_right
+from dataclasses import dataclass, field
 
 import numpy as np
-from dataclasses import dataclass
 
 from qkd_rl.core.types import KeyRequest
 from qkd_rl.env.qkp import LinkQKPPool
@@ -18,6 +18,12 @@ class ServeResult:
     served_keys: float
     waiting_keys: float
     failed_keys: float
+    # Per-request service events ``(req_id, served, from_new)``: how much of a
+    # request was served this step and how much of it came from this slot's
+    # newly generated keys (history-stock portion is ``served - from_new``).
+    serve_events: list[tuple[str, float, float]] = field(default_factory=list)
+    # Total this-slot new keys consumed, per edge (for the storage reward).
+    from_new_by_edge: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -162,6 +168,8 @@ class RequestQueue:
         waiting: list[KeyRequest] = []
         next_pending: list[KeyRequest] = []
         served_keys = 0.0
+        serve_events: list[tuple[str, float, float]] = []
+        from_new_by_edge: dict[str, float] = {}
 
         def _priority(req: KeyRequest):
             remaining = max(0.0, req.amount - req.served_amount)
@@ -180,9 +188,12 @@ class RequestQueue:
             )
 
         for req in sorted(self.pending, key=_priority):
-            served_now = routing.partial_consume_for_request(req, qkp, t)
+            served_now, from_new_map = routing.partial_consume_for_request(req, qkp, t, attributed=True)
             served_keys += served_now
             if served_now > 0:
+                serve_events.append((req.request_id, served_now, sum(from_new_map.values())))
+                for edge_id, amount in from_new_map.items():
+                    from_new_by_edge[edge_id] = from_new_by_edge.get(edge_id, 0.0) + amount
                 updated = replace(req, served_amount=req.served_amount + served_now)
                 if updated.served_amount >= req.amount - 1.0e-9:
                     served.append(updated)
@@ -204,6 +215,8 @@ class RequestQueue:
             served_keys=served_keys,
             waiting_keys=sum(max(0.0, req.amount - req.served_amount) for req in waiting),
             failed_keys=0.0,
+            serve_events=serve_events,
+            from_new_by_edge=from_new_by_edge,
         )
 
 

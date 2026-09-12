@@ -167,6 +167,12 @@ class MAPPOTrainer:
         for stage in self.curriculum_stages:
             seed_stride = max(seed_stride, int(stage.get("episodes_per_update", seed_stride)))
         self._seed_stride = max(1, seed_stride)
+        if bool(train_cfg.get("fixed_episode_seed", False)):
+            # Fixed-scenario debugging/tuning: every update replays the exact
+            # same request streams (base_seed = env_seed + 0 * stride), so the
+            # mean success rate on the rollout is directly comparable across
+            # updates and isolates learning in one scenario.
+            self._seed_stride = 0
 
     def _apply_curriculum(self) -> None:
         """Apply the active curriculum stage for the current update count."""

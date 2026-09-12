@@ -622,6 +622,11 @@ class GraphBuilder:
             link_type_bonus=relay_cfg.get("link_type_bonus", None),
         )
         self._last_relay_importance = relay_importance or {}
+        req_hop = (
+            self._compute_req_hop_features(active_edges, requests)
+            if edge_cfg.get("include_req_hop", False)
+            else None
+        )
         ewindows = env_state.edge_windows
         blocks = getattr(ewindows, "blocks", None)
         if blocks is not None and blocks[2] is not None:
@@ -633,6 +638,7 @@ class GraphBuilder:
                 physical_dim,
                 demand_dim,
                 relay_importance=relay_importance,
+                req_hop=req_hop,
             )
         else:
             rows = self._build_physical_edge_rows_loop(
@@ -642,6 +648,7 @@ class GraphBuilder:
                 physical_dim,
                 demand_dim,
                 relay_importance=relay_importance,
+                req_hop=req_hop,
             )
         dem_rows = self.build_demand_edge_features(
             env_state, requests, request_history, demand_pairs, demand_stats_by_pair=demand_stats_by_pair
@@ -655,6 +662,53 @@ class GraphBuilder:
             return dem_padded
         return rows
 
+    def _compute_req_hop_features(
+        self,
+        active_edges: list[Edge],
+        requests: RequestQueue,
+    ) -> dict[str, tuple[float, float, float, float]]:
+        """两端点到最近 pending 请求源/宿端点的 hop（当前可见物理边图上的多源 BFS）。
+
+        返回 ``{edge_id: (src_u, src_v, dst_u, dst_v)}``，hop 按可达上界归一化到
+        ``[0, 1]``，不可达节点取 1.0。给模型显式的通路结构提示：两端点分别靠近
+        请求源与请求宿的边，才是"在通路上"的边。
+        """
+        adj: dict[str, list[str]] = {}
+        for edge in active_edges:
+            adj.setdefault(edge.src, []).append(edge.dst)
+            adj.setdefault(edge.dst, []).append(edge.src)
+        pending = requests.get_pending()
+        srcs = {req.src_gs for req in pending}
+        dsts = {req.dst_gs for req in pending}
+        max_hop = float(len(adj) + 1)
+
+        def bfs(sources: set[str]) -> dict[str, float]:
+            dist = {node: max_hop for node in adj}
+            queue: deque[str] = deque()
+            for s in sources:
+                if s in dist:
+                    dist[s] = 0.0
+                    queue.append(s)
+            while queue:
+                u = queue.popleft()
+                for v in adj[u]:
+                    if dist[v] > dist[u] + 1.0:
+                        dist[v] = dist[u] + 1.0
+                        queue.append(v)
+            return dist
+
+        d_src = bfs(srcs)
+        d_dst = bfs(dsts)
+        out: dict[str, tuple[float, float, float, float]] = {}
+        for edge in active_edges:
+            out[edge.edge_id] = (
+                d_src[edge.src] / max_hop,
+                d_src[edge.dst] / max_hop,
+                d_dst[edge.src] / max_hop,
+                d_dst[edge.dst] / max_hop,
+            )
+        return out
+
     def _build_physical_edge_rows_vectorized(
         self,
         active_edges: list[Edge],
@@ -664,6 +718,7 @@ class GraphBuilder:
         physical_dim: int,
         demand_dim: int,
         relay_importance: dict[str, float] | None = None,
+        req_hop: dict[str, tuple[float, float, float, float]] | None = None,
     ) -> np.ndarray:
         """Physical edge feature rows assembled from the cached numpy blocks.
 
@@ -715,6 +770,19 @@ class GraphBuilder:
                     count=len(active_ids),
                 )
             )
+        if edge_cfg.get("include_req_hop", False):
+            hop = req_hop or {}
+            cols.append(
+                np.fromiter(
+                    (
+                        v
+                        for edge_id in active_ids
+                        for v in hop.get(edge_id, (0.0, 0.0, 0.0, 0.0))
+                    ),
+                    dtype=np.float32,
+                    count=len(active_ids) * 4,
+                ).reshape(len(active_ids), 4)
+            )
         # Per-link remaining QKP capacity ratio (capacity - level) / capacity.
         if edge_cfg.get("include_qkp_capacity_left", False):
             cap = self._edge_capacity_arr[active_pos]
@@ -744,6 +812,7 @@ class GraphBuilder:
         physical_dim: int,
         demand_dim: int,
         relay_importance: dict[str, float] | None = None,
+        req_hop: dict[str, tuple[float, float, float, float]] | None = None,
     ) -> list[list[float]]:
         """Legacy per-window loop for directly-constructed windows (tests)."""
         horizon = int(edge_cfg.get("prediction_horizon", 0))
@@ -776,6 +845,8 @@ class GraphBuilder:
                 row.append(float(edge.edge_id in env_state.last_activated_edges))
             if edge_cfg.get("include_relay_importance", False):
                 row.append(float((relay_importance or {}).get(edge.edge_id, 0.0)))
+            if edge_cfg.get("include_req_hop", False):
+                row.extend((req_hop or {}).get(edge.edge_id, (0.0, 0.0, 0.0, 0.0)))
             if edge_cfg.get("include_qkp_capacity_left", False):
                 capacity = self.qkp.get_capacity(edge.edge_id)
                 level = self.qkp.get_level(edge.edge_id)

@@ -57,8 +57,13 @@ class ActionResolver:
         env_state: EnvState,
         masks: dict[str, list[bool]],
         action_scores: dict[str, dict[str, float]] | None = None,
-        edge_scores: dict[str, float] | None = None,
+        edge_scores: dict[tuple[str, str], float] | None = None,
     ) -> ResolvedAction:
+        # Legacy single-target actions (``{node: target}``, produced by the
+        # greedy baselines) are normalized to the dual-port ``(tx, rx)`` form:
+        # a plain target proposes that link for both the Tx and Rx port.
+        if actions and isinstance(next(iter(actions.values())), str):
+            actions = {node: (target, target) for node, target in actions.items()}
         illegal = self._find_illegal(actions, masks)
         valid_actions = {node: action for node, action in actions.items() if node not in illegal}
         if self.mode == "mutual_choice":
@@ -151,12 +156,12 @@ class ActionResolver:
         actions: dict[str, tuple[str, str]],
         action_scores: dict[str, dict[str, float]],
         env_state: EnvState,
-        edge_scores: dict[str, float] | None = None,
+        edge_scores: dict[tuple[str, str], float] | None = None,
     ) -> list[tuple[str, str]]:
         score_merge = self.config.get("score_merge", "mean")
         score_source = self.config.get("score_source", "edge")
         use_edge_scores = score_source == "edge" and edge_scores is not None
-        candidates: list[tuple[float, str, str]] = []  # (score, edge_id, src, dst)
+        candidates: list[tuple[float, str, str, str]] = []  # (score, edge_id, src, dst)
         for u, (tx, rx) in actions.items():
             for v in (tx, rx):
                 if v == NodeActionSpace.IDLE or v == u or not self.action_space.is_neighbor(u, v):
@@ -165,7 +170,9 @@ class ActionResolver:
                 if edge_id is None:
                     continue
                 if use_edge_scores:
-                    score = edge_scores.get(edge_id, 0.0)
+                    # Directed arc scores: u -> v uses its own score, not the
+                    # shared undirected pair score.
+                    score = edge_scores.get((u, v), 0.0)
                 else:
                     if score_merge not in ("mean", "max"):
                         raise ValueError(f"Unsupported action_resolver.score_merge: {score_merge!r}")
@@ -204,7 +211,7 @@ class ActionResolver:
         masks: dict[str, list[bool]],
         action_scores: dict[str, dict[str, float]],
         env_state: EnvState,
-        edge_scores: dict[str, float] | None = None,
+        edge_scores: dict[tuple[str, str], float] | None = None,
     ) -> list[tuple[str, str]]:
         tie_break = self.config.get("tie_break", "rate_then_edge_id")
         use_edge_scores = self.config.get("score_source", "edge") == "edge" and edge_scores is not None
@@ -216,13 +223,14 @@ class ActionResolver:
                 continue
             eid = edge.edge_id
             if use_edge_scores:
-                base = float(edge_scores.get(eid, 0.0))
+                base_uv = float(edge_scores.get((edge.src, edge.dst), 0.0))
+                base_vu = float(edge_scores.get((edge.dst, edge.src), 0.0))
             else:
-                base = self._merge_action_scores(edge.src, edge.dst, action_scores, score_merge)
+                base_uv = base_vu = self._merge_action_scores(edge.src, edge.dst, action_scores, score_merge)
             window = env_state.edge_windows.get(eid)
             rate = float(window.rates[0]) if window is not None else 0.0
-            directed.append((base, rate, edge.src, edge.dst))
-            directed.append((base, rate, edge.dst, edge.src))
+            directed.append((base_uv, rate, edge.src, edge.dst))
+            directed.append((base_vu, rate, edge.dst, edge.src))
         directed = self._prune_matching_candidates(directed)
         if not directed:
             return []
@@ -237,9 +245,12 @@ class ActionResolver:
             data = dict(base=float(base), rate=float(rate), rank=rank[f"{u}->{v}"], arc=(u, v))
             w = self._positive_weight(float(base))
             if tie_break == "rate_then_edge_id":
-                data["weight"] = w + max(1.0e-12, abs(w) * 1.0e-9) * (rate / max_rate + data["rank"] * 1.0e-12)
+                # Perturbation must be large enough to survive float64 rounding
+                # next to ``w`` (else equal-score arcs resolve arbitrarily) but
+                # stay orders of magnitude below any real score difference.
+                data["weight"] = w + max(1.0e-9, abs(w) * 1.0e-6) * (rate / max_rate + data["rank"] * 1.0e-6)
             else:
-                data["weight"] = w + data["rank"] * 1.0e-12
+                data["weight"] = w + data["rank"] * 1.0e-6
             graph.add_edge(("L", u), ("R", v), **data)
         matching = nx.max_weight_matching(graph, maxcardinality=False, weight="weight")
         # 对端不同: the bipartite graph models A->C and C->A with different left

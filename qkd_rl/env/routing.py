@@ -209,30 +209,38 @@ class RoutingPolicy:
             return path
         return None
 
-    def partial_consume_for_request(self, request: KeyRequest, qkp: LinkQKPPool, t: int) -> float:
+    def partial_consume_for_request(
+        self, request: KeyRequest, qkp: LinkQKPPool, t: int, attributed: bool = False
+    ) -> float | tuple[float, dict[str, float]]:
         """Serve as much of ``request`` as the bottleneck hop allows.
 
         Finds any path whose hops all hold a positive key stock, then consumes
         ``min(hop levels, remaining demand)`` from every hop (per-hop key
         relay semantics). Returns the amount actually consumed this step; the
         caller accumulates it on ``request.served_amount`` and re-queues the
-        remainder.
+        remainder. With ``attributed=True`` it also returns the per-edge
+        amounts of this-slot new keys consumed (see
+        ``LinkQKPPool.consume_path_attributed``), used by the reward function
+        to separate the current link choice from history-stock service.
         """
         path = self._usable_cached_path(request, qkp)
         if path is None:
             component = getattr(self, "_pos_component", None)
             if component is not None and component.get(request.src_gs, -1) != component.get(request.dst_gs, -1):
-                return 0.0
+                return (0.0, {}) if attributed else 0.0
             path = self._find_positive_path(request, qkp)
         if path is None:
-            return 0.0
+            return (0.0, {}) if attributed else 0.0
         remaining = max(0.0, request.amount - request.served_amount)
         if remaining <= 1.0e-9:
-            return 0.0
+            return (0.0, {}) if attributed else 0.0
         hop_levels = [qkp.get_level(edge_id) for edge_id in path]
         serve_now = min(hop_levels + [remaining])
         if serve_now <= 1.0e-9:
-            return 0.0
+            return (0.0, {}) if attributed else 0.0
+        if attributed:
+            from_new = qkp.consume_path_attributed(path, serve_now)
+            return serve_now, from_new
         qkp.consume_path(path, serve_now)
         return serve_now
 

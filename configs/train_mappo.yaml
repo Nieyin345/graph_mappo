@@ -4,12 +4,12 @@ train:
   # Temperature annealing: start>1.0 for exploration, anneal to end (usually 1.0)
   # over `updates` updates. Default 1.0 -> 1.0 = disabled (same as before).
   temperature_schedule:
-    start: 1.0
+    start: 1.2
     end: 1.0
     updates: 1000
   num_updates: 10000
   rollout_steps: 1440
-  episodes_per_update: 4
+  episodes_per_update: 8
   # CPU is the rollout bottleneck (environment feature construction +
   # matching). Run one episode per worker on CPU, then keep PPO updates on the
   # main runtime.device (CUDA when available).
