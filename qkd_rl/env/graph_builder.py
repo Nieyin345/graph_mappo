@@ -1,63 +1,18 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import math
 from collections import deque
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import numpy as np
 
 from qkd_rl.core.types import Edge, LinkType, Node, NodeType
 from qkd_rl.env.action_space import NodeActionSpace
 from qkd_rl.env.qkp import LinkQKPPool
-from qkd_rl.env.request import DemandEdgeStats, RequestHistoryTracker, RequestQueue, wait_bucket_edges
+from qkd_rl.env.request import DemandEdgeStats, RequestHistoryTracker, RequestQueue
 from qkd_rl.env.relay_importance import compute_relay_importance
 from qkd_rl.env.state import EnvState
 from qkd_rl.link.rate_provider import RateNormalizer
-
-
-_EVER_AVAILABLE_CACHE: dict[tuple, frozenset[str]] = {}
-_RELAY_EDGE_INFO_CACHE: dict[tuple, dict[tuple[str, str], list[tuple[str, int]]]] = {}
-
-
-def _ever_available_cache_file(rate_provider) -> str:
-    """Disk cache path for the ever-available scan, next to the H5 dataset."""
-    path = getattr(rate_provider, "link_data_path", None)
-    if path is None:
-        return ""
-    return str(Path(path).with_name("ever_available_cache.json"))
-
-
-def _load_ever_available_disk_cache(cache_key: tuple, cache_file: str) -> frozenset[str] | None:
-    """Load the persisted ever-available edge set for ``cache_key`` (None on miss)."""
-    if not cache_file:
-        return None
-    key_hash = hashlib.md5(repr(cache_key).encode("utf-8")).hexdigest()
-    try:
-        with open(cache_file, encoding="utf-8") as handle:
-            payload = json.load(handle)
-        edges = payload.get(key_hash)
-        return frozenset(edges) if edges is not None else None
-    except (OSError, ValueError, TypeError):
-        return None
-
-
-def _save_ever_available_disk_cache(cache_key: tuple, edges: frozenset[str], cache_file: str) -> None:
-    if not cache_file:
-        return
-    key_hash = hashlib.md5(repr(cache_key).encode("utf-8")).hexdigest()
-    try:
-        payload: dict = {}
-        if Path(cache_file).exists():
-            with open(cache_file, encoding="utf-8") as handle:
-                payload = json.load(handle)
-        payload[key_hash] = sorted(edges)
-        with open(cache_file, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle)
-    except (OSError, ValueError, TypeError):
-        pass
 
 
 @dataclass
@@ -168,65 +123,10 @@ class GraphBuilder:
         self._node_total_capacity_arr = np.array(
             [self._node_total_capacity[node.node_id] for node in nodes], dtype=np.float32
         )
-        # Bidirectional shortest-hop candidate edges per GS pair. An edge is a
-        # relay candidate when both ground stations can reach it and the total
-        # path through it is within max_path_links. Longer total hops get a
-        # decayed weight, so short paths are preferred without enumerating
-        # every path.
-        self._relay_edge_info: dict[tuple[str, str], list[tuple[str, int]]] = {}
+        # Relay importance is recomputed per step by the shared
+        # ``compute_relay_importance`` (see ``build_edge_features``); the result
+        # is cached here so the reward can read the same values the policy saw.
         self._last_relay_importance: dict[str, float] = {}
-        edge_cfg = config["features"]["edge"]
-        if edge_cfg.get("include_relay_importance", False) and self.routing is not None:
-            relay_cfg = edge_cfg.get("relay_importance", {})
-            max_links = int(relay_cfg.get("max_path_links", 4))
-            # In code terms a/b are hops to the edge endpoints (the candidate
-            # link itself is not included), so each side is bounded by k-1.
-            side_limit = max(0, max_links - 1)
-            ever_available = self._ever_available_edges(relay_cfg)
-            cache_key = (
-                tuple((node.node_id, node.node_type.value) for node in self.nodes),
-                tuple(
-                    (edge.edge_id, edge.src, edge.dst, edge.link_type.value)
-                    for edge in self.edges
-                ),
-                max_links,
-                ever_available,
-            )
-            cached = _RELAY_EDGE_INFO_CACHE.get(cache_key)
-            if cached is not None:
-                self._relay_edge_info = {
-                    pair: list(entries) for pair, entries in cached.items()
-                }
-            else:
-                for pair in all_gs_pairs(self.gs_ids):
-                    src, dst = pair
-                    entries: list[tuple[str, int]] = []
-                    for edge in self.edges:
-                        if ever_available is not None and edge.edge_id not in ever_available:
-                            continue
-                        ds_u = self.routing.hop_distance(src, edge.src)
-                        ds_v = self.routing.hop_distance(src, edge.dst)
-                        dt_u = self.routing.hop_distance(dst, edge.src)
-                        dt_v = self.routing.hop_distance(dst, edge.dst)
-                        disconnected = self.routing.DISCONNECTED
-                        if min(ds_u, ds_v) > side_limit or min(dt_u, dt_v) > side_limit:
-                            continue
-                        if (
-                            min(ds_u, ds_v) >= disconnected
-                            or min(dt_u, dt_v) >= disconnected
-                        ):
-                            continue
-                        total_hops = min(ds_u, ds_v) + min(dt_u, dt_v) + 1
-                        if total_hops <= max_links:
-                            entries.append((edge.edge_id, total_hops))
-                    if entries:
-                        self._relay_edge_info[pair] = sorted(
-                            entries, key=lambda item: (item[1], item[0])
-                        )
-                _RELAY_EDGE_INFO_CACHE[cache_key] = {
-                    pair: list(entries)
-                    for pair, entries in self._relay_edge_info.items()
-                }
 
         # Each undirected edge contributes to its two endpoint nodes; flat
         # endpoint-position arrays allow one bincount-based qkp/availability
@@ -261,44 +161,6 @@ class GraphBuilder:
             node_id: np.array([self._edge_pos[edge_id] for edge_id in incident], dtype=np.int64)
             for node_id, incident in self._node_incident_ids.items()
         }
-
-    def _ever_available_edges(self, relay_cfg: dict) -> frozenset[str] | None:
-        """Edges observed available in a sampled scan of the rate provider.
-
-        Links that never appear in the dataset are useless relay hops; they are
-        dropped from the one-hop path enumeration entirely.
-        """
-        if self.rate_provider is None:
-            return None
-        stride = max(1, int(relay_cfg.get("availability_sample_stride", 600)))
-        limit = max(1, int(relay_cfg.get("availability_sample_limit", 876)))
-        edge_ids = tuple(e.edge_id for e in self.edges)
-        cache_key = (
-            str(getattr(self.rate_provider, "link_data_path", "")),
-            float(getattr(self.rate_provider, "min_link_rate", 0.0)),
-            stride,
-            limit,
-            edge_ids,
-        )
-        if cache_key in _EVER_AVAILABLE_CACHE:
-            return _EVER_AVAILABLE_CACHE[cache_key]
-        cache_file = _ever_available_cache_file(self.rate_provider)
-        cached = _load_ever_available_disk_cache(cache_key, cache_file)
-        if cached is not None:
-            _EVER_AVAILABLE_CACHE[cache_key] = cached
-            return cached
-        link_ids = self.rate_provider.edge_link_ids(list(edge_ids))
-        edge_ids_np = np.asarray(edge_ids)
-        available: set[str] = set()
-        for t in range(0, min(int(stride * limit), int(getattr(self.rate_provider, "_T", 0))), stride):
-            blocks = self.rate_provider.get_window_blocks(t)
-            now = blocks[1][0]
-            present = np.flatnonzero(now[link_ids])
-            available.update(edge_ids_np[present].tolist())
-        result = frozenset(available)
-        _EVER_AVAILABLE_CACHE[cache_key] = result
-        _save_ever_available_disk_cache(cache_key, result, cache_file)
-        return result
 
     def build(
         self,
@@ -602,6 +464,20 @@ class GraphBuilder:
         include_stocked_unavailable = bool(
             relay_cfg.get("include_stocked_unavailable", True)
         )
+        # Endpoint positions for the candidate graph are precomputed arrays here
+        # (node positions per registered edge, gathered by active position), so
+        # the relay scan neither parses edge ids nor probes the key pools per
+        # link. Keyed pools are the only "extra" edges it can route through.
+        if include_stocked_unavailable and self.qkp.positive:
+            stocked = self.qkp.positive
+            stocked_pos = np.fromiter(
+                (self._edge_pos[e] for e in stocked), dtype=np.int64, count=len(stocked)
+            )
+            stocked_src_pos = self._inc_src_pos[stocked_pos]
+            stocked_dst_pos = self._inc_dst_pos[stocked_pos]
+        else:
+            stocked_src_pos = None
+            stocked_dst_pos = None
         relay_importance = compute_relay_importance(
             node_ids=self._node_ids_list,
             physical_edge_ids=[edge.edge_id for edge in active_edges],
@@ -616,10 +492,11 @@ class GraphBuilder:
             wait_urgency_tau_ratio=float(relay_cfg.get("wait_urgency_tau_ratio", 0.8)),
             ignore_consumption=bool(relay_cfg.get("ignore_consumption", False)),
             include_stocked_unavailable=include_stocked_unavailable,
-            all_edge_ids=(
-                list(env_state.edge_windows.keys()) if include_stocked_unavailable else None
-            ),
             link_type_bonus=relay_cfg.get("link_type_bonus", None),
+            active_src_pos=self._inc_src_pos[active_pos],
+            active_dst_pos=self._inc_dst_pos[active_pos],
+            stocked_src_pos=stocked_src_pos,
+            stocked_dst_pos=stocked_dst_pos,
         )
         self._last_relay_importance = relay_importance or {}
         req_hop = (
@@ -876,11 +753,6 @@ class GraphBuilder:
             return sorted(requests.demand_by_pair())
         raise ValueError(f"Unknown demand edge build mode: {mode}")
 
-    def _wait_bucket_edges(self) -> list[int]:
-        cfg = self.config["features"].get("demand_edge", {})
-        deadline = int(self.config["requests"].get("deadline_steps", 960.0)) or 1
-        return wait_bucket_edges(deadline, int(cfg.get("wait_bucket_count", 10)))
-
     @property
     def last_relay_importance(self) -> dict[str, float]:
         """Relay importance cached during the most recent graph build.
@@ -895,165 +767,6 @@ class GraphBuilder:
         reward would no longer match the model input.
         """
         return self._last_relay_importance
-
-    def _relay_importance(
-        self,
-        requests: RequestQueue,
-        demand_stats: dict[tuple[str, str], "DemandEdgeStats"] | None = None,
-        env_state: EnvState | None = None,
-        active_edges: list[Edge] | None = None,
-    ) -> dict[str, float]:
-        """Bidirectional shortest-hop demand importance for physical edges.
-
-        Each demand edge's remaining volume is bucketed by wait time and
-        decayed with ``exp(-wait / tau)``. A physical edge is a relay candidate
-        when both GS endpoints can reach it within ``max_path_links`` hops; its
-        weight uses the shortest total path through it and is decayed by
-        ``hop_decay_factor`` for every extra hop. Scarcity keeps full links
-        from receiving pressure. The accumulated value is normalized by the
-        current-step maximum so it stays in [0, 1] regardless of how much
-        historical demand is queued.
-        """
-        edge_cfg = self.config["features"]["edge"]
-        if not edge_cfg.get("include_relay_importance", False):
-            return {}
-        if active_edges is not None:
-            return self._relay_importance_on_active_graph(active_edges, demand_stats)
-        if not self._relay_edge_info:
-            return {}
-        relay_cfg = edge_cfg.get("relay_importance", {})
-        hop_decay = max(0.0, float(relay_cfg.get("hop_decay_factor", 0.5)))
-        capacity_strength = max(0.0, float(relay_cfg.get("capacity_decay_strength", 1.0)))
-        min_scarcity = max(0.0, float(relay_cfg.get("min_scarcity", 0.0)))
-        demand_cfg = self.config["features"].get("demand_edge", {})
-        tau = max(0.0, float(demand_cfg.get("wait_decay_tau", 0.0)))
-        bucket_edges = self._wait_bucket_edges()
-        totals: dict[str, float] = {}
-        for pair, stats in (demand_stats or {}).items():
-            entries = self._relay_edge_info.get(pair)
-            if not entries:
-                continue
-            budget = 0.0
-            for idx, amount in enumerate(stats.wait_bucket_amounts):
-                if amount <= 0.0:
-                    continue
-                if tau <= 0.0:
-                    budget += amount
-                else:
-                    age_center = (bucket_edges[idx] + bucket_edges[idx + 1]) / 2.0
-                    budget += amount * math.exp(-age_center / tau)
-            if budget <= 1.0e-9:
-                continue
-            for edge_id, total_hops in entries:
-                capacity = self.qkp.get_capacity(edge_id)
-                if capacity <= 0.0:
-                    continue
-                scarcity = max(0.0, (capacity - self.qkp.get_level(edge_id)) / capacity)
-                if capacity_strength != 1.0:
-                    scarcity = scarcity ** capacity_strength
-                scarcity += min_scarcity
-                if scarcity <= 0.0:
-                    continue
-                decay = hop_decay ** max(0, total_hops - 2)
-                totals[edge_id] = totals.get(edge_id, 0.0) + budget * decay * scarcity
-        if not totals:
-            return {}
-        max_value = max(totals.values())
-        if max_value <= 0.0:
-            return {}
-        return {edge_id: value / max_value for edge_id, value in totals.items()}
-
-    def _relay_importance_on_active_graph(
-        self,
-        active_edges: list[Edge],
-        demand_stats: dict[tuple[str, str], "DemandEdgeStats"] | None,
-    ) -> dict[str, float]:
-        """Relay importance computed on the current visible subgraph.
-
-        Hop distances are recomputed per step from the active (mask-passing)
-        edges, so unavailable links never shorten a relay path and the
-        importance does not rely on edges that are not in the current graph.
-        """
-        if not active_edges or not demand_stats:
-            return {}
-        adj: dict[str, list[str]] = {node_id: [] for node_id in self._node_ids_list}
-        for edge in active_edges:
-            adj[edge.src].append(edge.dst)
-            adj[edge.dst].append(edge.src)
-
-        gs_dist: dict[str, dict[str, int]] = {}
-        for gs in self.gs_ids:
-            dist = {gs: 0}
-            queue = deque([gs])
-            while queue:
-                node = queue.popleft()
-                for nxt in adj.get(node, ()):
-                    if nxt in dist:
-                        continue
-                    dist[nxt] = dist[node] + 1
-                    queue.append(nxt)
-            gs_dist[gs] = dist
-
-        edge_cfg = self.config["features"]["edge"]
-        relay_cfg = edge_cfg.get("relay_importance", {})
-        max_links = int(relay_cfg.get("max_path_links", 4))
-        hop_decay = max(0.0, float(relay_cfg.get("hop_decay_factor", 0.5)))
-        capacity_strength = max(0.0, float(relay_cfg.get("capacity_decay_strength", 1.0)))
-        min_scarcity = max(0.0, float(relay_cfg.get("min_scarcity", 0.0)))
-        demand_cfg = self.config["features"].get("demand_edge", {})
-        tau = max(0.0, float(demand_cfg.get("wait_decay_tau", 0.0)))
-        bucket_edges = self._wait_bucket_edges()
-        inf = self.routing.DISCONNECTED
-        totals: dict[str, float] = {}
-
-        for pair, stats in (demand_stats or {}).items():
-            src_dist = gs_dist.get(pair[0])
-            dst_dist = gs_dist.get(pair[1])
-            if src_dist is None or dst_dist is None:
-                continue
-            budget = 0.0
-            for idx, amount in enumerate(stats.wait_bucket_amounts):
-                if amount <= 0.0:
-                    continue
-                if tau <= 0.0:
-                    budget += amount
-                else:
-                    age_center = (bucket_edges[idx] + bucket_edges[idx + 1]) / 2.0
-                    budget += amount * math.exp(-age_center / tau)
-            if budget <= 1.0e-9:
-                continue
-            for edge in active_edges:
-                a = min(
-                    src_dist.get(edge.src, inf),
-                    src_dist.get(edge.dst, inf),
-                )
-                b = min(
-                    dst_dist.get(edge.src, inf),
-                    dst_dist.get(edge.dst, inf),
-                )
-                if a >= inf or b >= inf:
-                    continue
-                total_hops = a + b + 1
-                if total_hops > max_links:
-                    continue
-                capacity = self.qkp.get_capacity(edge.edge_id)
-                if capacity <= 0.0:
-                    continue
-                scarcity = max(0.0, (capacity - self.qkp.get_level(edge.edge_id)) / capacity)
-                if capacity_strength != 1.0:
-                    scarcity = scarcity ** capacity_strength
-                scarcity += min_scarcity
-                if scarcity <= 0.0:
-                    continue
-                decay = hop_decay ** max(0, total_hops - 2)
-                totals[edge.edge_id] = totals.get(edge.edge_id, 0.0) + budget * decay * scarcity
-
-        if not totals:
-            return {}
-        max_value = max(totals.values())
-        if max_value <= 0.0:
-            return {}
-        return {edge_id: value / max_value for edge_id, value in totals.items()}
 
     def build_demand_edge_features(
         self,

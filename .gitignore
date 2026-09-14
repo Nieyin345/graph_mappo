@@ -51,3 +51,8 @@ ref_work/
 Thumbs.db
 
 .reasonix/
+# Scratch scripts (see workspace red line: write scripts to .tmp/ then run)
+.tmp/
+
+# Trae IDE local project docs
+.trae/

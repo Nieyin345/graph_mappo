@@ -1,37 +1,45 @@
+# Heuristic baseline switches and parameters for scripts/baselines/run_baselines.py
+# and the Tk UI (ui_tk/app.py).
+#
+# _enabled: 1 runs the policy when no --policies filter is given, 0 skips it.
+# Values are real YAML scalars (not quoted strings): run_baselines.py passes them
+# straight into the policy constructors, and quoted numbers/booleans break the
+# arithmetic or turn "False" into a truthy string.
 baselines:
   random:
-    _enabled: 0
+    _enabled: 1
   greedy_demand:
-    rate_weight: '0.2'
-    _enabled: 0
+    rate_weight: 0.2
+    _enabled: 1
   greedy_matching:
-    rate_weight: '1.0'
-    level_weight: '0.5'
-    demand_weight: '1.0'
-    keep_weight: '0.5'
-    _enabled: 0
+    rate_weight: 1.0
+    level_weight: 0.5
+    demand_weight: 1.0
+    keep_weight: 0.5
+    _enabled: 1
   greedy_qkp:
-    low_inventory_weight: '0.0'
-    rate_weight: '0.2'
-    _enabled: 0
+    low_inventory_weight: 0.0
+    rate_weight: 0.2
+    _enabled: 1
   greedy_rate:
-    use_future_mean_rate: 'False'
-    _enabled: 0
+    use_future_mean_rate: false
+    _enabled: 1
   greedy_relay:
-    rate_weight: '1.0'
-    demand_weight: '2.0'
-    completion_multiplier: '3.0'
-    keep_weight: '0.5'
-    deadline_window: '60.0'
-    _enabled: 0
+    rate_weight: 1.0
+    demand_weight: 2.0
+    completion_multiplier: 3.0
+    keep_weight: 0.5
+    deadline_window: 60.0
+    _enabled: 1
   greedy_relay_diffusion_v3:
-    rate_weight: '1.0'
-    importance_weight: '10.0'
-    completion_weight: '1.0'
-    keep_weight: '0.5'
-    switch_weight: '0.2'
-    hop_decay_factor: '0.25'
-    max_path_links: '3'
-    wait_urgency_tau_ratio: '0.8'
-    ignore_consumption: 'False'
-    include_stocked_unavailable: 'True'
+    rate_weight: 1.0
+    importance_weight: 10.0
+    completion_weight: 1.0
+    keep_weight: 0.5
+    switch_weight: 0.2
+    hop_decay_factor: 0.25
+    max_path_links: 3
+    wait_urgency_tau_ratio: 0.8
+    ignore_consumption: false
+    include_stocked_unavailable: true
+    _enabled: 1

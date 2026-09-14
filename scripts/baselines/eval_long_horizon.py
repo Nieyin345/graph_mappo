@@ -5,9 +5,9 @@ values when provided, so the script can be used unchanged for routine tests
 and still be parameterized for one-off experiments.
 
 Usage:
-    python scripts/eval_long_horizon.py
-    python scripts/eval_long_horizon.py --config configs/global.yaml
-    python scripts/eval_long_horizon.py outputs/ckpt.pt --episodes 10
+    python scripts/baselines/eval_long_horizon.py
+    python scripts/baselines/eval_long_horizon.py --config configs/global.yaml
+    python scripts/baselines/eval_long_horizon.py outputs/ckpt.pt --episodes 10
 """
 
 from __future__ import annotations

@@ -200,7 +200,7 @@ def generate_command(profile_name: str, overrides: dict, run_name: str, checkpoi
     """Generate the CLI command for training."""
     parts = [
         "D:\\anaconda1\\envs\\pytorch\\python.exe",
-        "scripts/train_graph_mappo.py",
+        "scripts/rl/train_graph_mappo.py",
         f"--mode {profile_name}",
         f"--run-name {run_name}",
     ]

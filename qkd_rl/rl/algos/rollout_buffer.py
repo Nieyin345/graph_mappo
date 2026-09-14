@@ -9,7 +9,7 @@ node/edge counts vary between observations.
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterator
 
 import torch
@@ -28,11 +28,34 @@ class RolloutStep:
     reward: float
     terminated: bool
     truncated: bool
-    joint_log_prob: torch.Tensor | None = None
-    joint_entropy: torch.Tensor | None = None
+    mean_log_prob: torch.Tensor | None = None
+    mean_entropy: torch.Tensor | None = None
     returns: torch.Tensor | None = None
     advantages: torch.Tensor | None = None
     matched_edges: list[tuple[str, str]] | None = None
+
+
+def state_free_obs(obs: GraphObservation | None) -> GraphObservation | None:
+    """Shallow copy of an observation with its ``EnvState`` dropped.
+
+    ``GraphObservation.state`` is ~90% of a full-scenario observation: the env
+    snapshot carries two 1978-entry dicts and a ``LazyEdgeWindows`` whose cache
+    can hold one ``EdgeWindow`` per registered link (~2 MB once the whole link
+    table has been touched). Nothing on the RL path reads it -- only the offline
+    baselines do, from their own ``env.reset`` observations.
+
+    Call this when the ``RolloutStep`` is *created*, not when it is buffered:
+    the collectors accumulate a whole episode's steps before handing them to
+    ``RolloutBuffer.add``, so stripping only at ``add`` time still holds every
+    step's EnvState alive for the length of the episode (8 envs x 360 steps x
+    ~2 MB is ~5.7 GB). The returned copy shares the feature arrays, the id
+    lists and the mask arrays, so it costs one object allocation.
+
+    ``RolloutBuffer.add`` calls this again as a safety net; it is idempotent.
+    """
+    if obs is None or obs.state is None:
+        return obs
+    return replace(obs, state=None)
 
 
 class RolloutBuffer:
@@ -66,6 +89,12 @@ class RolloutBuffer:
         return len(self.steps)
 
     def add(self, step: RolloutStep) -> None:
+        """Append a step, dropping the observation's EnvState as a safety net.
+
+        The collectors already strip it via :func:`state_free_obs`; this guards
+        any caller that builds a ``RolloutStep`` directly.
+        """
+        step.obs = state_free_obs(step.obs)
         self.steps.append(step)
 
     def finish_episode(self, last_value: torch.Tensor | float) -> None:

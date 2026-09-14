@@ -226,7 +226,7 @@ def generate_command(
     """Generate the command list for subprocess."""
     cmd = [
         sys.executable,
-        "scripts/train_graph_mappo.py",
+        "scripts/rl/train_graph_mappo.py",
         f"--mode={profile_name}",
         f"--run-name={run_name}",
     ]

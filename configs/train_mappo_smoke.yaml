@@ -22,15 +22,17 @@ scenario:
     days: 2
 train:
   num_updates: 60
-  rollout_steps: 720
+  rollout_steps: 360
+  # 16GB laptop: buffer must stay small (obs ~1.3MB each). 8 episodes x 360
+  # steps = ~3.7GB buffer; 4 worker processes add ~2.8GB. Worker-pool rollout
+  # is the proven path (v2 completed updates); the single-process batched
+  # rollout stalls with VRAM pinned at 7.8GB.
   episodes_per_update: 8
   episode_steps_fixed: true
   fixed_episode_seed: true
-  # Single-process lockstep rollout: 8 envs in the main process, one
-  # block-diagonal GPU forward serves them all. Uses ~1 env's RAM instead of
-  # 8 worker processes (~700MB each), which was swapping the 16GB laptop and
-  # inflating the GPU update to 28s/chunk.
-  n_rollout_workers: 1
+  # Proven worker-pool rollout: 4 workers x 2 episodes each. CPU forward per
+  # worker ~175ms/step; 8 seeds keep the per-update mean stable.
+  n_rollout_workers: 4
   rollout_worker_device: cpu
   rollout_batch: true
   temperature_schedule:

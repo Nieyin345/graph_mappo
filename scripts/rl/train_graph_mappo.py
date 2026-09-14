@@ -2,10 +2,10 @@
 
 Usage (from the project root):
 
-    conda run -n pytorch python scripts/train_graph_mappo.py
-    conda run -n pytorch python scripts/train_graph_mappo.py --num-updates 100 --run-name exp1
-    conda run -n pytorch python scripts/train_graph_mappo.py --seed 7
-    conda run -n pytorch python scripts/train_graph_mappo.py --checkpoint outputs/exp1/checkpoint_update_0100.pt
+    conda run -n pytorch python scripts/rl/train_graph_mappo.py
+    conda run -n pytorch python scripts/rl/train_graph_mappo.py --num-updates 100 --run-name exp1
+    conda run -n pytorch python scripts/rl/train_graph_mappo.py --seed 7
+    conda run -n pytorch python scripts/rl/train_graph_mappo.py --checkpoint outputs/exp1/checkpoint_update_0100.pt
 """
 
 from __future__ import annotations

@@ -313,3 +313,117 @@ def test_success_rate_reward_penalizes_failure_waiting_and_switch() -> None:
     # switch is a link-toggle count and keeps O(1) scale: 0.5 * 2 = 1.0.
     assert result.switch_penalty == pytest.approx(1.0)
     assert result.total == pytest.approx(-2.11)
+
+
+# --------------------------------------------------------------------------- #
+# Global reward scale + keep_active delivery (env_full regression guards)
+# --------------------------------------------------------------------------- #
+
+def _shaped_fn(**overrides) -> RewardFunction:
+    """env_full-shaped reward config: served_reference > 0 fixes the reward scale."""
+    cfg = {
+        "mode": "shaped",
+        "served_weight": 50.0,
+        "served_reference": 100000.0,
+        "generated_weight": 0.0,
+        "failed_enabled": True,
+        "failed_weight": 0.01,
+        "expired_key_enabled": True,
+        "expired_key_weight": 0.01,
+        "storage_enabled": True,
+        "storage_reward_weight": 0.5,
+        "storage_reference": 1000000.0,
+        "keep_active_enabled": True,
+        "keep_active_weight": 0.001,
+        "served_enabled": True,
+        "raw_generation_enabled": True,
+        "dense_enabled": False,
+        "waiting_enabled": False,
+        "switch_enabled": False,
+        "overflow_enabled": False,
+        "conflict_enabled": False,
+    }
+    cfg.update(overrides)
+    return RewardFunction(cfg)
+
+
+def _shaped_detail(
+    fn: RewardFunction,
+    *,
+    served_keys: float = 0.0,
+    added_by_edge: dict | None = None,
+    keep_active_count: int = 0,
+    storage_pathness: dict | None = None,
+    serve_events: list | None = None,
+    from_new_by_edge: dict | None = None,
+):
+    from qkd_rl.env.action_resolver import ResolvedAction
+    from qkd_rl.env.qkp import LinkQKPPool
+    from qkd_rl.env.request import ServeResult
+    from qkd_rl.env.routing import AllocationResult
+
+    added = added_by_edge or {}
+    return fn.compute(
+        serve_result=ServeResult([], [], [], served_keys, 0.0, 0.0),
+        allocation=AllocationResult(
+            added_keys=sum(added.values()), overflow_keys=0.0, added_by_edge=added
+        ),
+        expired_requests=[],
+        expired_keys=0.0,
+        resolved_action=ResolvedAction([], {}, {}, 0),
+        qkp=LinkQKPPool([], {"capacity": {"default": 1.0}, "initial_level": 0.0}),
+        served_keys=served_keys,
+        keep_active_count=keep_active_count,
+        added_by_edge=added,
+        storage_pathness=storage_pathness,
+        serve_events=serve_events,
+        from_new_by_edge=from_new_by_edge,
+    )
+
+
+def test_reward_scale_multiplies_every_component_and_total() -> None:
+    """The global scale must apply to the reported components too, so the
+    diagnostic decomposition still sums to `total`."""
+    kwargs = dict(
+        served_keys=50000.0,
+        added_by_edge={"E_a": 2000000.0},
+        keep_active_count=7,
+        storage_pathness={"E_a": 1.0},
+    )
+    base = _shaped_detail(_shaped_fn(), **kwargs)
+    scaled = _shaped_detail(_shaped_fn(reward_scale=0.01), **kwargs)
+    assert base.total != 0.0
+    for name in ("total", "served_reward", "storage_reward", "keep_active_reward",
+                 "failed_penalty", "expired_key_penalty"):
+        assert getattr(scaled, name) == pytest.approx(getattr(base, name) * 0.01)
+
+
+def test_keep_active_reward_reaches_total() -> None:
+    """Regression: the fixed_reference branch used to recompute `total` without
+    keep_active_reward, so `keep_active_enabled: true` (env_full) was a no-op."""
+    without = _shaped_detail(_shaped_fn(), keep_active_count=0)
+    kept = _shaped_detail(_shaped_fn(), keep_active_count=1000)
+    assert kept.keep_active_reward == pytest.approx(1.0)
+    assert kept.total - without.total == pytest.approx(kept.keep_active_reward)
+
+
+def test_served_reference_zero_keeps_raw_scale_and_still_adds_keep_active() -> None:
+    """With served_reference = 0 the other branch runs; keep_active must survive
+    there as well."""
+    without = _shaped_detail(_shaped_fn(served_reference=0.0), keep_active_count=0)
+    kept = _shaped_detail(_shaped_fn(served_reference=0.0), keep_active_count=250)
+    assert kept.total - without.total == pytest.approx(kept.keep_active_reward)
+
+
+def test_reward_scale_leaves_key_count_diagnostics_unscaled() -> None:
+    """attributed_served / history_utilized are key COUNTS, not reward amounts;
+    scaling them would make the attribution share unreadable in the logs."""
+    events = [("REQ_1", 4000.0, 3000.0)]  # (req_id, served, from_new)
+    kwargs = dict(served_keys=10000.0, serve_events=events,
+                  from_new_by_edge={"E_a": 1000.0}, added_by_edge={"E_a": 2000.0})
+    base = _shaped_detail(_shaped_fn(attribution_enabled=True), **kwargs)
+    scaled = _shaped_detail(_shaped_fn(attribution_enabled=True, reward_scale=0.01), **kwargs)
+    assert base.attributed_served > 0.0
+    assert scaled.attributed_served == base.attributed_served
+    assert scaled.history_utilized == base.history_utilized
+    assert scaled.total == pytest.approx(base.total * 0.01)

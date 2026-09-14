@@ -1,0 +1,53 @@
+# Diagnostic arm: broad-window training with a FIXED set of 8 days and streams.
+#
+# Self-contained on purpose. An earlier version of this file only carried
+# `train.fixed_episode_seed: true` and relied on being loaded *after*
+# train_full_rl.yaml; loaded on its own it silently inherited the
+# `random_episode` profile's `rollout_steps: 4320` (3x the intended horizon).
+# It now repeats the full-window settings so the load order cannot matter.
+#
+# What it tests: identical to train_full_rl.yaml except `fixed_episode_seed`,
+# which pins `_seed_stride` to 0 so every update replays the exact same 8
+# (request seed -> start day, request stream) combinations. The 8 days are still
+# 8 *different* days spread across the year (episode_start_mode: random_day
+# derives the start slot from the seed), so the scenario stays multi-day -- only
+# the per-update resampling is frozen.
+#
+# It separates the two explanations for "the fixed single-day scenario climbs but
+# the broad window does not":
+#   - if this arm climbs and train_full_rl.yaml does not, the blocker is the
+#     per-update gradient signal-to-noise across re-sampled days (generalisation),
+#   - if neither climbs, the blocker is optimisation on the 1440-step horizon.
+#
+# Use with:
+#   python scripts/rl/train_graph_mappo.py \
+#       --configs rl_algorithm.yaml train_full_rl_fixdays.yaml \
+#       --checkpoint outputs/supervised_pg_phased/supervised_pg_phased_latest.pt \
+#       --run-name full_d8 --num-updates 30
+env:
+  episode_start_mode: random_day
+  episode_start_day: -1
+  episode_steps: 1440
+  continuous: false
+  activation_window_start_day: 0
+  activation_window_end_day: 295
+  activation_window_days: 295
+scenario:
+  time_limit:
+    days: 296
+train:
+  num_updates: 30
+  rollout_steps: 1440
+  fixed_episode_seed: true
+  logging:
+    log_interval: 1
+    checkpoint_interval: 5
+    eval_interval: 5
+validation:
+  window:
+    start_day: 330
+    end_day: 365
+  start_mode: random_day
+  episode_steps: 240
+  episodes: 15
+  request_seeds: [100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114]

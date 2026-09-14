@@ -22,6 +22,8 @@
 | `graph_mappo.yaml` | 模型结构：GNN 层数/隐藏维、actor/critic、mask 分布 | 默认链⑤ | 训练/评估 | 必留 |
 | `train_mappo.yaml` | 训练超参：rollout、GAE、PPO、optimizer、logging | 默认链⑥ | RL 训练默认 | `--mode` 时会被 profile 覆盖 |
 | `env_full.yaml` | 全规模场景（真实 H5）：请求/奖励/QKP 标定 | `train_graph_mappo.py` 显式覆盖 | RL 训练主流程 | 注意：deadline_steps=30 与 env_small 的 960 尺度不同，参数族不同 |
+| `train_mappo_smoke.yaml` | 固定单日冒烟：一个场景上验证模型+奖励 | `train_graph_mappo.py --configs` | 调试 | 与 `train_diag_fast.yaml` 用途重叠 |
+| `train_diag_fast.yaml` | 快速诊断预设：240步×4局、固定种子+固定温度、单进程批量 rollout | `train_graph_mappo.py --configs` | 奖励/算法迭代 | 保留 128×3 的模型尺寸以便从 BC checkpoint 续训；只有这条路径会写 `rollout_debug.jsonl` 的奖励分解 |
 | `global.yaml` | 全局训练/验证时间窗口、请求种子 | `train_graph_mappo.py` / `run_baselines.py` | 训练、基线 | 全局实验窗口，所有算法共用 |
 | `train_profiles.yaml` | `--mode` 训练模式：`random_episode`/`continuous`/`fixed_day`/`curriculum`/`demand_edge` | `train_graph_mappo.py --mode` | RL 训练 | 覆盖 `train` 段（含 `value_target`、`replay_days`、PPO 参数） |
 | `baselines.yaml` | 基线策略开关与参数（greedy 系列） | `run_baselines.py` / `supervised_train_bfs_greedy.py` | 基线对比 | 离线理想上界由 `scripts/milp/compute_milp_upper_bound.py` 单独运行（UI "milp" 勾选） |

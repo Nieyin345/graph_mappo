@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from qkd_rl.core.types import KeyRequest
 from qkd_rl.env.action_resolver import ResolvedAction
@@ -64,6 +64,20 @@ class RewardFunction:
         # Per-step reward clipping (0 = disabled): bounds the critic target so
         # a single overflow/expiry outlier cannot blow up the value function.
         self.clip_abs = float(config.get("clip_abs", 0.0))
+        # Global multiplier on every reported component including `total`.
+        #
+        # Rationale: PPO's critic has to predict the discounted return, and Adam
+        # moves a parameter by roughly its learning rate per step. With the raw
+        # reward the full-scenario return is ~70, so the value head would need
+        # ~70/lr steps just to reach the target's mean -- it never gets there,
+        # `value_std` collapses, GAE loses its baseline and the advantages become
+        # the raw returns (measured: value_std/return_std = 1e-4, corr(V,R) =
+        # 0.20). Scaling the reward so returns are O(1) makes the critic
+        # fittable. A positive constant scale does not change the optimal policy,
+        # and it is applied to every component so the diagnostic decomposition
+        # still sums to `total`. Scale the observed return, not the reward
+        # magnitude: return ~= per-step reward / (1 - gamma).
+        self.reward_scale = float(config.get("reward_scale", 1.0))
         # Waiting backlog penalty: we keep the flow-based delta term, but add
         # a smaller stock term so an already-growing queue still matters even
         # when it temporarily stops increasing.
@@ -85,6 +99,25 @@ class RewardFunction:
         if self.clip_abs <= 0.0:
             return value
         return max(-self.clip_abs, min(self.clip_abs, float(value)))
+
+    # RewardDetail fields that are key COUNTS, not reward amounts, and must not
+    # be rescaled with the reward.
+    _COUNT_FIELDS = ("attributed_served", "history_utilized")
+
+    def _scaled(self, detail: RewardDetail) -> RewardDetail:
+        """Apply the global reward scale to every reward component, keeping the
+        decomposition consistent with ``total``. Key-count diagnostics are left
+        alone. Identity when scale == 1.0."""
+        if self.reward_scale == 1.0:
+            return detail
+        return RewardDetail(
+            **{
+                name: value * self.reward_scale
+                if name not in self._COUNT_FIELDS
+                else value
+                for name, value in asdict(detail).items()
+            }
+        )
 
     @staticmethod
     def _enabled(config: dict, name: str, default: bool = True) -> bool:
@@ -165,7 +198,7 @@ class RewardFunction:
             total = float(baseline_reward)
             if self.clip_abs > 0.0:
                 total = self._clip(total)
-            return RewardDetail(
+            return self._scaled(RewardDetail(
                 total=total,
                 served_reward=total,
                 generated_reward=0.0,
@@ -175,7 +208,7 @@ class RewardFunction:
                 expired_key_penalty=0.0,
                 conflict_penalty=0.0,
                 baseline_reward=total,
-            )
+            ))
         if self.mode == "success_rate":
             arrived = max(0.0, float(arrived_keys))
             served = max(0.0, float(served_keys))
@@ -253,7 +286,7 @@ class RewardFunction:
             if self.clip_abs > 0.0:
                 switch_penalty = self._clip(switch_penalty)
                 total = self._clip(total)
-            return RewardDetail(
+            return self._scaled(RewardDetail(
                 total=total,
                 served_reward=success_delta,
                 generated_reward=dense_reward,
@@ -264,7 +297,7 @@ class RewardFunction:
                 conflict_penalty=conflict_penalty,
                 dense_reward=dense_reward,
                 switch_penalty=switch_penalty,
-            )
+            ))
 
         served_weight = float(self.config.get("served_weight", 0.0))
         attributed_served = 0.0
@@ -383,7 +416,13 @@ class RewardFunction:
             expired_key_penalty /= fixed_reference
             conflict_penalty /= fixed_reference
             generated_reward = raw_n + dense_reward
-            total = key_total / fixed_reference + dense_reward + storage_reward - switch_penalty
+            # keep_active_reward must be added here too: it is an O(1) link-count
+            # term that is deliberately outside the key-flow normalization, and
+            # omitting it made `keep_active_enabled: true` (env_full) a no-op.
+            total = (
+                key_total / fixed_reference + dense_reward + storage_reward
+                - switch_penalty + keep_active_reward
+            )
         elif self.config.get("normalize_by_arrived_demand", False):
             # Normalize the *demand-side* key-flow terms (served, waiting, ...)
             # by the recent mean of arrived key demand so they stay O(1)-ish
@@ -403,7 +442,10 @@ class RewardFunction:
             expired_key_penalty /= denom
             conflict_penalty /= denom
             generated_reward = raw_n + dense_reward
-            total = key_total / denom + dense_reward + storage_reward - switch_penalty
+            total = (
+                key_total / denom + dense_reward + storage_reward
+                - switch_penalty + keep_active_reward
+            )
         # Note: the former normalize_served_by_queue branch (served / (served +
         # waiting), saturated at ~1 once the queue drains) was removed. It
         # silently overrode served_reference and made the served reward
@@ -434,7 +476,7 @@ class RewardFunction:
             expired_key_penalty = self._clip(expired_key_penalty)
             conflict_penalty = self._clip(conflict_penalty)
             total = self._clip(total)
-        return RewardDetail(
+        return self._scaled(RewardDetail(
             total=total,
             served_reward=served_reward,
             generated_reward=generated_reward,
@@ -449,4 +491,4 @@ class RewardFunction:
             attributed_served=attributed_served,
             history_utilized=history_utilized,
             storage_reward=storage_reward,
-        )
+        ))

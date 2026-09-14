@@ -1,5 +1,5 @@
 # Unified training mode profiles. Select with:
-#   python scripts/train_graph_mappo.py --mode continuous
+#   python scripts/rl/train_graph_mappo.py --mode continuous
 train_profiles:
   random_episode:
     env:
@@ -156,14 +156,11 @@ train_profiles:
     features:
       demand_edge:
         wait_bucket_count: 10
-        wait_decay_tau: 0
       edge:
         include_relay_importance: true
         relay_importance:
           max_path_links: 3
           hop_decay_factor: 0.25
           include_stocked_unavailable: true
-          availability_sample_stride: 600
-          availability_sample_limit: 876
           capacity_decay_strength: 1.0
           min_scarcity: 0.0

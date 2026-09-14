@@ -23,7 +23,7 @@ from pathlib import Path
 import torch
 
 from qkd_rl.rl.algos.policy import MAPPOPolicy
-from qkd_rl.rl.algos.rollout_buffer import RolloutBuffer, RolloutStep
+from qkd_rl.rl.algos.rollout_buffer import RolloutBuffer, RolloutStep, state_free_obs
 from qkd_rl.env.factory import build_env_from_config
 from qkd_rl.rl.models.graph_mappo import GraphMAPPOActorCritic
 
@@ -49,9 +49,9 @@ def _run_episode(
     ep_reward = 0.0
     steps = 0
     while steps < rollout_steps:
-        with torch.no_grad():
-            step = policy.act(obs)
         resolver_mode = env.action_resolver.mode
+        with torch.no_grad():
+            step = policy.act(obs, build_scores=resolver_mode != "mutual_choice")
         next_obs, reward, terminated, truncated, _info = env.step(
             step.actions,
             step.action_scores,
@@ -64,18 +64,18 @@ def _run_episode(
         )
         if resolver_mode == "max_weight_matching":
             matched_edges = list(env.last_matched_arcs)
-            joint_lp, joint_entropy = policy.log_prob_entropy_for_matching(
+            mean_lp, mean_entropy = policy.log_prob_entropy_for_matching(
                 step.edge_scores, matched_edges
             )
-            joint_lp = joint_lp.detach().cpu()
-            joint_entropy = joint_entropy.detach().cpu()
+            mean_lp = mean_lp.detach().cpu()
+            mean_entropy = mean_entropy.detach().cpu()
         else:
             matched_edges = list(step.matched_edges or [])
-            joint_lp = step.joint_log_prob.detach().cpu()
-            joint_entropy = step.joint_entropy.detach().cpu()
+            mean_lp = step.mean_log_prob.detach().cpu()
+            mean_entropy = step.mean_entropy.detach().cpu()
         buffer.add(
             RolloutStep(
-                obs=obs,
+                obs=state_free_obs(obs),
                 actions=step.actions,
                 log_probs={node: lp.detach().cpu() for node, lp in step.log_probs.items()},
                 entropies={node: ent.detach().cpu() for node, ent in step.entropies.items()},
@@ -83,8 +83,8 @@ def _run_episode(
                 reward=float(reward),
                 terminated=terminated,
                 truncated=truncated,
-                joint_log_prob=joint_lp,
-                joint_entropy=joint_entropy,
+                mean_log_prob=mean_lp,
+                mean_entropy=mean_entropy,
                 matched_edges=matched_edges,
             )
         )
@@ -116,9 +116,14 @@ def _worker_entry(config: dict, device: str, task_queue, result_queue, job_dir: 
         task = task_queue.get()
         if task is None:
             break
-        weights, seed, rollout_steps, episode_steps = task
+        weights, seed, rollout_steps, episode_steps, temperature = task
         if weights is not None:
             policy.model.load_state_dict(weights)
+        # temperature is a plain float attribute (not in state_dict); carry it
+        # alongside the weights so rollout sampling uses the same exploration
+        # schedule as the trainer's PPO evaluation, or the old/new log-probs
+        # disagree and every PPO ratio/KL is systematically biased.
+        policy.model.actor.temperature = float(temperature)
         steps, ep_reward, summary = _run_episode(
             env, policy, seed, rollout_steps, gamma, gae_lambda, value_target, episode_steps
         )
@@ -156,12 +161,13 @@ class RolloutWorkerPool:
         seeds: list[int],
         rollout_steps: int,
         episode_steps_list: list[int] | None = None,
+        temperature: float = 1.0,
     ) -> list[tuple[int, list, float, dict]]:
         """Dispatch one episode per seed; returns results sorted by seed."""
         if episode_steps_list is None:
             episode_steps_list = [int(rollout_steps)] * len(seeds)
         for seed, episode_steps in zip(seeds, episode_steps_list):
-            self.task_queue.put((weights, seed, int(rollout_steps), int(episode_steps)))
+            self.task_queue.put((weights, seed, int(rollout_steps), int(episode_steps), float(temperature)))
         results: list[tuple[int, list, float, dict]] = []
         for _ in seeds:
             seed_done = self.result_queue.get()

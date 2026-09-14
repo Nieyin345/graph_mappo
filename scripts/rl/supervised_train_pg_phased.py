@@ -9,9 +9,11 @@ mimic heuristic *scores*, this script clones the expert's **decisions**:
 - the environment resolves them into the **actually executed** directed arc
   matching (``env.last_matched_arcs``), which is the exact matching space the
   policy samples (dual-port rules: Tx-out<=1, Rx-in<=1, pair 对端不同);
-- the model's arc scores are evaluated with ``_matching_log_prob_entropy``,
-  i.e. the joint log probability of the expert matching, plus the STOP option;
-- the loss is ``-joint_log_prob``: the actor learns to rank the arcs that form
+- the model's arc scores are evaluated with ``_matching_log_prob_entropy_fast``,
+  i.e. the log probability of the expert matching plus the STOP option,
+  **averaged over the matching's decisions** (a per-decision mean NLL, the
+  standard length-normalized sequence objective -- not the sum over arcs);
+- the loss is ``-mean_log_prob``: the actor learns to rank the arcs that form
   the expert's serviceable paths at the top, and to pick STOP when the expert
   activates nothing.
 
@@ -241,8 +243,8 @@ def main() -> None:
             # Keep only arcs the model actually scored; empty expert
             # matchings stay as-is so the STOP probability is trained.
             arcs = [arc for arc in arcs if arc in edge_map]
-            joint_lp, _joint_entropy = policy._matching_log_prob_entropy_fast(edge_map, arcs)
-            losses.append(-joint_lp)
+            mean_lp, _mean_entropy = policy._matching_log_prob_entropy_fast(edge_map, arcs)
+            losses.append(-mean_lp)
         if not losses:
             return 0.0, 0
         loss = torch.stack(losses).mean()

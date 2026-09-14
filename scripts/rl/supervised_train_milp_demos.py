@@ -6,7 +6,7 @@ Graph-MAPPO actor to imitate the MILP's decisions via cross-entropy on the
 actor's per-node action logits. The saved checkpoint can then be used to
 resume real RL training:
 
-    conda run -n pytorch python scripts/train_graph_mappo.py --checkpoint outputs/milp_imitation/milp_pretrain.pt
+    conda run -n pytorch python scripts/rl/train_graph_mappo.py --checkpoint outputs/milp_imitation/milp_pretrain.pt
 
 Usage:
     python scripts/supervised_train_milp_demos.py \
@@ -294,7 +294,7 @@ def main() -> None:
         json.dump(meta, fh, indent=2, ensure_ascii=False)
     log(f"checkpoint: {checkpoint_path}")
     log("resume RL training with:")
-    log(f"  conda run -n pytorch python scripts/train_graph_mappo.py --checkpoint {checkpoint_path}")
+    log(f"  conda run -n pytorch python scripts/rl/train_graph_mappo.py --checkpoint {checkpoint_path}")
 
 
 if __name__ == "__main__":

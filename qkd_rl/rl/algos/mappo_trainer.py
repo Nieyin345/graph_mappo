@@ -13,7 +13,7 @@ import torch
 
 from qkd_rl.rl.algos.checkpoint import load_checkpoint, save_checkpoint
 from qkd_rl.rl.algos.policy import MAPPOPolicy
-from qkd_rl.rl.algos.rollout_buffer import RolloutBuffer, RolloutStep
+from qkd_rl.rl.algos.rollout_buffer import RolloutBuffer, RolloutStep, state_free_obs
 from qkd_rl.env.env import QKDEnv
 
 
@@ -40,6 +40,14 @@ class UpdateStats:
     elapsed_s: float
     mean_ratio: float = 0.0
     actor_grad_norm: float = 0.0
+    critic_grad_norm: float = 0.0
+    # Critic-fit diagnostics. `advantage` collapsing onto `return` (i.e.
+    # value_std << return_std) means the value head is not tracking the return
+    # scale and PPO is running without a baseline, which makes every advantage
+    # noise. Watching these two is the cheapest way to catch that.
+    value_std: float = 0.0
+    return_std: float = 0.0
+    value_return_corr: float = 0.0
 
 
 class MAPPOTrainer:
@@ -75,6 +83,10 @@ class MAPPOTrainer:
                 "'max_weight_matching'."
             )
         self.resolver_mode = resolver_mode
+        # Only these resolvers consume the per-edge score dict; `mutual_choice`
+        # (the default) executes the sampled matching as-is. Materializing the
+        # dict costs one device sync per legal edge, so skip it otherwise.
+        self._needs_edge_scores = resolver_mode in ("priority_matching", "max_weight_matching")
 
         self.gamma = float(train_cfg["gamma"])
         self.gae_lambda = float(train_cfg["gae_lambda"])
@@ -92,6 +104,13 @@ class MAPPOTrainer:
                 {"params": self.model.critic.parameters(), "lr": float(opt_cfg["critic_lr"])},
             ]
         )
+        # Gradient clipping is applied per role by default: see the note in
+        # ``update``. Set ``train.ppo.clip_per_role: false`` to clip the whole
+        # model together (the previous behaviour, kept for ablation).
+        self.clip_per_role = bool(self.ppo_cfg.get("clip_per_role", True))
+        # The encoder is shared, so it belongs to the policy group.
+        self._policy_params = list(self.model.encoder.parameters()) + list(self.model.actor.parameters())
+        self._value_params = list(self.model.critic.parameters())
 
         seed = int(config["seed"]["global_seed"])
         torch.manual_seed(seed)
@@ -214,7 +233,7 @@ class MAPPOTrainer:
                 self.episodes_per_update > 1
                 and bool(self.config["train"].get("rollout_batch", True))
             ):
-                return self._collect_rollout_batched()
+                return self._collect_rollout_batched_grouped()
             return self._collect_rollout_serial()
         if self._rollout_pool is None:
             from qkd_rl.rl.algos.rollout_workers import RolloutWorkerPool
@@ -233,7 +252,11 @@ class MAPPOTrainer:
             episode_steps_list = [self._sample_episode_steps() for _ in seeds]
         weights = {k: v.detach().cpu() for k, v in self.model.state_dict().items()}
         results = self._rollout_pool.collect(
-            weights, seeds, self.rollout_steps, episode_steps_list
+            weights,
+            seeds,
+            self.rollout_steps,
+            episode_steps_list,
+            temperature=float(self.model.actor.temperature),
         )
         buffer = RolloutBuffer(self.gamma, self.gae_lambda, self.device, value_target=self.value_target)
         episode_rewards: list[float] = []
@@ -256,15 +279,23 @@ class MAPPOTrainer:
             "waiting_keys": 0.0,
             "qkp_utilization": 0.0,
             "conflict_count": 0.0,
+            "arrived_keys": 0.0,
             "reward_total": 0.0,
             "reward_served": 0.0,
             "reward_generated": 0.0,
             "reward_dense": 0.0,
+            "reward_storage": 0.0,
+            "reward_keep_active": 0.0,
             "reward_failed": 0.0,
             "reward_waiting": 0.0,
             "reward_switch": 0.0,
             "reward_expired": 0.0,
             "reward_conflict": 0.0,
+            # attribution split: how much of the served volume earned the full
+            # served reward (keys generated this slot) vs the discounted
+            # history-stock part vs nothing at all (pure stock service).
+            "attributed_served": 0.0,
+            "history_utilized": 0.0,
         }
 
     def _update_rollout_debug(self, info: dict, activated_count: int) -> None:
@@ -277,17 +308,22 @@ class MAPPOTrainer:
         debug["waiting_keys"] += float(info.get("waiting_keys", 0.0))
         debug["qkp_utilization"] += float(info.get("qkp_utilization", 0.0))
         debug["conflict_count"] += float(info.get("conflict_count", 0.0))
+        debug["arrived_keys"] += float(info.get("arrived_keys", 0.0))
         detail = info.get("reward_detail")
         if detail is not None:
             debug["reward_total"] += float(detail.total)
             debug["reward_served"] += float(detail.served_reward)
             debug["reward_generated"] += float(detail.generated_reward)
             debug["reward_dense"] += float(detail.dense_reward)
+            debug["reward_storage"] += float(detail.storage_reward)
+            debug["reward_keep_active"] += float(detail.keep_active_reward)
             debug["reward_failed"] += float(detail.failed_penalty)
             debug["reward_waiting"] += float(detail.waiting_penalty)
             debug["reward_switch"] += float(detail.switch_penalty)
             debug["reward_expired"] += float(detail.expired_key_penalty)
             debug["reward_conflict"] += float(detail.conflict_penalty)
+            debug["attributed_served"] += float(detail.attributed_served)
+            debug["history_utilized"] += float(detail.history_utilized)
 
     def _rollout_debug_record(self, stats: UpdateStats) -> dict:
         debug = dict(self._rollout_debug)
@@ -300,17 +336,22 @@ class MAPPOTrainer:
             "mean_served_keys": debug.get("served_keys", 0.0) / n,
             "mean_failed_keys": debug.get("failed_keys", 0.0) / n,
             "mean_waiting_keys": debug.get("waiting_keys", 0.0) / n,
+            "mean_arrived_keys": debug.get("arrived_keys", 0.0) / n,
             "mean_qkp_utilization": debug.get("qkp_utilization", 0.0) / n,
             "mean_conflict_count": debug.get("conflict_count", 0.0) / n,
             "mean_reward": debug.get("reward_total", 0.0) / n,
             "mean_reward_served": debug.get("reward_served", 0.0) / n,
             "mean_reward_generated": debug.get("reward_generated", 0.0) / n,
             "mean_reward_dense": debug.get("reward_dense", 0.0) / n,
+            "mean_reward_storage": debug.get("reward_storage", 0.0) / n,
+            "mean_reward_keep_active": debug.get("reward_keep_active", 0.0) / n,
             "mean_reward_failed": debug.get("reward_failed", 0.0) / n,
             "mean_reward_waiting": debug.get("reward_waiting", 0.0) / n,
             "mean_reward_switch": debug.get("reward_switch", 0.0) / n,
             "mean_reward_expired": debug.get("reward_expired", 0.0) / n,
             "mean_reward_conflict": debug.get("reward_conflict", 0.0) / n,
+            "mean_attributed_served": debug.get("attributed_served", 0.0) / n,
+            "mean_history_utilized": debug.get("history_utilized", 0.0) / n,
             "actor_loss": stats.actor_loss,
             "critic_loss": stats.critic_loss,
             "entropy": stats.entropy,
@@ -350,7 +391,7 @@ class MAPPOTrainer:
             steps = 0
             while steps < self.rollout_steps:
                 with torch.no_grad():
-                    step = self.policy.act(obs)
+                    step = self.policy.act(obs, build_scores=self._needs_edge_scores)
                 raw_value = step.value.detach()
                 next_obs, reward, terminated, truncated, info = self.env.step(
                     step.actions,
@@ -367,7 +408,7 @@ class MAPPOTrainer:
                     # max-weight is a deterministic resolver action, so the PPO
                     # target follows the matching the environment executed.
                     matched_edges = list(self.env.last_matched_arcs)
-                    joint_lp, joint_entropy = self.policy.log_prob_entropy_for_matching(
+                    mean_lp, mean_entropy = self.policy.log_prob_entropy_for_matching(
                         step.edge_scores, matched_edges
                     )
                 else:
@@ -376,11 +417,11 @@ class MAPPOTrainer:
                     # sequence, so it must be stored as-is instead of being
                     # recomputed from the resolver's output order.
                     matched_edges = list(step.matched_edges or [])
-                    joint_lp = step.joint_log_prob.detach()
-                    joint_entropy = step.joint_entropy.detach()
+                    mean_lp = step.mean_log_prob.detach()
+                    mean_entropy = step.mean_entropy.detach()
                 buffer.add(
                     RolloutStep(
-                        obs=obs,
+                        obs=state_free_obs(obs),
                         actions=step.actions,
                         log_probs={node: lp.detach() for node, lp in step.log_probs.items()},
                         entropies={node: ent.detach() for node, ent in step.entropies.items()},
@@ -388,8 +429,8 @@ class MAPPOTrainer:
                         reward=float(reward),
                         terminated=terminated,
                         truncated=truncated,
-                        joint_log_prob=joint_lp.detach(),
-                        joint_entropy=joint_entropy.detach(),
+                        mean_log_prob=mean_lp.detach(),
+                        mean_entropy=mean_entropy.detach(),
                         matched_edges=matched_edges,
                     )
                 )
@@ -402,7 +443,7 @@ class MAPPOTrainer:
                 last_value = torch.zeros((), dtype=torch.float32, device=self.device)
             else:
                 with torch.no_grad():
-                    last_value = self.policy.act(obs).value.detach()
+                    last_value = self.policy.act(obs, build_scores=False).value.detach()
             buffer.finish_episode(last_value)
             episode_rewards.append(ep_reward)
             episode_summaries.append(self.env.metrics.episode_summary())
@@ -412,13 +453,49 @@ class MAPPOTrainer:
         self.last_episode_summaries = episode_summaries
         return buffer
 
-    def _collect_rollout_batched(self) -> RolloutBuffer:
-        """Lockstep multi-episode rollout: ``episodes_per_update`` envs step in
-        parallel and one block-diagonal policy forward serves all graphs per
-        time step. Per-graph sampling is identical to serial rollout, so this
-        is a pure throughput optimization (the per-step CUDA kernels dominate
-        on small graphs and the serial loop launches them once per graph)."""
+    def _collect_rollout_batched_grouped(self) -> RolloutBuffer:
+        """Drive :meth:`_collect_rollout_batched` over groups of envs.
+
+        ``train.rollout_batch_envs`` (default: all episodes) caps how many graphs
+        share one block-diagonal forward. Stacking more graphs into one forward
+        gets *worse* per graph on this model (measured on the RTX 4060 laptop:
+        57 ms/step for 4 graphs vs 409 ms/step for 8, i.e. 14 vs 51 ms per
+        graph), so raising ``episodes_per_update`` for a lower-variance gradient
+        is only affordable if the episodes are split into groups of ~4.
+        """
+        n_ep = self.episodes_per_update
+        group_size = max(1, int(self.config["train"].get("rollout_batch_envs", n_ep) or n_ep))
+        if group_size >= n_ep:
+            return self._collect_rollout_batched()
         buffer = RolloutBuffer(self.gamma, self.gae_lambda, self.device, value_target=self.value_target)
+        rewards: list[float] = []
+        summaries: list[dict] = []
+        for start in range(0, n_ep, group_size):
+            indices = list(range(start, min(start + group_size, n_ep)))
+            self._collect_rollout_batched(env_indices=indices, buffer=buffer)
+            rewards.extend(self.last_episode_rewards)
+            summaries.extend(self.last_episode_summaries)
+        self.last_episode_rewards = rewards
+        self.last_episode_summaries = summaries
+        return buffer
+
+    def _collect_rollout_batched(self, env_indices=None, buffer: RolloutBuffer | None = None) -> RolloutBuffer:
+        """Lockstep rollout: the episodes of one group step in parallel and a
+        single block-diagonal policy forward serves every graph of the group per
+        time step. Per-graph sampling is identical to serial rollout, so this is
+        a pure throughput optimization.
+
+        ``env_indices`` selects which of the ``episodes_per_update`` envs this
+        call runs; ``collect_rollout`` drives it over
+        ``rollout_batch_envs``-sized groups. One forward over 8 graphs measured
+        ~5x the cost of one over 4 (409 ms vs 57 ms per step, i.e. 3.6x worse
+        per graph), so stacking every episode into a single block-diagonal graph
+        is counterproductive. The index list is explicit rather than positional
+        so a caller can rotate which seeds share a group.
+        """
+        buffer = buffer if buffer is not None else RolloutBuffer(
+            self.gamma, self.gae_lambda, self.device, value_target=self.value_target
+        )
         self.model.eval()
         n_ep = self.episodes_per_update
         if self._rollout_envs is None:
@@ -426,27 +503,39 @@ class MAPPOTrainer:
 
             self._rollout_envs = [build_env_from_config(self.config) for _ in range(n_ep)]
         envs = self._rollout_envs
-        for env in envs:
+        if env_indices is None:
+            env_indices = list(range(n_ep))
+        group = [envs[i] for i in env_indices]
+        for env in group:
             if not self.episode_steps_fixed:
                 env.config["env"]["episode_steps"] = self._sample_episode_steps()
         base_seed = int(self.config["seed"]["env_seed"]) + self.update_count * self._seed_stride
-        if envs[0].continuous and self._continuous_obs_list is not None:
-            obs_list = list(self._continuous_obs_list)
+        continuous = group[0].continuous
+        if continuous and self._continuous_obs_list is not None:
+            obs_list = [self._continuous_obs_list[i] for i in env_indices]
         else:
-            obs_list = [env.reset(seed=base_seed + i) for i, env in enumerate(envs)]
-        ep_steps: list[list[RolloutStep]] = [[] for _ in range(n_ep)]
-        ep_rewards = [0.0] * n_ep
-        done = [False] * n_ep
-        terminated = [False] * n_ep
+            obs_list = [envs[i].reset(seed=base_seed + i) for i in env_indices]
+        n_group = len(env_indices)
+        ep_steps: list[list[RolloutStep]] = [[] for _ in range(n_group)]
+        ep_rewards = [0.0] * n_group
+        done = [False] * n_group
+        terminated = [False] * n_group
         for _ in range(self.rollout_steps):
             if all(done):
                 break
             with torch.no_grad():
-                step_outs = self.policy.act_batched(obs_list)
-            for i, env in enumerate(envs):
-                if done[i]:
+                step_outs = self.policy.act_batched(
+                    obs_list,
+                    build_scores=self._needs_edge_scores,
+                    # The index-array sampler path avoids rebuilding a ~300-entry
+                    # arc dict per graph per step; it is only valid when the
+                    # resolver does not need the per-edge score dict.
+                    use_edge_arrays=not self._needs_edge_scores,
+                )
+            for k, env in enumerate(group):
+                if done[k]:
                     continue
-                step = step_outs[i]
+                step = step_outs[k]
                 raw_value = step.value.detach()
                 next_obs, reward, term, trunc, info = env.step(
                     step.actions,
@@ -461,16 +550,16 @@ class MAPPOTrainer:
                 self._update_rollout_debug(info, len(env.last_activated_edges))
                 if self.resolver_mode == "max_weight_matching":
                     matched_edges = list(env.last_activated_edges)
-                    joint_lp, joint_entropy = self.policy.log_prob_entropy_for_matching(
+                    mean_lp, mean_entropy = self.policy.log_prob_entropy_for_matching(
                         step.edge_scores, matched_edges
                     )
                 else:
                     matched_edges = list(step.matched_edges or [])
-                    joint_lp = step.joint_log_prob.detach()
-                    joint_entropy = step.joint_entropy.detach()
-                ep_steps[i].append(
+                    mean_lp = step.mean_log_prob.detach()
+                    mean_entropy = step.mean_entropy.detach()
+                ep_steps[k].append(
                     RolloutStep(
-                        obs=obs_list[i],
+                        obs=state_free_obs(obs_list[k]),
                         actions=step.actions,
                         log_probs={node: lp.detach() for node, lp in step.log_probs.items()},
                         entropies={node: ent.detach() for node, ent in step.entropies.items()},
@@ -478,39 +567,37 @@ class MAPPOTrainer:
                         reward=float(reward),
                         terminated=term,
                         truncated=trunc,
-                        joint_log_prob=joint_lp.detach(),
-                        joint_entropy=joint_entropy.detach(),
+                        mean_log_prob=mean_lp.detach(),
+                        mean_entropy=mean_entropy.detach(),
                         matched_edges=matched_edges,
                     )
                 )
-                ep_rewards[i] += float(reward)
-                obs_list[i] = next_obs
+                ep_rewards[k] += float(reward)
+                obs_list[k] = next_obs
                 if term or trunc:
-                    done[i] = True
-                    terminated[i] = bool(term)
+                    done[k] = True
+                    terminated[k] = bool(term)
         episode_rewards: list[float] = []
         episode_summaries: list[dict] = []
-        for i, env in enumerate(envs):
-            if not ep_steps[i]:
-                episode_rewards.append(ep_rewards[i])
+        for k, env in enumerate(group):
+            if not ep_steps[k]:
+                episode_rewards.append(ep_rewards[k])
                 episode_summaries.append(env.metrics.episode_summary())
                 continue
-            if done[i] and terminated[i]:
+            if done[k] and terminated[k]:
                 last_value = torch.zeros((), dtype=torch.float32, device=self.device)
             else:
                 with torch.no_grad():
-                    last_value = self.policy.act(obs_list[i]).value.detach()
-            for step in ep_steps[i]:
+                    last_value = self.policy.act(
+                        obs_list[k], build_scores=False
+                    ).value.detach()
+            for step in ep_steps[k]:
                 buffer.add(step)
             buffer.finish_episode(last_value)
-            episode_rewards.append(ep_rewards[i])
+            episode_rewards.append(ep_rewards[k])
             episode_summaries.append(env.metrics.episode_summary())
-        if envs[0].continuous:
-            self._continuous_obs_list = (
-                None
-                if any(truncated[i] for i in range(n_ep))
-                else [obs_list[i] for i in range(n_ep)]
-            )
+        if continuous:
+            self._continuous_obs_list = list(obs_list)
         self.last_episode_rewards = episode_rewards
         self.last_episode_summaries = episode_summaries
         return buffer
@@ -554,6 +641,7 @@ class MAPPOTrainer:
         total_kl = 0.0
         total_ratio = 0.0
         total_actor_grad = 0.0
+        total_critic_grad = 0.0
         total_batches = 0
         stop_for_kl = False
         for _epoch in range(epochs):
@@ -577,7 +665,24 @@ class MAPPOTrainer:
                 loss = actor_loss + critic_loss - entropy_coef * entropy_mean
                 self.optimizer.zero_grad()
                 loss.backward()
-                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_grad_norm)
+                if self.clip_per_role:
+                    # Clip the policy and the value function separately.
+                    #
+                    # A single global clip lets the critic crowd out the actor:
+                    # the critic's gradient norm is an order of magnitude larger
+                    # than the actor's on this model (measured 1.07 vs 0.045 per
+                    # role), because the actor's loss is a per-decision mean over
+                    # ~40 decisions while the critic's is a squared error against
+                    # a return of order 1. With one global clip at 0.5 the actor
+                    # was left with ~4% of the gradient energy and its effective
+                    # step shrank with it; the policy-group norm is now measured
+                    # at ~0.42, i.e. below the clip, so the actor's full gradient
+                    # survives.
+                    grad_norm = torch.nn.utils.clip_grad_norm_(self._policy_params, max_grad_norm)
+                    critic_grad_norm = torch.nn.utils.clip_grad_norm_(self._value_params, max_grad_norm)
+                else:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_grad_norm)
+                    critic_grad_norm = torch.zeros((), dtype=torch.float32, device=self.device)
                 self.optimizer.step()
 
                 total_actor += float(actor_loss.detach().cpu())
@@ -586,6 +691,7 @@ class MAPPOTrainer:
                 total_kl += float(kl_mean.detach().cpu())
                 total_ratio += float(ratio_mean.detach().cpu())
                 total_actor_grad += float(grad_norm.detach().cpu())
+                total_critic_grad += float(critic_grad_norm.detach().cpu())
                 total_batches += 1
 
                 if target_kl is not None and float(kl_mean.detach().cpu()) > target_kl:
@@ -601,6 +707,20 @@ class MAPPOTrainer:
         mean_return = float(returns.mean().detach().cpu()) if buffer.steps else 0.0
         adv_all = torch.stack([step.advantages.to(self.device) for step in buffer.steps]) if buffer.steps else torch.zeros(())
         mean_abs_advantage = float(adv_all.abs().mean().detach().cpu()) if buffer.steps else 0.0
+        # Critic-fit diagnostics: if value_std collapses relative to return_std,
+        # GAE has no baseline and every advantage is just the return.
+        values_all = (
+            torch.stack([step.value.detach().to(self.device).reshape(()) for step in buffer.steps])
+            if buffer.steps else torch.zeros(())
+        )
+        value_std = float(values_all.std().detach().cpu()) if buffer.steps else 0.0
+        return_std = float(returns.std().detach().cpu()) if buffer.steps else 0.0
+        if buffer.steps and value_std > 0.0 and return_std > 0.0:
+            value_return_corr = float(
+                torch.corrcoef(torch.stack([values_all, returns]))[0, 1].detach().cpu()
+            )
+        else:
+            value_return_corr = 0.0
         stats = UpdateStats(
             update=self.update_count,
             actor_loss=total_actor / n,
@@ -617,6 +737,10 @@ class MAPPOTrainer:
             elapsed_s=0.0,
             mean_ratio=total_ratio / n,
             actor_grad_norm=total_actor_grad / n,
+            critic_grad_norm=total_critic_grad / n,
+            value_std=value_std,
+            return_std=return_std,
+            value_return_corr=value_return_corr,
         )
         self.last_stats = stats
         return stats
@@ -662,13 +786,26 @@ class MAPPOTrainer:
             for step, adv, (log_probs, entropies, value) in zip(chunk, chunk_advantages, batched_results):
                 node_ids = step.obs.node_ids
                 if node_ids:
-                    # PPO is now evaluated on the whole matching action, not on
-                    # the per-node copies of that same scalar. Every node shares
-                    # the same joint scalar, so any node id yields it.
+                    # PPO is evaluated on the whole matching action, not on the
+                    # per-node copies of that same scalar. Every node shares the
+                    # same scalar, so any node id yields it.
+                    #
+                    # Both sides of the ratio are the matching's PER-DECISION
+                    # MEAN log probability (see ``MAPPOPolicy._sample_matching``).
+                    # The sampler makes one decision per matched arc plus a final
+                    # STOP -- up to ~60 of them -- so comparing raw sums would
+                    # make a single parameter step look like a 60x larger policy
+                    # change than it is: with the sum, clip_eps=0.1 and
+                    # target_kl=0.02 were both exceeded after one optimizer step
+                    # (kl 0.03-0.17), the KL early stop fired on the second
+                    # minibatch of every update, and the actor advanced exactly
+                    # one step per update. The entropy term below was already a
+                    # per-decision mean, so this also puts all three quantities on
+                    # one scale.
                     new_lp = log_probs[node_ids[0]]
                     old_lp = (
-                        step.joint_log_prob.to(self.device)
-                        if step.joint_log_prob is not None
+                        step.mean_log_prob.to(self.device)
+                        if step.mean_log_prob is not None
                         else step.log_probs[node_ids[0]].to(self.device)
                     )
                     ratios = torch.exp(new_lp - old_lp)
@@ -728,7 +865,9 @@ class MAPPOTrainer:
                 ep_rewards = [0.0] * num_episodes
                 done = [False] * num_episodes
                 while not all(done):
-                    outs = self.policy.act_batched(obs_list, deterministic=True)
+                    outs = self.policy.act_batched(
+                        obs_list, deterministic=True, build_scores=self._needs_edge_scores
+                    )
                     for i, env in enumerate(envs):
                         if done[i]:
                             continue
@@ -761,7 +900,9 @@ class MAPPOTrainer:
                     ep_reward = 0.0
                     done = False
                     while not done:
-                        step = self.policy.act(obs, deterministic=True)
+                        step = self.policy.act(
+                            obs, deterministic=True, build_scores=self._needs_edge_scores
+                        )
                         obs, reward, terminated, truncated, _info = self.env.step(
                             step.actions,
                             step.action_scores,
@@ -856,7 +997,9 @@ class MAPPOTrainer:
         done = [False] * len(envs)
         with torch.no_grad():
             while not all(done):
-                outs = self.policy.act_batched(obs_list, deterministic=True)
+                outs = self.policy.act_batched(
+                    obs_list, deterministic=True, build_scores=self._needs_edge_scores
+                )
                 for i, env in enumerate(envs):
                     if done[i]:
                         continue
@@ -1025,6 +1168,9 @@ class MAPPOTrainer:
                 f"kl={stats.kl:.4f} reward={stats.mean_reward:.3f} "
                 f"success_rate={stats.mean_success_rate:.3f} served={stats.mean_served_keys:.1f} "
                 f"ratio={stats.mean_ratio:.4f} actor_grad={stats.actor_grad_norm:.4f} "
+                f"critic_grad={stats.critic_grad_norm:.4f} "
+                f"V_std={stats.value_std:.3f} R_std={stats.return_std:.2f} "
+                f"corr(V,R)={stats.value_return_corr:.3f} "
                 f"rollout_s={stats.rollout_s:.2f} update_s={stats.update_s:.2f}"
             )
 

@@ -15,11 +15,16 @@ class MetricsTracker:
         self.arrived_requests = 0
         self.completed_requests = 0
         self.conflict_count = 0
+        self._last_arrived_keys = 0.0
         self.last: dict = {}
 
     def add_arrivals(self, requests) -> None:
-        self.arrived_keys += sum(req.amount for req in requests)
+        amount = sum(req.amount for req in requests)
+        self.arrived_keys += amount
         self.arrived_requests += len(requests)
+        # Per-step arrival volume, surfaced through ``last`` so the training
+        # diagnostics can report the served/failed/arrived balance.
+        self._last_arrived_keys = amount
 
     def update(
         self,
@@ -43,6 +48,7 @@ class MetricsTracker:
             "served_keys": serve_result.served_keys,
             "failed_keys": serve_result.failed_keys + expired_keys,
             "waiting_keys": serve_result.waiting_keys,
+            "arrived_keys": self._last_arrived_keys,
             "generated_keys": sum(generated_keys.values()),
             "conflict_count": resolved_action.conflict_count,
             "qkp_utilization": level / capacity,

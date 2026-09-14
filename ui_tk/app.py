@@ -505,7 +505,7 @@ class QKDRLApp:
             import subprocess, json as _json
             try:
                 od = ROOT/"outputs"/"eval"/self.e_ou.get().strip(); od.mkdir(parents=True, exist_ok=True)
-                cmd = [sys.executable, "scripts/run_baselines.py",
+                cmd = [sys.executable, "scripts/baselines/run_baselines.py",
                     f"--episodes={self.e_ep.get()}", f"--seeds={seeds_str}",
                     f"--out=outputs/eval/{self.e_ou.get().strip()}"]
                 if enabled_policies:
@@ -531,7 +531,7 @@ class QKDRLApp:
                     # window-steps omitted: compute_milp_upper_bound.py defaults
                     # to the validation protocol (start_day*1440, episode_steps),
                     # so the MILP window matches the baseline episodes' scope.
-                    cmd2 = [sys.executable, "scripts/compute_milp_upper_bound.py",
+                    cmd2 = [sys.executable, "scripts/milp/compute_milp_upper_bound.py",
                         "--time-limit", "120",
                         "--max-requests", "512", "--max-paths", "256", "--max-hops", "10",
                         f"--out=outputs/eval/{self.e_ou.get().strip()}/milp_ub"]

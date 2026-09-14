@@ -1,7 +1,7 @@
 """Run heuristic baselines on the QKD env and export paper-ready figures.
 
 Usage:
-    conda run -n pytorch python scripts/run_baselines.py \
+    conda run -n pytorch python scripts/baselines/run_baselines.py \
         --episodes 5 --seeds 1000,1001,1002 --out outputs/eval/small
 
 Writes per-episode CSV, per-step CSV, aggregate JSON and SVG/PDF/PNG figures.
@@ -101,7 +101,13 @@ def main() -> None:
     def _enabled(name: str) -> bool:
         if policies_filter is not None:
             return name in policies_filter
-        return base_cfg.get(name, {}).get("enabled", True)
+        # `_enabled` is the key configs/baselines.yaml and the Tk UI actually
+        # write (the UI strips a bare `enabled` when it saves); accept both so
+        # an older config still works.
+        entry = base_cfg.get(name, {})
+        if "_enabled" in entry:
+            return bool(entry["_enabled"])
+        return bool(entry.get("enabled", True))
     policies = {}
     template_env = None
     if _enabled("random"):
@@ -174,7 +180,7 @@ def main() -> None:
     # NOTE: the env-replay MILP baseline was removed — it produced poor results
     # (SR ~0.19) and is not a valid upper bound (solver ideal flow vs env replay
     # diverge). The MILP offline ideal upper bound runs separately via
-    # scripts/compute_milp_upper_bound.py (UI 'milp' checkbox triggers it).
+    # scripts/milp/compute_milp_upper_bound.py (UI 'milp' checkbox triggers it).
     evaluator = Evaluator(env_builder)
     episodes, step_rows = evaluator.compare(
         policies,

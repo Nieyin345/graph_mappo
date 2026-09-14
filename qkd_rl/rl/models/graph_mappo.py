@@ -48,6 +48,12 @@ class BatchedActorCriticOutput:
     lengths: list[list[int]]
     values: list[torch.Tensor]
     edge_score_maps: list[dict[str, torch.Tensor]]
+    # Per graph: (src_local_idx, dst_local_idx, scores) for the directed edge
+    # candidates, in the same candidate order as ``edge_score_maps``. The
+    # matching sampler only needs vectors, so handing it these skips rebuilding
+    # a ~300-entry arc dict per graph per step (~8% of a batched rollout step)
+    # and lets the sampler run vectorized across graphs.
+    edge_arrays: list[tuple[np.ndarray, np.ndarray, torch.Tensor]] | None = None
 
 
 def _edge_score_map(
@@ -67,15 +73,20 @@ def _edge_score_map(
     """
     if node_index is None:
         return {}
-    index_to_node = {idx: node_id for node_id, idx in node_index.items()}
+    # Position -> node id table plus `tolist()` on the index arrays: this runs
+    # once per graph per forward (and per graph per PPO chunk), so the old
+    # per-element `int(srcs[i])` + dict lookup cost more than the tensor work it
+    # feeds. `edge_scores.unbind(0)` yields per-arc 0-dim views, which keeps the
+    # autograd graph intact (unlike `.tolist()`).
+    node_by_idx: list[str] = [""] * len(node_index)
+    for node_id, idx in node_index.items():
+        node_by_idx[idx] = node_id
     arc_map: dict[tuple[str, str], torch.Tensor] = {}
-    srcs = plan[0]
-    dsts = plan[1]
-    for i in range(int(srcs.size)):
-        src = index_to_node[int(srcs[i])]
-        dst = index_to_node[int(dsts[i])]
-        if src != dst:
-            arc_map[(src, dst)] = edge_scores[i]
+    for src_i, dst_i, score in zip(
+        plan[0].tolist(), plan[1].tolist(), edge_scores.unbind(0)
+    ):
+        if src_i != dst_i:
+            arc_map[(node_by_idx[src_i], node_by_idx[dst_i])] = score
     return arc_map
 
 
@@ -756,6 +767,7 @@ class GraphMAPPOActorCritic(nn.Module):
         self,
         obs_list: list[GraphObservation],
         device: torch.device | str = "cpu",
+        want_edge_maps: bool = True,
     ) -> BatchedActorCriticOutput:
         """Block-diagonal batching of several observations into one forward.
 
@@ -928,8 +940,10 @@ class GraphMAPPOActorCritic(nn.Module):
             idle_scores = torch.zeros((0,), dtype=torch.float32, device=device)
 
         # Per-graph edge_id -> raw score maps for the priority-matching
-        # resolver (see _edge_score_map).
+        # resolver (see _edge_score_map), plus the raw index arrays the matching
+        # sampler consumes directly.
         edge_score_maps: list[dict[str, torch.Tensor]] = []
+        edge_arrays: list[tuple[np.ndarray, np.ndarray, torch.Tensor]] = []
         for i, plan in enumerate(plans):
             n_edge_i = int(plan[0].size)
             graph_scores = (
@@ -937,13 +951,17 @@ class GraphMAPPOActorCritic(nn.Module):
                 if n_edge_i
                 else edge_scores.new_zeros((0,))
             )
-            edge_score_maps.append(
-                _edge_score_map(
-                    plan,
-                    self.actor._node_idx,
-                    graph_scores,
+            # The arc dict costs one Python iteration per legal candidate; skip
+            # it when the caller samples from `edge_arrays` instead.
+            if want_edge_maps:
+                edge_score_maps.append(
+                    _edge_score_map(
+                        plan,
+                        self.actor._node_idx,
+                        graph_scores,
+                    )
                 )
-            )
+            edge_arrays.append((plan[0], plan[1], graph_scores))
 
         # Remap each node's candidate rows to the global score positions.
         global_max_n = max(int(plan[5]) for plan in plans) if plans else 0
@@ -1046,6 +1064,7 @@ class GraphMAPPOActorCritic(nn.Module):
             lengths=lengths_list,
             values=values,
             edge_score_maps=edge_score_maps,
+            edge_arrays=edge_arrays,
         )
 
 

@@ -121,8 +121,8 @@ def test_collect_rollout_stores_sampled_matching_log_prob(tmp_path):
     buffer = trainer.collect_rollout()
     first = buffer.steps[0]
     assert first.matched_edges == list(step.matched_edges or [])
-    torch.testing.assert_close(first.joint_log_prob, step.joint_log_prob)
-    torch.testing.assert_close(first.joint_entropy, step.joint_entropy)
+    torch.testing.assert_close(first.mean_log_prob, step.mean_log_prob)
+    torch.testing.assert_close(first.mean_entropy, step.mean_entropy)
 
 
 def test_trainer_rejects_unsupported_resolver_mode(tmp_path):

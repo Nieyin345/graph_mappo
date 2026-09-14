@@ -8,7 +8,7 @@
 ### 1.1 命令模板
 
 ```powershell
-conda run -n pytorch python scripts/train_graph_mappo.py `
+conda run -n pytorch python scripts/rl/train_graph_mappo.py `
   --mode continuous `
   --run-name my_run `
   --num-updates 30 `
@@ -16,7 +16,7 @@ conda run -n pytorch python scripts/train_graph_mappo.py `
   --device cuda
 
 # demand_edge 模式：需求等待分桶 -> 物理边 relay 权重 -> Actor 直连
-conda run -n pytorch python scripts/train_graph_mappo.py `
+conda run -n pytorch python scripts/rl/train_graph_mappo.py `
   --mode demand_edge `
   --run-name my_run_demand_edge `
   --num-updates 30 `
@@ -134,7 +134,7 @@ rollout_s, update_s, elapsed_s
 ### 4.1 命令模板
 
 ```powershell
-conda run -n pytorch python scripts/run_baselines.py `
+conda run -n pytorch python scripts/baselines/run_baselines.py `
   --episodes 5 `
   --seeds 1000,1001,1002,1003,1004 `
   --out outputs/eval/my_baseline `
@@ -171,20 +171,20 @@ conda run -n pytorch python scripts/run_baselines.py `
 - `greedy_relay`：按请求路径补库存，参数含 `rate_weight / demand_weight / completion_multiplier / keep_weight / deadline_window`
 - `greedy_matching`：速率/库存/需求/保持的综合匹配
 
-每个策略都有 `enabled: true/false`，不需要的策略可以直接关闭。离线理想上界（`scripts/compute_milp_upper_bound.py`）单独运行。
+每个策略都有 `_enabled: true/false`，不需要的策略可以直接关闭。离线理想上界（`scripts/milp/compute_milp_upper_bound.py`）单独运行。
 
 ## 5. 单独评估某个 RL Checkpoint
 
 测试参数默认写在 `configs/global.yaml`，一般不需要每次改命令行：
 
 ```powershell
-conda run -n pytorch python scripts/eval_long_horizon.py
+conda run -n pytorch python scripts/baselines/eval_long_horizon.py
 ```
 
 需要临时覆盖时再传参数，例如：
 
 ```powershell
-conda run -n pytorch python scripts/eval_long_horizon.py `
+conda run -n pytorch python scripts/baselines/eval_long_horizon.py `
   --window-start-day 0 --window-end-day 30 `
   --episode-days 1 --episodes 3
 ```

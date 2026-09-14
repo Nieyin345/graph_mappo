@@ -20,8 +20,8 @@ def _step(reward: float, value: float, terminated: bool = False) -> RolloutStep:
         reward=reward,
         terminated=terminated,
         truncated=False,
-        joint_log_prob=torch.tensor(0.0),
-        joint_entropy=torch.tensor(0.0),
+        mean_log_prob=torch.tensor(0.0),
+        mean_entropy=torch.tensor(0.0),
     )
 
 

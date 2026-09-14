@@ -1,0 +1,67 @@
+# Shared RL hyper-parameters for both RL presets. Load it FIRST, then the preset:
+#
+#   python scripts/rl/train_graph_mappo.py \
+#       --configs rl_algorithm.yaml train_diag_fast.yaml \
+#       --checkpoint outputs/supervised_pg_phased/supervised_pg_phased_latest.pt \
+#       --run-name diag --num-updates 20
+#
+#   python scripts/rl/train_graph_mappo.py \
+#       --configs rl_algorithm.yaml train_full_rl.yaml \
+#       --checkpoint outputs/supervised_pg_phased/supervised_pg_phased_latest.pt \
+#       --run-name full_rl --num-updates 30
+#
+# Why one file: the algorithm had to be fixed before it could be validated on a
+# fixed scenario (see train_diag_fast.yaml) and then applied to the real training
+# window. Keeping the hyper-parameters here means the two presets cannot drift
+# apart, which is exactly what makes "validated on one scenario" transfer.
+#
+# The model shape is NOT set here: graph_mappo.yaml's 128-wide 3-layer GNN is
+# required to load the behaviour-cloning warm start
+# (outputs/supervised_pg_phased/supervised_pg_phased_latest.pt). A 64x2 model is
+# ~6x cheaper in FLOPs but could not load it, and from scratch it did not learn
+# at all (kl = 0.0 for 3 updates), so the warm start stays.
+train:
+  # 8 episodes per update: single-seed success on a fixed scenario spans
+  # 0.62-0.85, so a 4-episode gradient is dominated by seed noise.
+  episodes_per_update: 8
+  # Cap the block-diagonal forward at 4 graphs. Measured on the RTX 4060 laptop:
+  # 14.2 ms per graph at 4 graphs vs 51.2 at 8, so one wide batch is ~3.6x worse
+  # per graph than two sequential groups.
+  rollout_batch_envs: 4
+  # Single-process lockstep rollout: the only path that fills
+  # rollout_debug.jsonl with the per-component reward breakdown.
+  n_rollout_workers: 1
+  rollout_batch: true
+  episode_steps_fixed: true
+  gamma: 0.99
+  gae_lambda: 0.95
+  value_target: gae
+  # Held at 1.0. Annealing it was tried with n_rollout_workers > 1 and produced a
+  # systematic old/new log-prob mismatch (the workers never received the
+  # trainer's temperature); that is fixed, but a constant temperature also keeps
+  # the sampled success rate comparable across updates. Note the entropy of the
+  # trained policy RISES (3.17 -> 3.87 on the fixed scenario) while its
+  # deterministic success rises (0.728 -> 0.819), i.e. the BC prior was
+  # over-confident; do not fight the entropy.
+  temperature_schedule:
+    start: 1.0
+    end: 1.0
+    updates: 1
+  ppo:
+    epochs: 1
+    minibatch_size: 256
+    clip_eps: 0.1
+    batch_chunk: 512
+    normalize_advantages: true
+    entropy_coef: 0.001
+    value_coef: 0.5
+    # Per-role gradient clipping (mappo_trainer.clip_per_role): one global clip
+    # let the critic's ~24x larger gradient crowd the actor down to ~4% of the
+    # gradient energy. Set `clip_per_role: false` to restore the old behaviour.
+    clip_per_role: true
+    max_grad_norm: 0.5
+    target_kl: 0.02
+  optimizer:
+    type: adam
+    actor_lr: 0.0003
+    critic_lr: 0.001

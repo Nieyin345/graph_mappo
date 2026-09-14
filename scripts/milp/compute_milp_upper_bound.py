@@ -1,6 +1,6 @@
 """MILP upper bound on EXACTLY the same scenario as the RL/eval episodes.
 
-The environment is built identically to ``scripts/run_baselines.py`` (same
+The environment is built identically to ``scripts/baselines/run_baselines.py`` (same
 validation profile from ``configs/global.yaml``: start mode, activation
 window, episode length, seeds and start_seed). For every evaluation seed the
 env is reset with the same arguments the baselines use, so the episode starts
@@ -10,9 +10,9 @@ reports the strict success-rate upper bound (``-HiGHS dual bound``), which any
 policy executed on that same episode cannot exceed.
 
 Usage (mirrors run_baselines.py):
-    python scripts/compute_milp_upper_bound.py                  # seeds from global.yaml
-    python scripts/compute_milp_upper_bound.py --seeds 7,8,9    # explicit seeds
-    python scripts/compute_milp_upper_bound.py --episode-start-mode fixed
+    python scripts/milp/compute_milp_upper_bound.py                  # seeds from global.yaml
+    python scripts/milp/compute_milp_upper_bound.py --seeds 7,8,9    # explicit seeds
+    python scripts/milp/compute_milp_upper_bound.py --episode-start-mode fixed
 """
 from __future__ import annotations
 import argparse, json, math, os, sys, time

@@ -17,7 +17,7 @@ rate_provider:
     eps: 1.0e-8
   h5:
     # dataset/global is the output directory of build_global_tensor.py.
-    # The shipped lean link_data.h5 (scripts/compact_h5.py / build_global_tensor.py)
+    # The shipped lean link_data.h5 (build_global_tensor.py + scripts/zero_rate_link_rebuild.py)
     # stores ONLY k_max + link_registry: los/distance/zenith are dropped (never
     # consumed by training; los is derivable from k_max when min_link_rate > 0).
     # The los/distance/zenith keys below are kept only for legacy full files and

@@ -269,7 +269,7 @@ def test_greedy_demand_rate_weight_switch() -> None:
 
 def test_baselines_yaml_policies_constructible() -> None:
     """Every YAML baseline section must map 1:1 onto a constructible policy,
-    using the same wiring as scripts/run_baselines.py."""
+    using the same wiring as scripts/baselines/run_baselines.py."""
     from qkd_rl.baselines.greedy_demand import GreedyDemandPolicy
     from qkd_rl.baselines.greedy_matching import GreedyMatchingPolicy
     from qkd_rl.baselines.greedy_qkp import GreedyQKPPolicy
