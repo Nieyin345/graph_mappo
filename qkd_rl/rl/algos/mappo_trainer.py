@@ -795,11 +795,22 @@ class MAPPOTrainer:
         returns_batch = torch.stack([step.returns.to(self.device) for step in batch])
         critic_beta = torch.clamp(returns_batch.std(), min=1.0).detach()
 
-        actor_loss = torch.zeros((), dtype=torch.float32, device=self.device)
-        critic_loss = torch.zeros((), dtype=torch.float32, device=self.device)
-        entropy_sum = torch.zeros((), dtype=torch.float32, device=self.device)
-        kl_sum = torch.zeros((), dtype=torch.float32, device=self.device)
-        ratio_sum = torch.zeros((), dtype=torch.float32, device=self.device)
+        # Collect per-step scalars instead of accumulating in the loop.
+        #
+        # The math is identical: the final values are the MEAN over steps, and
+        # mean(a) + mean(b) == mean(a + b) for equal-length sequences, so
+        # accumulating then dividing is the same as stacking then meaning.
+        # What changes is the autograd graph: `acc = acc + x` inside the loop
+        # builds a chain of N scalar Add nodes, while one `torch.stack(...).mean()`
+        # builds a single Sum node over an N-vector. On CPU the backward pass is
+        # dominated by per-node engine overhead rather than arithmetic (measured:
+        # run_backward tottime 3.5x the forward linear kernels), so collapsing
+        # the chain is worth it.
+        actor_terms: list[torch.Tensor] = []
+        entropy_terms: list[torch.Tensor] = []
+        kl_terms: list[torch.Tensor] = []
+        ratio_terms: list[torch.Tensor] = []
+        critic_terms: list[torch.Tensor] = []
         # Batched PPO evaluation: one block-diagonal forward over many minibatch
         # graphs (chunked to bound GPU memory) instead of one forward per step.
         # The math is identical to per-step evaluation; only the CUDA kernels
@@ -842,28 +853,27 @@ class MAPPOTrainer:
                     ratios = torch.exp(new_lp - old_lp)
                     surr1 = ratios * adv
                     surr2 = torch.clamp(ratios, 1.0 - clip_eps, 1.0 + clip_eps) * adv
-                    actor_loss = actor_loss - torch.min(surr1, surr2)
-                    entropy_sum = entropy_sum + entropies[node_ids[0]]
-                    kl_sum = kl_sum + (ratios - 1.0 - (new_lp - old_lp))
-                    ratio_sum = ratio_sum + ratios
+                    actor_terms.append(-torch.min(surr1, surr2))
+                    entropy_terms.append(entropies[node_ids[0]])
+                    kl_terms.append(ratios - 1.0 - (new_lp - old_lp))
+                    ratio_terms.append(ratios)
                 returns_target = step.returns.to(self.device)
                 # Huber loss keeps the critic robust to high-reward outlier
                 # episodes; the beta scales with the current batch so the
                 # loss stays comparable across different return magnitudes.
-                critic_loss = critic_loss + torch.nn.functional.smooth_l1_loss(
+                critic_terms.append(torch.nn.functional.smooth_l1_loss(
                     value, returns_target, beta=critic_beta
-                )
+                ))
                 n_steps += 1
             del batched_results, chunk_advantages
-        actor_loss = actor_loss / n_steps
-        critic_loss = (critic_loss / n_steps) * value_coef
-        return (
-            actor_loss,
-            critic_loss,
-            entropy_sum / n_steps,
-            kl_sum / n_steps,
-            ratio_sum / n_steps,
-        )
+        if n_steps == 0:
+            raise ValueError("Minibatch produced no steps in PPO update.")
+        actor_loss = torch.stack(actor_terms).mean()
+        critic_loss = torch.stack(critic_terms).mean() * value_coef
+        entropy_mean = torch.stack(entropy_terms).mean()
+        kl_mean = torch.stack(kl_terms).mean()
+        ratio_mean = torch.stack(ratio_terms).mean()
+        return (actor_loss, critic_loss, entropy_mean, kl_mean, ratio_mean)
 
     # ------------------------------------------------------------------ evaluate
     def evaluate(self, num_episodes: int | None = None) -> dict:
