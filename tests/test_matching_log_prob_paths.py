@@ -25,10 +25,13 @@ from __future__ import annotations
 import pytest
 import torch
 
+from qkd_rl.env.action_space import NodeActionSpace
 from qkd_rl.env.factory import build_env_from_config, load_default_config
 from qkd_rl.rl.algos.policy import MAPPOPolicy
 from qkd_rl.rl.models.graph_mappo import GraphMAPPOActorCritic
 from tests.helpers import ROOT, point_config_to_h5
+
+IDLE_ACTION = NodeActionSpace.IDLE
 
 
 def _build() -> tuple:
@@ -84,6 +87,43 @@ def _failure(
         f"  matched_edges ({len(matched_edges)}): {matched_edges!r}\n"
         f"  candidates ({len(candidates)}): {shown!r}{' ...' if len(candidates) > len(shown) else ''}"
     )
+
+
+def test_candidate_pairs_are_unique_per_observation() -> None:
+    """Each ``(src, dst)`` candidate pair must occur at most once per obs.
+
+    ``_matching_log_prob_entropy_arrays`` resolves a matched arc to its
+    candidate index through a ``(src, dst)`` lookup table built once per graph.
+    That is only faithful to the original per-arc ``np.flatnonzero`` scan while
+    this uniqueness holds: the scan took ``cand[0]``, and with duplicates the
+    first alive match could be a later duplicate whose index differs from the
+    table's.
+
+    The uniqueness is structural, not incidental --
+    ``action_space.neighbors[node]`` appends each adjacent node once per edge
+    (``action_space.py:31-37``), the candidate list is the sorted ``legal``
+    subset of that (``graph_builder.py:187-188``), and IDLE is filtered out of
+    the edge set. This test pins the structure so a future change to candidate
+    construction (parallel edges, unsorted or duplicated candidates) fails here
+    instead of silently biasing PPO's importance ratio.
+    """
+    env, _policy = _build()
+    for seed in (1, 2, 3):
+        obs = env.reset(seed=seed)
+        seen_any = False
+        for node_id in obs.node_ids:
+            cands = [c for c in obs.action_candidates[node_id] if c != IDLE_ACTION]
+            seen_any = seen_any or bool(cands)
+            assert len(cands) == len(set(cands)), (
+                f"node {node_id!r} has duplicate candidate neighbours: {cands!r}. "
+                "The (src, dst) lookup table in _matching_log_prob_entropy_arrays "
+                "is only correct while candidates are unique."
+            )
+            assert len(obs.action_candidates[node_id]) == len(set(obs.action_candidates[node_id])), (
+                f"node {node_id!r} candidate list repeats an entry "
+                f"(IDLE included): {obs.action_candidates[node_id]!r}"
+            )
+        assert seen_any, f"seed {seed} produced no edge candidates; test is vacuous"
 
 
 def test_array_path_matches_dict_path_bit_for_bit() -> None:

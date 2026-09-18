@@ -876,6 +876,29 @@ class MAPPOPolicy:
         n_nodes = max(1, len(node_pos))
         pair_code = np.minimum(src_code, dst_code) * n_nodes + np.maximum(src_code, dst_code)
 
+        # Candidate position by (src, dst), precomputed once for the whole
+        # evaluation instead of a np.flatnonzero scan per matched arc.
+        #
+        # Why this is equivalent: within one observation a `(src_code, dst_code)`
+        # pair occurs AT MOST ONCE. `action_space.neighbors[node]` appends each
+        # adjacent node exactly once per edge (action_space.py:31-37), the
+        # candidate list is the sorted, de-duplicated `legal` subset of that
+        # (graph_builder.py:187-188), and IDLE filters out of the edge set here
+        # so it cannot collide with a real node id. Therefore the scan always
+        # returned a single-element array and `cand[0]` was simply this pair's
+        # fixed index -- independent of `alive`. Verified empirically on 3600
+        # candidate lists (0 duplicates); the previous form spent most of this
+        # function's time there (79451 np.flatnonzero calls per update).
+        #
+        # The `alive` check below still catches a stored arc whose pair is
+        # absent (lookup miss) or already consumed by an earlier arc -- the same
+        # error the old `cand.size == 0 or not alive[cand[0]]` raised.
+        arc_pos_lookup: dict[int, int] = {}
+        for i in range(n_arcs):
+            arc_pos_lookup.setdefault(
+                int(src_code[i]) * (n_nodes + 1) + int(dst_code[i]), i
+            )
+
         alive = np.ones(n_arcs, dtype=bool)
         rows = np.empty((len(matched_edges) + 1, n_arcs), dtype=np.float32)
         choices: list[int] = []
@@ -884,18 +907,12 @@ class MAPPOPolicy:
             pos = node_pos.get(arc[0])
             if pos is None:
                 raise ValueError(f"Stored matching arc {arc!r} is not in the observation.")
-            # Find src via node_pos[arc[0]]; the matched edge is a directed arc
-            # (src->dst), and the candidates are ordered by (source, dst). The
-            # candidate with this source and this dst must exist among the alive
-            # arcs; the canonical position is where dst_code == pos of dst and
-            # src_code == pos of src.
             dst_pos = node_pos.get(arc[1])
             if dst_pos is None:
                 raise ValueError(f"Stored matching arc {arc!r} dst not in the observation.")
-            cand = np.flatnonzero((src_code == pos) & (dst_code == dst_pos))
-            if cand.size == 0 or not alive[cand[0]]:
+            arc_pos = arc_pos_lookup.get(pos * (n_nodes + 1) + dst_pos, -1)
+            if arc_pos < 0 or not alive[arc_pos]:
                 raise ValueError(f"Stored matching arc {arc!r} is not available for evaluation.")
-            arc_pos = int(cand[0])
             rows[n_rows] = alive
             choices.append(arc_pos)
             n_rows += 1
