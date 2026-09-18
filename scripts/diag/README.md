@@ -16,8 +16,13 @@ ssh qkd 'cd /opt/qkd/graph_mappo && /opt/qkd/venv/bin/python scripts/diag/val_al
 
 | 脚本 | 用途 |
 |---|---|
-| `val_align.py` | 打印每个 run 的验证曲线，**按轮对齐**（验证行自身不带 update 号，靠自己前面最近的训练行定位）。诊断任何"某轮好/差"的问题都从这里开始 |
+| `val_align.py` | 打印每个 run 的验证曲线，**按轮对齐**（验证行自身不带 update 号，靠自己前面最近的训练行定位）。诊断任何"某轮好/差"的问题都从这里开始。加 `--perseed` 出逐种子明细 |
+| `paired_vs_expert.py` | **RL vs 专家**，在 RL 实际使用的验证种子（100–114）上**配对**算。专家基准 = **0.6979**（种子 7–21 的归档 JSON 与 RL 的验证种子完全不相交，别拿它当对照）。`--round N` 取指定轮 |
 | `local_summary.py` | 从 `outputs/`（或本地 `server_results/`）生成配对对照表 + 全部曲线 + 配置差异。`--roots outputs --out x.md` |
+| `check_configs.py` | 校验 `configs/*.yaml` 能否 `yaml.safe_load`，报错时带行号 ±3 行上下文；未知顶层键只告警。**改完配置先跑它**——`train_ent01_off.yaml` 曾因注释头里的命令行样例没加 `#` 而解析失败，白等 8 分钟才在日志里发现 |
+| `train_tail.py` | 打印某 run 在 **u≥n** 的训练诊断量，用于判断"某轮验证值突变"是否伴随训练异常 |
+| `entropy_trace.py` | **对比两臂**的 entropy / 关键诊断量轨迹（用于看熵的收益是否只出现在早期，从而决定"调高固定系数"还是"退火"）。只读 `metrics.jsonl`，不训练 |
+| `summarize_eval.py` | 汇总 `outputs/eval/*.json` 的基线评估，把每个基线数字的**口径**（均值/标准误/种子/步数）摊开——日志里到处引用的"专家 0.698"，其种子集与步数此前从没人核对过 |
 | `pss_trend.py` | 采样每个 run 的 PSS 随时间/轮数的变化并做线性拟合，量化内存增长 |
 | `mem_audit.py` | **内存现状按 PSS 分组汇总**：trainer / worker / 孤儿各占多少，并解释 MemAvailable 为什么低于预期。答"还能不能再开一个 run"。诊断内存一律从这里开始（RSS 会把共享页重复计数，误导性极强） |
 | `reap.py` | 回收孤儿 worker 与卡住的探针父进程。**默认只报告**，`--apply` 才杀；`--protect` 保护在跑的探针。被 `--min-gb`/`--min-age-min` 筛掉的会**单独报计数**（阈值按旧数量级设就会静默漏报，已验证过一次） |
@@ -36,6 +41,12 @@ ssh qkd 'cd /opt/qkd/graph_mappo && /opt/qkd/venv/bin/python scripts/diag/val_al
    测的，和并发时不可比 —— chunk 扫描就是被这个坑误导成"chunk=128 快 1.23x"。
 3. **不许用 `pkill -f <模式>`**：远程 `bash -c` 的命令行自身含该模式，
    `pkill -f` 会杀掉自己（exit 255，后续命令一条都不跑）。先 `pgrep` 取 PID。
+4. **报配对 t 必须同时报该设计能分辨的最小效应**。配对 SE 只用**验证实例**
+   算，**不含训练种子的变异**——而训练种子才是单种子分辨率 ~0.035 的来源。
+   所以配对 t=+2.84（Δ=+0.0128）读起来"显著"，实际上 0.0128 < 0.035，
+   按 §4⑦ 是**测不出差异**。它证明的是"在这 15 个留出实例上可辨"，不是
+   "该超参有 0.013 的效应"。**先看分辨率，再看符号。**
+   同族的坑：`fork_pair.py` 的判读块已把这条写进输出，别绕过它自己心算。
 
 ## 怎么送到节点
 
