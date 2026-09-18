@@ -1,0 +1,32 @@
+# 训练窗口扩展：0-295 → 0-329（吃下此前完全闲置的 34 天）
+#
+# 依据（2026-09-19 实测）：
+#   dataset/global/link_data.h5 覆盖整整 365 天（525600 = 365 × 1440 步），
+#   而 train_full_rl.yaml 的 activation_window 只到 295 天，验证用 330-365。
+#   296-329 这 34 天（占全年 9.3%）**从未被任何 run 用过**。
+#
+#   实测这 34 天的链路数据与训练窗口统计上同质：
+#     区间            均值    非零占比  非零均值   活跃列
+#     训练 0-295     173.6    0.093    1868     0.997
+#     闲置 296-329   174.5    0.093    1880     0.994
+#     验证 330-365   173.0    0.092    1876     0.993
+#   即：不是"被排除的坏数据"，只是配置留下的缺口。
+#
+# 这个改动是纯数据侧的，不动算法、不动模型、不动超参：
+#   - 训练分布向验证窗口靠拢（间隔从 35 天缩到 1 天）
+#   - 每轮可采样的起日从 295 个涨到 329 个（+11.5% 的起日多样性）
+#
+# 用法（与原配置的唯一差别就是这一行 --configs 多了本文件）：
+#   python scripts/train/train_graph_mappo.py \
+#       --configs rl_algorithm.yaml train_full_rl.yaml train_window_329.yaml \
+#       --checkpoint outputs/supervised_pg_phased/supervised_pg_phased_latest.pt \
+#       --seed 62 --num-updates 30 --run-name w329_s62
+env:
+  activation_window_start_day: 0
+  activation_window_end_day: 329
+  activation_window_days: 329
+scenario:
+  time_limit:
+    # 回合起点最晚 329 天，回合本身最长 1 天（1440 步），所以时间轴上界要
+    # 留到 330。数据到 365 天，够。
+    days: 331
