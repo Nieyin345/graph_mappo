@@ -14,24 +14,39 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 并行跑 run 前先算内存，不是先看 load
 
-**每个训练 run 真实占用 ~13 GB（PSS），不是 1–2 GB。** 125 GB 机器上
-**5 个并发是安全上限**（5×13=65G，留余量给评测/探针）。
+**每个训练 run 实测 23.3 GB（PSS）**：父进程 14.5 GB + 8 个 spawn worker
+× 1.1 GB。**而且不是稳态——每轮还涨约 0.43 GB**，外推到 u30 约 31 GB/run。
 
-- 判据是 `MemAvailable / 13`，**不是 CPU 核数**。每个 run 只吃 ~3 核，
-  32 核"看起来"能跑 10 个——2026-09-19 就是照 load 判断铺了 6 个，
-  被 OOM 杀掉 4 个
+- 判据是 **`MemAvailable / 30`**（按跑满算），**不是 CPU 核数**，也不是
+  启动时的内存。每个 run 只吃 ~3 核，32 核"看起来"能跑 10 个——
+  照 load 判断铺 6 个，被 OOM 杀掉 4 个
+- 125 GB 机器上**安全并发是 3**。按 23 GB 排 5 个（116 GB）到 u15
+  就涨到 150 GB，**一定 OOM**（2026-09-18 实测）
 - `load average` 和 `%CPU` 都看不见这个墙。过载的症状是**每轮耗时上涨**
   （`rollout_s` 46→82s、`update_s` 145→196s），不是进程变慢
-- 内存看门狗（`.tmp/mem_watchdog.py`，`--apply`）在 OOM 前回收孤儿 worker
 - 分波启动用 `.tmp/wave_launch.sh`（按内存预算排队，不是一次全铺）
+- **并发本身不吃速度**：同一份 buffer 在 5 个训练并发下测得 12.41 ms/步，
+  与机器空闲时的 12.41 ms/步完全相同。**约束是内存，不是核心数**
 
-**OOM 会遗留孤儿 worker，这是本项目最阴的坑**：killer 用 SIGKILL 杀的是
+**不要用"杀最晚启动的"看门狗**。`.tmp/mem_watchdog.py --threshold 20 --apply`
+曾在阈值设错（按旧的 13 GB 记录）时，精确杀掉了唯一想保的对照臂。
+自动保护措施建在错误数量级上就是**破坏措施**，比没有更糟——没有它时 OOM
+至少是全员平等地崩。阈值类工具上线前必须用实测校准。
+
+**OOM 会遗留孤儿 worker，但孤儿是结果不是原因**：killer 用 SIGKILL 杀的是
 **trainer 父进程**，`multiprocessing.spawn` 的 8 个 rollout worker 被 reparent
-到 init 后**继续空转，永不退出**。一次 OOM 泄漏 ~14 GB，累积两次就到 58 GB。
+到 init 后**继续空转，永不退出**，每个 1.1 GB。每发生一次 OOM 就新增约 9 GB
+孤儿，只清孤儿不解决复发（真正的做法是别把内存排满）。
 `pkill -f train_graph` **只杀父进程，会制造新的孤儿**。
 
-清理用 `.tmp/kill_orphans.py`（判据：`PPid==1` 且 cmdline 含 `multiprocess`；
-带保护名单闸，不会误杀活着的 run）。**worker 自身 cmdline 里没有 run-name**，
+**`pkill -f <模式>` 在 `ssh host '...'` 里会杀掉自己**：远程 `bash -c` 的
+命令行自身含该模式，`pkill -f` 匹配整条命令行 → 连同后面的命令一起被杀
+（表现为 exit 255，后续命令一条都没跑）。先 `pgrep` 取 PID 再 `kill`。
+
+清理用 `.tmp/reap.py`（默认只报告，`--apply` 才杀；判据 `PPid==1` 且 cmdline
+含 `multiprocess`，另收**卡在 `do_wait` 的 `.tmp/probe_*.py` 父进程**——它们
+命令行里没有 `multiprocess`，看门狗看不到，实测单个能占 5 GB 以上；
+`--protect <pid>` 保护在跑的探针）。**worker 自身 cmdline 里没有 run-name**，
 别试图从它自证归属。诊断内存现状用 `.tmp/mem_audit.py`（按 PSS 分组，RSS 会把
 共享页重复计数，误导性极强）。
 
