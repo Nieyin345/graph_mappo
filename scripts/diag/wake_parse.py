@@ -10,8 +10,13 @@
 
 另外做一件自动事：**内存安全余量足够时补起 ent01_g999_s43**。
   g999 第二臂被看门狗误杀过（见 docs/训练诊断记录.md），需要补回来才能
-  做三种子的 gamma 净效应配对。判据用**内存**（每 run 23.3 GB + 0.43/轮），
+  做三种子的 gamma 净效应配对。判据用**内存**（每 run 23.3 GB + 0.21/轮），
   不是 CPU。补过后写状态文件，不会重复补。
+
+  **可用 /tmp/qkd_g999_respawn.json 里的 "hold": "原因" 关掉自动补起**：
+  补起会占用一个 run 的内存名额，而内存是这台机器唯一的瓶颈，所以当有
+  **更有价值的实验**要跑时（例如 ent01_s42_u25_base 这个起点配对对照），
+  必须显式让它让位，否则两个 run 会互相抢内存、把对照臂 OOM 掉。
 
 用法：python /tmp/wake_parse.py
 """
@@ -97,6 +102,8 @@ def maybe_respawn(avail: float, n_train: int, names: list[str], update: int):
             st = json.loads(STATE.read_text())
         except (OSError, json.JSONDecodeError):
             st = {}
+    if st.get("hold"):
+        return f"g999_s43 被 hold 住了：{st['hold']}"
     if st.get("done"):
         return f"g999_s43 已补过（{st.get('at')}）"
 
