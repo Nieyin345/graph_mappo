@@ -218,6 +218,35 @@ class MAPPOTrainer:
             # updates and isolates learning in one scenario.
             self._seed_stride = 0
 
+    def _reset_env(self, env, seed: int, **kwargs):
+        """``env.reset`` with the action-sampling RNG pinned to the same seed.
+
+        An episode is reproducible only when BOTH halves are seeded: the env
+        seed fixes the request stream, and the policy's sample seed fixes the
+        exploration noise drawn against it. Seeding only the env left the
+        Gumbel draws to a global RNG that the workers never seed, so two runs
+        of one config took different actions from the very first rollout.
+
+        Always reset through here rather than calling ``env.reset`` directly.
+        """
+        obs = env.reset(seed=seed, **kwargs)
+        self.policy.set_sample_seed(seed)
+        return obs
+
+    def _reset_envs(self, envs, base_seed: int, env_indices=None) -> list:
+        """Batched ``_reset_env``: one sample generator per row.
+
+        ``env_indices`` are the episode indices the caller selected out of the
+        full env pool, so seeds stay ``base_seed + episode_index`` rather than
+        ``base_seed + position_in_group`` -- the seed an episode gets must not
+        depend on how the batch was split.
+        """
+        if env_indices is None:
+            env_indices = list(range(len(envs)))
+        obs_list = [env.reset(seed=base_seed + i) for env, i in zip(envs, env_indices)]
+        self.policy.set_sample_seed([base_seed + i for i in env_indices])
+        return obs_list
+
     def _apply_curriculum(self) -> None:
         """Apply the active curriculum stage for the current update count."""
         if not self.curriculum_stages:
@@ -364,7 +393,7 @@ class MAPPOTrainer:
             else:
                 if not self.env.continuous and not self.episode_steps_fixed:
                     self.env.config["env"]["episode_steps"] = self._sample_episode_steps()
-                obs = self.env.reset(seed=base_seed + ep_idx)
+                obs = self._reset_env(self.env, base_seed + ep_idx)
             ep_reward = 0.0
             terminated = False
             truncated = False
@@ -494,7 +523,10 @@ class MAPPOTrainer:
         if continuous and self._continuous_obs_list is not None:
             obs_list = [self._continuous_obs_list[i] for i in env_indices]
         else:
-            obs_list = [envs[i].reset(seed=base_seed + i) for i in env_indices]
+            # Seed each row's exploration noise from its own episode seed, so a
+            # row's sampled matching does not depend on how many rows share the
+            # batch or on which ones ran first.
+            self._reset_envs(group, base_seed, env_indices=env_indices)
         n_group = len(env_indices)
         ep_steps: list[list[RolloutStep]] = [[] for _ in range(n_group)]
         ep_rewards = [0.0] * n_group

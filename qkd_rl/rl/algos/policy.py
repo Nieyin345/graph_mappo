@@ -43,6 +43,45 @@ class MAPPOPolicy:
         # does not change during a rollout on a fixed QKD topology, so avoid
         # rebuilding numpy arrays at every action sample.
         self._matching_cache = None
+        # RNG for the Gumbel noise used by the matching samplers. It must be an
+        # explicit generator rather than torch's global RNG: the rollout
+        # workers are spawned interpreters whose global torch RNG is seeded
+        # from OS entropy, never by the trainer's `torch.manual_seed`. With the
+        # global RNG, two runs of the same config and seed took *different*
+        # actions from the very first rollout -- the env seed still reproduced
+        # the request stream, so the divergence looked like measurement noise
+        # instead of the reproducibility bug it was. Set via
+        # :meth:`sample_seed`; None falls back to the global RNG.
+        self._sample_gen: torch.Generator | None = None
+        # One generator per row for act_batched; see sample_seed.
+        self._sample_gens_batched: list[torch.Generator] | None = None
+
+    def set_sample_seed(self, seed: int | list[int]) -> None:
+        """Seed the action-sampling RNG, making a rollout reproducible from it.
+
+        The request stream is already pinned by the per-episode env seed; this
+        pins the other half of the episode -- the policy's own exploration
+        noise -- so identical (seed, weights) always yields identical episodes.
+
+        Accepts an int for one sampler, or a list for ``act_batched`` (one
+        generator per row, so a row's noise cannot depend on how many rows are
+        batched or on the order the scheduler finished the others).
+
+        Only the *stochastic* paths need this. Evaluations sample with
+        ``deterministic=True``, which draws no Gumbel noise at all, so they are
+        bit-reproducible whether or not this was called.
+        """
+        if isinstance(seed, (list, tuple)):
+            gens = []
+            for value in seed:
+                gen = torch.Generator(device=self.device)
+                gen.manual_seed(int(value))
+                gens.append(gen)
+            self._sample_gens_batched = gens
+            return
+        gen = torch.Generator(device=self.device)
+        gen.manual_seed(int(seed))
+        self._sample_gen = gen
 
     def _get_matching_cache(self, arcs):
         """Build/reuse integer arc indices used by matching feasibility tests."""
@@ -105,7 +144,9 @@ class MAPPOPolicy:
         if deterministic:
             gumbel_np = None
         else:
-            u = torch.rand(n_arcs + 1, dtype=raw.dtype, device=raw.device).clamp_min(torch.finfo(raw.dtype).tiny)
+            u = torch.rand(
+                n_arcs + 1, dtype=raw.dtype, device=raw.device, generator=self._sample_gen
+            ).clamp_min(torch.finfo(raw.dtype).tiny)
             gumbel_np = (-torch.log(-torch.log(u))).cpu().numpy()
 
         # Integer codes let the feasibility test be one vectorized mask update
@@ -378,7 +419,14 @@ class MAPPOPolicy:
             gumbel = np.zeros((G, A + 1), dtype=np.float32)
             for g in range(G):
                 n_g = int(n_arcs[g])
-                u = torch.rand(n_g + 1, dtype=torch.float32, device=self.device)
+                gen = (
+                    self._sample_gens_batched[g]
+                    if self._sample_gens_batched is not None and g < len(self._sample_gens_batched)
+                    else self._sample_gen
+                )
+                u = torch.rand(
+                    n_g + 1, dtype=torch.float32, device=self.device, generator=gen
+                )
                 u = u.clamp_min(torch.finfo(torch.float32).tiny)
                 v = (-torch.log(-torch.log(u))).cpu().numpy()
                 gumbel[g, :n_g] = v[:n_g]

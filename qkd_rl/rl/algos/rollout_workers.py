@@ -53,6 +53,10 @@ def _run_episode(
     """
     if episode_steps is not None:
         env.config["env"]["episode_steps"] = int(episode_steps)
+    # Pin the exploration noise before resetting: the env seed fixes the
+    # request stream, this fixes the actions sampled against it. Both halves
+    # are needed for (seed, weights) -> identical episode; see MAPPOPolicy.
+    policy.set_sample_seed(seed)
     obs = env.reset(seed=seed)
     buffer = RolloutBuffer(gamma, gae_lambda, device="cpu", value_target=value_target)
     rollout_debug = new_rollout_debug()
