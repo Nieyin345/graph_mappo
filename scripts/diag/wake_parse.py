@@ -160,6 +160,7 @@ def main():
     # 参照臂：所有实验都用同一个 BC 起点的专家/基线数字
     refs = {
         "expert_val240": 0.6980,
+        "expert_val100_114": 0.6979,   # 同 regime（种子 100-114），配对比较的唯一口径
         "bc_val240": 0.6483,
         "r8base_u5": 0.6537, "r8base_u10": 0.6755, "r8base_u15": 0.6893,
         "r7base_u20": 0.6159, "r7fixent_u20": 0.7113,
@@ -171,8 +172,14 @@ def main():
             print(f"VAL {n} u={u} (无验证点)")
             continue
         s = " ".join(f"u{a}={b:.4f}" for a, b in vals)
+        # 延长臂（u30→u50）：这一步唯一要回答的是"曲线还在不在上行、
+        # 平台在哪"，所以直接与同 regime 的专家比，不必再绕 r8base。
+        if "_u30to50" in n:
+            cmp_s = "  vs_expert: " + " ".join(
+                f"u{a} {b - refs['expert_val100_114']:+.4f}" for a, b in vals)
+        else:
+            cmp_s = ""
         # 与 r8base 同轮的对照（配对，才是可比口径）
-        cmp_s = ""
         if n.startswith("ent01_s4"):
             mp = {"u5": refs["r8base_u5"], "u10": refs["r8base_u10"],
                   "u15": refs["r8base_u15"]}
@@ -182,7 +189,7 @@ def main():
                 if k in mp:
                     parts.append(f"{k} {b - mp[k]:+.4f}")
             if parts:
-                cmp_s = "  vs_r8base: " + " ".join(parts)
+                cmp_s += "  vs_r8base: " + " ".join(parts)
         print(f"VAL {n} u={u} {s}{cmp_s}")
 
 
