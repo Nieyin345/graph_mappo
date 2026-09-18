@@ -72,8 +72,11 @@ def parse_etime(s: str) -> float:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true", help="真杀（默认只报告）")
-    ap.add_argument("--min-gb", type=float, default=0.5,
-                    help="只处理 PSS 超过此值的进程")
+    ap.add_argument("--min-gb", type=float, default=0.2,
+                    help="只处理 PSS 超过此值的进程。**默认 0.2，不是 0.5**："
+                         "本机孤儿 worker 实测每个 0.29–0.30 GB，旧的 0.5 默认值"
+                         "会静默漏掉 14/16 个（漏 5.19 GB）还报'无可回收'。"
+                         "阈值按旧数量级设定即静默失效——与 mem_watchdog 同类错误。")
     ap.add_argument("--min-age-min", type=float, default=20.0,
                     help="只处理存活超过此分钟数的探针（保护正在跑的探针）")
     ap.add_argument("--protect", type=int, nargs="*", default=[],
@@ -90,6 +93,8 @@ def main():
             protect.add(r["pid"])
 
     targets = []
+    skipped_gb: list[tuple[float, int, str]] = []      # 被 --min-gb 筛掉的
+    skipped_age: list[tuple[float, int, str]] = []     # 被 --min-age-min 筛掉的探针
     for r in rows:
         pid, ppid, a = r["pid"], r["ppid"], r["args"]
         if pid in live_children or pid in trainers or pid in protect:
@@ -102,15 +107,34 @@ def main():
         # 卡了 79 分钟，各占 5.17 / 4.16 GB。它们是**我自己**的一次性脚本，
         # 匹配 PROBE_RE 即可杀，不需要 ppid 条件；但要加存活时长门槛，
         # 否则会误杀当前正在产出结果的探针。
-        is_probe = (bool(PROBE_RE.search(a))
+        looks_like_probe = bool(PROBE_RE.search(a))
+        is_probe = (looks_like_probe
                     and parse_etime(r["etime"]) >= args.min_age_min)
         if not (is_orphan_worker or is_probe):
+            if looks_like_probe:
+                skipped_age.append((pss_gb(pid), pid, r["etime"]))
             continue
         g = pss_gb(pid)
         if g < args.min_gb:
+            # **必须记下来**：阈值按旧数量级设定时会静默吃掉真目标。
+            # 不报"筛掉几个"的工具，跨量级变化时只会安静地少报。
+            skipped_gb.append((g, pid, r["etime"]))
             continue
         targets.append((g, pid, "孤儿worker" if is_orphan_worker else "遗留探针",
                         r["etime"], a))
+
+    if skipped_gb:
+        # 只报计数与合计，不逐条打印（阈值调错时这里会变成一条长清单，
+        # 那一行本身就是"阈值与该机当前量级不符"的信号）。
+        print(f"\n[阈值筛掉] --min-gb={args.min_gb} 跳过了 {len(skipped_gb)} 个孤儿 worker，"
+              f"合计 {sum(s[0] for s in skipped_gb):.2f} GB"
+              f"（最大单个 {max(s[0] for s in skipped_gb):.2f} GB）"
+              f"\n            若这个数不可忽略，说明阈值与本机当前量级不符，"
+              f"用 --min-gb 调小重跑。")
+    if skipped_age:
+        print(f"\n[时长筛掉] --min-age-min={args.min_age_min} 跳过 {len(skipped_age)} 个疑似探针"
+              f"（最大 {max(s[0] for s in skipped_age):.2f} GB）——"
+              f"若其中有卡死的，调小该阈值或加 --protect 后重跑。")
 
     if not targets:
         print(f"无可回收目标（训练父进程 {len(trainers)} 个，"

@@ -19,7 +19,8 @@ ssh qkd 'cd /opt/qkd/graph_mappo && /opt/qkd/venv/bin/python scripts/diag/val_al
 | `val_align.py` | 打印每个 run 的验证曲线，**按轮对齐**（验证行自身不带 update 号，靠自己前面最近的训练行定位）。诊断任何"某轮好/差"的问题都从这里开始 |
 | `local_summary.py` | 从 `outputs/`（或本地 `server_results/`）生成配对对照表 + 全部曲线 + 配置差异。`--roots outputs --out x.md` |
 | `pss_trend.py` | 采样每个 run 的 PSS 随时间/轮数的变化并做线性拟合，量化内存增长 |
-| `reap.py` | 回收孤儿 worker 与卡住的探针父进程。**默认只报告**，`--apply` 才杀；`--protect` 保护在跑的探针 |
+| `mem_audit.py` | **内存现状按 PSS 分组汇总**：trainer / worker / 孤儿各占多少，并解释 MemAvailable 为什么低于预期。答"还能不能再开一个 run"。诊断内存一律从这里开始（RSS 会把共享页重复计数，误导性极强） |
+| `reap.py` | 回收孤儿 worker 与卡住的探针父进程。**默认只报告**，`--apply` 才杀；`--protect` 保护在跑的探针。被 `--min-gb`/`--min-age-min` 筛掉的会**单独报计数**（阈值按旧数量级设就会静默漏报，已验证过一次） |
 | `reap_now.sh` | `reap.py` 的包装：自动识别并保护当前在跑的探针，然后执行 |
 | `fetch_all.sh` | 把服务器结果抓到本地（**排除权重 .pt**，只留 metrics/config/rollout_debug） |
 | `wake_poll.sh` | 唤醒链（本地跑）：轮询服务器，**仅在有新信息时**输出一行。指纹已排除易变数字，否则会每 2 分钟误唤醒 |
