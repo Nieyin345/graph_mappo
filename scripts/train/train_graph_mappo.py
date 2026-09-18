@@ -146,9 +146,26 @@ def main() -> None:
 
     output_dir = ROOT / config["project"]["output_dir"] / config["project"]["run_name"]
     output_dir.mkdir(parents=True, exist_ok=True)
+    # Record the thread budget into the resolved config.
+    #
+    # The thread count changes training results DETERMINISTICALLY (measured
+    # 0.018 on this task -- see docs/测试规范.md), which is the same order as
+    # the effects under study (entropy_coef ~0.04). Two runs are only
+    # comparable if they used the same count, so it has to be in the artifact.
+    # Before this, `runtime.num_threads` was absent from every resolved_config
+    # and the startup log did not print it either: the only surviving evidence
+    # was whichever shell script happened to launch the run.
+    config.setdefault("runtime", {})
+    config["runtime"]["num_threads"] = _cpu_threads
+    config["runtime"]["torch_num_threads"] = torch.get_num_threads()
+    config["runtime"]["omp_num_threads_env"] = os.environ.get("OMP_NUM_THREADS")
+    config["runtime"]["mkl_num_threads_env"] = os.environ.get("MKL_NUM_THREADS")
     with (output_dir / "resolved_config.yaml").open("w", encoding="utf-8") as f:
         yaml.safe_dump(config, f, sort_keys=False, allow_unicode=True)
     print(f"Output dir: {output_dir}")
+    print(f"Threads: torch={torch.get_num_threads()} "
+          f"OMP={os.environ.get('OMP_NUM_THREADS')} "
+          f"MKL={os.environ.get('MKL_NUM_THREADS')}")
 
     trainer = MAPPOTrainer(env, policy, config, output_dir, device=device)
     if args.checkpoint:
