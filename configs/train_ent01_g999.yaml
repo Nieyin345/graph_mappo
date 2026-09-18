@@ -1,0 +1,33 @@
+# entropy_coef 0.01 之上再叠加 gamma 0.999
+#
+# 为什么这样叠（而不是单独测 gamma）：
+#   entropy_coef=0.001→0.01 是已确认的第一线索，本文件在它**之上**再改一项，
+#   于是 `ent01_g999` vs `ent01`（同种子）的差就是**gamma 的净效应**，
+#   归因干净。
+#
+# 依据（2026-09-19 系统性挖掘 .tmp/mine_config_effects.py，两次独立同种子配对）：
+#   对照一：r6_base(gamma=0.99) → r6_g999(0.999)   验证 0.6274 → 0.6811  **+0.0275**
+#   对照二：r7_base(0.99)      → r7_fix_g999(0.999) 0.6274 → 0.6482  **+0.0208**
+#   两对都是「除 gamma 外全部字段相同」的干净单变量对照，种子均为 42/7。
+#   两次同向，均值 +0.024。
+#
+# 另一条反证（说明必须与 ent 一起改）：
+#   r7_fix_g999 同时把 entropy 保持在 0.001，结果 0.6321~0.6482，
+#   远低于 r7_fix_ent（ent=0.01, gamma=0.99）的 0.7113。
+#   即 gamma 单独改不够，ent 才是主导项。
+#
+# 机理：gamma 0.999 把有效视界从 1/(1-0.99)=100 步拉到 1/(1-0.999)=1000 步。
+# 本回合是 1440 步、每天 1440 步，请求的收益要跨小时级延迟才兑现；
+# 100 步的视界只覆盖 100 分钟，信用分配切得太短。这与"涨的是验证侧"一致。
+#
+# 注意：0.999 是**非常高的值**，若 critic 拟合跟不上（看 value_return_corr
+# 是否塌向 0、return_std/value_std 是否发散），要准备回退到 0.995。
+#
+# 用法（必须排在 train_ent01.yaml 之后）：
+#   python scripts/train/train_graph_mappo.py \
+#       --configs rl_algorithm.yaml train_full_rl.yaml \
+#                  train_ent01.yaml train_ent01_g999.yaml \
+#       --checkpoint outputs/supervised_pg_phased/supervised_pg_phased_latest.pt \
+#       --seed 42 --num-updates 30 --run-name ent01_g999_s42
+train:
+  gamma: 0.999
