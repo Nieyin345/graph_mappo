@@ -16,7 +16,7 @@ ssh qkd 'cd /opt/qkd/graph_mappo && /opt/qkd/venv/bin/python scripts/diag/val_al
 
 | 脚本 | 用途 |
 |---|---|
-| `val_align.py` | 打印每个 run 的验证曲线，**按轮对齐**（验证行自身不带 update 号，靠自己前面最近的训练行定位）。诊断任何"某轮好/差"的问题都从这里开始。加 `--perseed` 出逐种子明细 |
+| `val_align.py` | 打印每个 run 的验证曲线，**按轮对齐**（验证行自身不带 update 号，靠自己前面最近的训练行定位）。诊断任何"某轮好/差"的问题都从这里开始。参数只有 `runs...` 与 `--prefix`（**没有** `--perseed`，逐种子明细要用 `fork_pair.py` 或直接读 `metrics.jsonl` 的 `per_seed_success`） |
 | `paired_vs_expert.py` | **RL vs 专家**，在 RL 实际使用的验证种子（100–114）上**配对**算。专家基准 = **0.6979**（种子 7–21 的归档 JSON 与 RL 的验证种子完全不相交，别拿它当对照）。`--round N` 取指定轮 |
 | `local_summary.py` | 从 `outputs/`（或本地 `server_results/`）生成配对对照表 + 全部曲线 + 配置差异。`--roots outputs --out x.md` |
 | `check_configs.py` | 校验 `configs/*.yaml` 能否 `yaml.safe_load`，报错时带行号 ±3 行上下文；未知顶层键只告警。**改完配置先跑它**——`train_ent01_off.yaml` 曾因注释头里的命令行样例没加 `#` 而解析失败，白等 8 分钟才在日志里发现 |
