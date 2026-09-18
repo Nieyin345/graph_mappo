@@ -1,0 +1,11 @@
+# 实验用覆盖：把 PPO 的 batch_chunk 从 64 提到 256。
+# 只覆盖这一个 key，其余全部继承 rl_algorithm.yaml。
+#
+# 依据：batch_chunk 决定一次前向里装多少步，边张量约
+#   chunk × 393 边 × 128 维 × 4B
+# 要能待在 L3（这台 EPYC 7302P 的 L3 是 128 MB）里。64 时约 12.9 MB，
+# 256 时约 51.5 MB —— 仍在 L3 内。文档 §5.2 测过 128 比 512 快，
+# 但没测过 64 以下，也没测过当前的 minibatch_size=256 组合。
+train:
+  ppo:
+    batch_chunk: 256

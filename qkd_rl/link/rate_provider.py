@@ -4,7 +4,6 @@ import csv
 import json
 import math
 import warnings
-import zlib
 
 import numpy as np
 from collections import OrderedDict

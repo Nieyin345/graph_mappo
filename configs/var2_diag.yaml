@@ -1,0 +1,17 @@
+# 固定诊断场景的验证协议，和 train_diag_fast.yaml 的 validation 块逐字一致。
+#
+# 存在的理由：eval_expert.py 从 **global.validation** 读协议，而 train_diag_fast.yaml
+# 把它放在顶层（那是训练器 config["validation"] 的来源）。两边读的不是同一处，
+# 所以专家脚本需要一个只写 global.validation 的小配置。
+#
+# 必须一字不差地复刻：窗口 0-0、start_mode fixed、240 步、12 个种子 7-18。
+# 差一点就不是同一个协议，专家数和 r2_* 的 eval_validation 就没法配对比。
+global:
+  validation:
+    window:
+      start_day: 0
+      end_day: 0
+    start_mode: fixed
+    episode_steps: 240
+    episodes: 12
+    request_seeds: [7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]

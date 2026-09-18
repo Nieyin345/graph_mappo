@@ -13,7 +13,13 @@ import torch
 
 from qkd_rl.rl.algos.checkpoint import load_checkpoint, save_checkpoint
 from qkd_rl.rl.algos.policy import MAPPOPolicy
-from qkd_rl.rl.algos.rollout_buffer import RolloutBuffer, RolloutStep, state_free_obs
+from qkd_rl.rl.algos.rollout_buffer import (
+    RolloutBuffer,
+    RolloutStep,
+    accumulate_rollout_debug,
+    new_rollout_debug,
+    state_free_obs,
+)
 from qkd_rl.env.env import QKDEnv
 
 
@@ -21,6 +27,12 @@ def _reset_module(module: torch.nn.Module) -> None:
     """Re-initialize a module's parameters in place (identity preserved)."""
     if hasattr(module, "reset_parameters"):
         module.reset_parameters()
+
+
+# Minimum minibatches a PPO update must run before the KL early stop is allowed
+# to fire. With epochs=1 an early stop aborts the whole update, so letting the
+# very first minibatch decide throws away the entire epoch on one noisy draw.
+_MIN_BATCHES_BEFORE_KL_STOP = 4
 
 
 @dataclass
@@ -48,6 +60,11 @@ class UpdateStats:
     value_std: float = 0.0
     return_std: float = 0.0
     value_return_corr: float = 0.0
+    # How many minibatches this update actually ran. With epochs=1 the KL early
+    # stop aborts the WHOLE update, so a small number here means the update did
+    # almost no work -- and `kl` above cannot reveal that, because it is the
+    # mean over the batches that did run.
+    n_minibatches: int = 0
 
 
 class MAPPOTrainer:
@@ -97,11 +114,19 @@ class MAPPOTrainer:
         self.rollout_steps = int(train_cfg.get("rollout_steps", default_steps))
 
         opt_cfg = train_cfg["optimizer"]
+        # 记下配置里的学习率。`load_checkpoint` 里的 load_state_dict 会把
+        # param_groups 整组恢复（含 lr），所以热启动时配置值会被 checkpoint 里
+        # 存的那个盖掉 —— 必须在加载之后按这份记录重新写回。见 load_checkpoint。
+        self._configured_lrs = [
+            float(opt_cfg["actor_lr"]),    # encoder（与 actor 共享策略组）
+            float(opt_cfg["actor_lr"]),    # actor
+            float(opt_cfg["critic_lr"]),   # critic
+        ]
         self.optimizer = torch.optim.Adam(
             [
-                {"params": self.model.encoder.parameters(), "lr": float(opt_cfg["actor_lr"])},
-                {"params": self.model.actor.parameters(), "lr": float(opt_cfg["actor_lr"])},
-                {"params": self.model.critic.parameters(), "lr": float(opt_cfg["critic_lr"])},
+                {"params": self.model.encoder.parameters(), "lr": self._configured_lrs[0]},
+                {"params": self.model.actor.parameters(), "lr": self._configured_lrs[1]},
+                {"params": self.model.critic.parameters(), "lr": self._configured_lrs[2]},
             ]
         )
         # Gradient clipping is applied per role by default: see the note in
@@ -261,69 +286,24 @@ class MAPPOTrainer:
         buffer = RolloutBuffer(self.gamma, self.gae_lambda, self.device, value_target=self.value_target)
         episode_rewards: list[float] = []
         episode_summaries: list[dict] = []
-        for _seed, steps, ep_reward, summary in results:
+        for _seed, steps, ep_reward, summary, ep_debug in results:
             buffer.steps.extend(steps)
             episode_rewards.append(ep_reward)
             episode_summaries.append(summary)
+            # Workers accumulate the same per-component telemetry the
+            # single-process loop does (shared accumulate_rollout_debug), so
+            # rollout_debug.jsonl stays available with n_workers > 1.
+            for key, value in ep_debug.items():
+                self._rollout_debug[key] += value
         self.last_episode_rewards = episode_rewards
         self.last_episode_summaries = episode_summaries
         return buffer
 
     def _reset_rollout_debug(self) -> None:
-        self._rollout_debug = {
-            "steps": 0.0,
-            "activated_edges": 0.0,
-            "generated_keys": 0.0,
-            "served_keys": 0.0,
-            "failed_keys": 0.0,
-            "waiting_keys": 0.0,
-            "qkp_utilization": 0.0,
-            "conflict_count": 0.0,
-            "arrived_keys": 0.0,
-            "reward_total": 0.0,
-            "reward_served": 0.0,
-            "reward_generated": 0.0,
-            "reward_dense": 0.0,
-            "reward_storage": 0.0,
-            "reward_keep_active": 0.0,
-            "reward_failed": 0.0,
-            "reward_waiting": 0.0,
-            "reward_switch": 0.0,
-            "reward_expired": 0.0,
-            "reward_conflict": 0.0,
-            # attribution split: how much of the served volume earned the full
-            # served reward (keys generated this slot) vs the discounted
-            # history-stock part vs nothing at all (pure stock service).
-            "attributed_served": 0.0,
-            "history_utilized": 0.0,
-        }
+        self._rollout_debug = new_rollout_debug()
 
     def _update_rollout_debug(self, info: dict, activated_count: int) -> None:
-        debug = self._rollout_debug
-        debug["steps"] += 1.0
-        debug["activated_edges"] += float(activated_count)
-        debug["generated_keys"] += float(info.get("generated_keys", 0.0))
-        debug["served_keys"] += float(info.get("served_keys", 0.0))
-        debug["failed_keys"] += float(info.get("failed_keys", 0.0))
-        debug["waiting_keys"] += float(info.get("waiting_keys", 0.0))
-        debug["qkp_utilization"] += float(info.get("qkp_utilization", 0.0))
-        debug["conflict_count"] += float(info.get("conflict_count", 0.0))
-        debug["arrived_keys"] += float(info.get("arrived_keys", 0.0))
-        detail = info.get("reward_detail")
-        if detail is not None:
-            debug["reward_total"] += float(detail.total)
-            debug["reward_served"] += float(detail.served_reward)
-            debug["reward_generated"] += float(detail.generated_reward)
-            debug["reward_dense"] += float(detail.dense_reward)
-            debug["reward_storage"] += float(detail.storage_reward)
-            debug["reward_keep_active"] += float(detail.keep_active_reward)
-            debug["reward_failed"] += float(detail.failed_penalty)
-            debug["reward_waiting"] += float(detail.waiting_penalty)
-            debug["reward_switch"] += float(detail.switch_penalty)
-            debug["reward_expired"] += float(detail.expired_key_penalty)
-            debug["reward_conflict"] += float(detail.conflict_penalty)
-            debug["attributed_served"] += float(detail.attributed_served)
-            debug["history_utilized"] += float(detail.history_utilized)
+        accumulate_rollout_debug(self._rollout_debug, info, activated_count)
 
     def _rollout_debug_record(self, stats: UpdateStats) -> dict:
         debug = dict(self._rollout_debug)
@@ -694,7 +674,21 @@ class MAPPOTrainer:
                 total_critic_grad += float(critic_grad_norm.detach().cpu())
                 total_batches += 1
 
-                if target_kl is not None and float(kl_mean.detach().cpu()) > target_kl:
+                # Trip on the RUNNING MEAN KL, not on a single minibatch's.
+                #
+                # With epochs=1 an early stop aborts the ENTIRE update, so a
+                # per-batch test is catastrophic: measured on a full-window run,
+                # one noisy batch out of ~45 ended an update after 18.4 s of a
+                # 302 s budget -- 4% of the work -- and `kl` could not reveal it
+                # because it averages only over the batches that ran (it printed
+                # 0.0092 while a single batch had exceeded 0.02). A mean still
+                # catches a genuinely drifting policy, and the minimum-batch
+                # guard stops the very first draw from deciding alone.
+                if (
+                    target_kl is not None
+                    and total_batches >= _MIN_BATCHES_BEFORE_KL_STOP
+                    and total_kl / total_batches > target_kl
+                ):
                     stop_for_kl = True
                     break
             if stop_for_kl:
@@ -741,6 +735,7 @@ class MAPPOTrainer:
             value_std=value_std,
             return_std=return_std,
             value_return_corr=value_return_corr,
+            n_minibatches=total_batches,
         )
         self.last_stats = stats
         return stats
@@ -1029,6 +1024,19 @@ class MAPPOTrainer:
             )
             / max(1, len(summaries)),
             "seeds": list(self._validation_seeds),
+            # Per-seed values, aligned with `seeds` above (envs and
+            # `_validation_seeds` are built from the same list, in order).
+            #
+            # Kept because the seed-to-seed spread dwarfs the effects being
+            # measured: single-seed success on a fixed scenario spans ~0.29-0.88,
+            # so a 12-seed MEAN has ~0.012 standard error and only same-seed
+            # PAIRING gets below that. Without this, comparing two runs' means
+            # silently folds the seed spread back in as noise -- measured at
+            # ~0.06 unpaired vs ~0.012 paired, which is the difference between
+            # seeing a 0.02 effect and not.
+            "per_seed_success": [
+                float(summary.get("success_rate", 0.0)) for summary in summaries
+            ],
         }
 
     # ------------------------------------------------------------------- control
@@ -1132,6 +1140,15 @@ class MAPPOTrainer:
         if data.optimizer_state is not None:
             try:
                 self.optimizer.load_state_dict(data.optimizer_state)
+                # load_state_dict 恢复的是**整组** param_groups，学习率也在里面。
+                # 不写回的话，checkpoint 里存的那个 lr 会盖掉配置值，而这一点
+                # 完全静默 —— 实测 BC 权重里三组都是 lr=0.001，于是
+                # `train.optimizer.actor_lr: 0.0003` 从未生效过，基于它做的
+                # 学习率实验（包括把 lr 改成 0.001 的那一组）全部是空跑：
+                # 训练指标与对照逐位相同，只有 rollout_s/update_s 不同。
+                # Adam 的一二阶矩（恢复时真正需要的部分）保持不动。
+                for group, lr in zip(self.optimizer.param_groups, self._configured_lrs):
+                    group["lr"] = lr
             except ValueError as exc:
                 # Pretraining checkpoints may use a single-parameter optimizer
                 # while the trainer uses encoder/actor/critic groups. The
@@ -1171,6 +1188,7 @@ class MAPPOTrainer:
                 f"critic_grad={stats.critic_grad_norm:.4f} "
                 f"V_std={stats.value_std:.3f} R_std={stats.return_std:.2f} "
                 f"corr(V,R)={stats.value_return_corr:.3f} "
+                f"nb={stats.n_minibatches} "
                 f"rollout_s={stats.rollout_s:.2f} update_s={stats.update_s:.2f}"
             )
 

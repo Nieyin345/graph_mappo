@@ -1,5 +1,8 @@
-"""Model modules."""
+"""Neural-network model components.
 
-from qkd_rl.rl.models.graph_mappo import GraphMAPPOActorCritic
+The initializer intentionally has no eager imports. Model modules are large and
+Torch-dependent; importing the namespace should stay cheap and avoid creating
+an unnecessary dependency edge between package discovery and the full model.
+"""
 
-__all__ = ["GraphMAPPOActorCritic"]
+__all__: list[str] = []

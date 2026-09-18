@@ -1,0 +1,22 @@
+# Speed optimized training overlay
+# CPU-only / 16GB RAM profile
+# Usage:
+# python scripts/train/train_graph_mappo.py --configs rl_algorithm.yaml train_full_rl.yaml train_speed_optimized.yaml
+
+train:
+  # Reduced parallel rollout pressure for CPU-only machines with limited RAM.
+  # Larger values can increase Python/object overhead and memory contention.
+  rollout_batch_envs: 4
+  episodes_per_update: 8
+  logging:
+    log_interval: 10
+    checkpoint_interval: 20
+    eval_interval: 20
+  ppo:
+    epochs: 1
+    minibatch_size: 512
+    batch_chunk: 1024
+
+runtime:
+  # Allow backend optimizations while keeping experiment behavior unchanged.
+  deterministic: false

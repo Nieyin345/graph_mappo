@@ -9,7 +9,7 @@ from torch import nn
 from qkd_rl.env.action_space import NodeActionSpace
 from qkd_rl.env.graph_builder import GraphObservation
 from qkd_rl.rl.models.history_encoder import HistoryEncoder
-from qkd_rl.rl.models.mlp import build_mlp, masked_logits
+from qkd_rl.rl.models.mlp import build_mlp
 
 
 @dataclass
@@ -36,7 +36,7 @@ class ActorCriticOutput:
     # (edge_id -> scalar). This is the model's global, cross-node-comparable
     # estimate of edge quality; the priority-matching resolver uses it instead
     # of per-node log probabilities, which are only comparable within a node.
-    edge_scores: dict[str, torch.Tensor] | None = None
+    edge_scores: dict[tuple[str, str], torch.Tensor] | None = None
 
 
 @dataclass
@@ -47,7 +47,7 @@ class BatchedActorCriticOutput:
     node_orders: list[list[str]]
     lengths: list[list[int]]
     values: list[torch.Tensor]
-    edge_score_maps: list[dict[str, torch.Tensor]]
+    edge_score_maps: list[dict[tuple[str, str], torch.Tensor]]
     # Per graph: (src_local_idx, dst_local_idx, scores) for the directed edge
     # candidates, in the same candidate order as ``edge_score_maps``. The
     # matching sampler only needs vectors, so handing it these skips rebuilding
@@ -135,6 +135,38 @@ def observation_to_tensors(
     )
 
 
+def _segment_ids(sizes: list[int], device: torch.device) -> torch.Tensor:
+    """Graph id per row for a list of contiguous segment sizes."""
+    if not sizes:
+        return torch.zeros(0, dtype=torch.long, device=device)
+    return torch.repeat_interleave(
+        torch.arange(len(sizes), device=device),
+        torch.tensor(sizes, dtype=torch.long, device=device),
+    )
+
+
+def _segment_sum(
+    x: torch.Tensor, gid: torch.Tensor, n_segments: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sum the rows of ``x`` grouped by ``gid``.
+
+    Replaces the ``x[start:end]`` + ``mean(dim=0)`` idiom used for per-graph
+    pooling. A slice of a gradient-carrying tensor records a ``SliceBackward``,
+    whose backward allocates ``zeros_like(input)`` for the WHOLE input and
+    copies the slice's gradient into it -- so pooling N graphs out of one
+    ``[E, H]`` edge tensor memsets N full-size buffers. ``index_add_`` into a
+    ``[n_segments, H]`` buffer needs no such thing: the only zero buffer in its
+    backward is that same small one.
+
+    Returns ``(sums, counts)``; both are zero for an empty segment.
+    """
+    if x.size(0) == 0:
+        return x.new_zeros((n_segments, x.size(1))), x.new_zeros(n_segments)
+    sums = x.new_zeros((n_segments, x.size(1))).index_add_(0, gid, x)
+    counts = x.new_zeros(n_segments).index_add_(0, gid, torch.ones_like(x[:, 0]))
+    return sums, counts
+
+
 class EdgeConditionedGraphLayer(nn.Module):
     def __init__(
         self,
@@ -195,52 +227,80 @@ class EdgeConditionedGraphLayer(nn.Module):
         self,
         node_emb: torch.Tensor,
         edge_index: torch.Tensor,
-        edge_attr: torch.Tensor,
+        phys_emb: torch.Tensor,
+        demand_emb: torch.Tensor,
         num_physical_directed: int,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """One message-passing step.
+
+        The two edge types arrive as separate tensors rather than as one
+        concatenated tensor plus a split point. That is not cosmetic: a slice of
+        a tensor that requires grad costs a ``SliceBackward``, whose backward
+        materialises ``zeros_like(input)`` for the WHOLE input and copies the
+        slice's gradient into it. With a single ``[E, H]`` edge tensor (E ~ 100k
+        for a minibatch step) each slice therefore zeroed ~50 MB, and this layer
+        took six slices per layer -- profiled at 11.2 s of a 165 s update, 32 GB
+        of memset. Kept apart, the same math costs no slice at all. LayerNorm is
+        row-wise, so normalising the two parts separately is exactly equivalent.
+        """
         src, dst = edge_index
+        n_phys = int(num_physical_directed)
+        src_p, dst_p = src[:n_phys], dst[:n_phys]
+        src_d, dst_d = src[n_phys:], dst[n_phys:]
+
         aggregated = torch.zeros_like(node_emb)
-        # 物理边位于张量前 num_physical_directed 行，逻辑请求边随后；两类边
-        # 各自独立聚合并按各自的邻居数归一化再相加，保证两类信息互不稀释。
-        for message_mlp, start, end in (
-            (self.message_mlp_phys, 0, int(num_physical_directed)),
-            (self.message_mlp_demand, int(num_physical_directed), edge_index.size(1)),
-        ):
-            if start >= end:
-                continue
-            if not self.fuse_physical_to_node and start == 0:
-                continue
-            src_s, dst_s = src[start:end], dst[start:end]
-            messages = message_mlp(torch.cat([node_emb[src_s], edge_attr[start:end]], dim=-1))
-            # mean = sum / count via index_add_: scatter_reduce_("mean") is
-            # measurably slower on CUDA (~26% in micro-benchmark) and can be
-            # numerically unstable for small graphs; the two-kernel version is
-            # exactly sum / count with clamp keeping isolated nodes at 0.
-            agg = torch.zeros_like(node_emb, dtype=messages.dtype)
-            counts = torch.zeros(node_emb.size(0), device=messages.device, dtype=messages.dtype)
-            counts.index_add_(0, dst_s, torch.ones_like(messages[:, 0]))
-            agg.index_add_(0, dst_s, messages)
-            agg = agg / counts.clamp(min=1.0).unsqueeze(-1)
-            aggregated = aggregated + agg
+        # 物理边与逻辑请求边各自独立聚合并按各自的邻居数归一化再相加，
+        # 保证两类信息互不稀释。
+        if self.fuse_physical_to_node and n_phys > 0:
+            aggregated = aggregated + self._node_message(
+                self.message_mlp_phys, node_emb, src_p, dst_p, phys_emb
+            )
+        if demand_emb.size(0) > 0:
+            aggregated = aggregated + self._node_message(
+                self.message_mlp_demand, node_emb, src_d, dst_d, demand_emb
+            )
         updated = self.update(torch.cat([node_emb, aggregated], dim=-1))
         new_node = self.norm(updated)
         # 节点→边：边嵌入吸收两端点的最新上下文（残差 + LayerNorm）。
         # 需求信息从需求边 → 端点节点 → 物理边逐层"落"到边嵌入上，
         # 物理边之间通过节点中介完成信息融合（边→节点→边）。
-        edge_new = edge_attr.clone()
-        for edge_mlp, start, end in (
-            (self.edge_update_mlp_phys, 0, int(num_physical_directed)),
-            (self.edge_update_mlp_demand, int(num_physical_directed), edge_index.size(1)),
-        ):
-            if start >= end:
-                continue
-            src_s, dst_s = src[start:end], dst[start:end]
-            msg = edge_mlp(
-                torch.cat([edge_attr[start:end], new_node[src_s], new_node[dst_s]], dim=-1)
-            )
-            edge_new[start:end] = msg + edge_attr[start:end]
-        edge_new = self.edge_norm(edge_new)
-        return new_node, edge_new
+        new_phys = self._edge_message(self.edge_update_mlp_phys, phys_emb, new_node, src_p, dst_p)
+        new_demand = self._edge_message(
+            self.edge_update_mlp_demand, demand_emb, new_node, src_d, dst_d
+        )
+        return new_node, new_phys, new_demand
+
+    @staticmethod
+    def _node_message(
+        message_mlp: nn.Module,
+        node_emb: torch.Tensor,
+        src: torch.Tensor,
+        dst: torch.Tensor,
+        edge_emb: torch.Tensor,
+    ) -> torch.Tensor:
+        messages = message_mlp(torch.cat([node_emb[src], edge_emb], dim=-1))
+        # mean = sum / count via index_add_: scatter_reduce_("mean") is
+        # measurably slower on CUDA (~26% in micro-benchmark) and can be
+        # numerically unstable for small graphs; the two-kernel version is
+        # exactly sum / count with clamp keeping isolated nodes at 0.
+        agg = torch.zeros_like(node_emb, dtype=messages.dtype)
+        counts = torch.zeros(node_emb.size(0), device=messages.device, dtype=messages.dtype)
+        counts.index_add_(0, dst, torch.ones_like(messages[:, 0]))
+        agg.index_add_(0, dst, messages)
+        return agg / counts.clamp(min=1.0).unsqueeze(-1)
+
+    def _edge_message(
+        self,
+        edge_mlp: nn.Module,
+        edge_emb: torch.Tensor,
+        new_node: torch.Tensor,
+        src: torch.Tensor,
+        dst: torch.Tensor,
+    ) -> torch.Tensor:
+        if edge_emb.size(0) == 0:
+            return edge_emb
+        msg = edge_mlp(torch.cat([edge_emb, new_node[src], new_node[dst]], dim=-1))
+        return self.edge_norm(msg + edge_emb)
 
 
 class GraphEncoder(nn.Module):
@@ -254,6 +314,8 @@ class GraphEncoder(nn.Module):
         super().__init__()
         self.edge_dim = int(edge_dim)
         hidden_dim = int(config["hidden_dim"])
+        # Needed by project_edges to size the empty-type placeholder.
+        self.hidden_dim = hidden_dim
         activation = config.get("activation", "relu")
         dropout = float(config.get("dropout", 0.0))
         layer_norm = bool(config.get("layer_norm", True))
@@ -278,27 +340,67 @@ class GraphEncoder(nn.Module):
             ]
         )
 
+    def project_edges(
+        self, edge_features: torch.Tensor, num_phys: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Project the two edge types separately, avoiding a split later.
+
+        Slicing the *input* is free -- it is a leaf produced from numpy and
+        carries no gradient -- so the type split happens here, once, and the two
+        tensors then travel side by side through every layer.
+        """
+        hidden = self.hidden_dim
+        n_edges = edge_features.size(0)
+        phys = (
+            self.edge_proj_phys(edge_features[:num_phys])
+            if num_phys > 0
+            else edge_features.new_zeros((0, hidden))
+        )
+        demand = (
+            self.edge_proj_demand(edge_features[num_phys:])
+            if num_phys < n_edges
+            else edge_features.new_zeros((0, hidden))
+        )
+        return phys, demand
+
+    def run_layers(
+        self,
+        node_emb: torch.Tensor,
+        edge_index: torch.Tensor,
+        phys_emb: torch.Tensor,
+        demand_emb: torch.Tensor,
+        num_phys: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        for layer in self.layers:
+            next_node_emb, phys_emb, demand_emb = layer(
+                node_emb, edge_index, phys_emb, demand_emb, num_phys
+            )
+            node_emb = node_emb + next_node_emb if self.residual else next_node_emb
+        return node_emb, phys_emb, demand_emb
+
+    @staticmethod
+    def merge_edges(phys_emb: torch.Tensor, demand_emb: torch.Tensor) -> torch.Tensor:
+        """Re-join the two edge types for consumers that need a single indexable
+        tensor (the actor gathers candidate arcs out of it).
+
+        One ``torch.cat`` per forward instead of one per layer: ``CatBackward``
+        hands each input back a *view* of the output gradient, so unlike a slice
+        it does not memset a full-size buffer.
+        """
+        if phys_emb.size(0) == 0:
+            return demand_emb
+        if demand_emb.size(0) == 0:
+            return phys_emb
+        return torch.cat([phys_emb, demand_emb], dim=0)
+
     def forward(self, tensors: GraphTensors) -> tuple[torch.Tensor, torch.Tensor]:
         node_emb = self.node_proj(tensors.node_features)
         num_phys = int(tensors.num_physical_directed)
-        # Skip the empty type's projection kernel (common when a scenario has
-        # no demand edges) instead of launching a no-op GEMM every forward.
-        edge_parts: list[torch.Tensor] = []
-        if num_phys > 0:
-            edge_parts.append(self.edge_proj_phys(tensors.edge_features_directed[:num_phys]))
-        if num_phys < tensors.edge_features_directed.size(0):
-            edge_parts.append(self.edge_proj_demand(tensors.edge_features_directed[num_phys:]))
-        edge_emb = (
-            torch.cat(edge_parts, dim=0)
-            if edge_parts
-            else tensors.edge_features_directed.new_zeros((0, node_emb.size(1)))
+        phys_emb, demand_emb = self.project_edges(tensors.edge_features_directed, num_phys)
+        node_emb, phys_emb, demand_emb = self.run_layers(
+            node_emb, tensors.edge_index, phys_emb, demand_emb, num_phys
         )
-        for layer in self.layers:
-            next_node_emb, edge_emb = layer(
-                node_emb, tensors.edge_index, edge_emb, tensors.num_physical_directed
-            )
-            node_emb = node_emb + next_node_emb if self.residual else next_node_emb
-        return node_emb, edge_emb
+        return node_emb, self.merge_edges(phys_emb, demand_emb)
 
 
 class SharedNodeActor(nn.Module):
@@ -553,7 +655,6 @@ class SharedNodeActor(nn.Module):
         # when the observation's candidate lists were filtered at graph build).
         if obs.node_ids:
             n_nodes = len(obs.node_ids)
-            n_edge = edge_scores.size(0)
             all_scores = (
                 torch.cat([edge_scores, idle_scores])
                 if idle_scores.numel()
@@ -879,19 +980,11 @@ class GraphMAPPOActorCritic(nn.Module):
         edge_features_p = edge_features_all[perm]
 
         node_emb = self.encoder.node_proj(node_features_all)
-        edge_parts: list[torch.Tensor] = []
-        if num_phys_total > 0:
-            edge_parts.append(self.encoder.edge_proj_phys(edge_features_p[:num_phys_total]))
-        if num_phys_total < edge_features_p.size(0):
-            edge_parts.append(self.encoder.edge_proj_demand(edge_features_p[num_phys_total:]))
-        edge_emb = (
-            torch.cat(edge_parts, dim=0)
-            if edge_parts
-            else edge_features_p.new_zeros((0, node_emb.size(1)))
+        phys_emb, demand_emb = self.encoder.project_edges(edge_features_p, num_phys_total)
+        node_emb, phys_emb, demand_emb = self.encoder.run_layers(
+            node_emb, edge_index_p, phys_emb, demand_emb, num_phys_total
         )
-        for layer in self.encoder.layers:
-            next_node_emb, edge_emb = layer(node_emb, edge_index_p, edge_emb, num_phys_total)
-            node_emb = node_emb + next_node_emb if self.encoder.residual else next_node_emb
+        edge_emb = self.encoder.merge_edges(phys_emb, demand_emb)
 
         # Actor: merge per-graph candidate plans into one batched scoring pass.
         plans = []
@@ -1012,42 +1105,34 @@ class GraphMAPPOActorCritic(nn.Module):
         # tiny MLP per graph (the per-graph pooling math is identical to
         # ``GlobalCritic.forward``, only the MLP launch is merged).
         values: list[torch.Tensor] = []
-        cum_phys = 0
-        cum_demand = 0
         hidden = node_emb.size(1)
         pooling = self.critic.pooling
         value_inputs: list[torch.Tensor] = []
+        n_graphs = len(tensors_list)
+        n_nodes = [int(t.node_features.size(0)) for t in tensors_list]
+        # Segment means instead of per-graph slices -- see _segment_sum. An empty
+        # type yields an all-zero row, which is exactly the placeholder the
+        # previous code built by hand.
+        node_sum, node_cnt = _segment_sum(node_emb, _segment_ids(n_nodes, device), n_graphs)
+        phys_sum, phys_cnt = _segment_sum(phys_emb, _segment_ids(n_phys, device), n_graphs)
+        dem_sum, dem_cnt = _segment_sum(demand_emb, _segment_ids(n_demand, device), n_graphs)
         for i in range(len(tensors_list)):
-            n_i = int(tensors_list[i].node_features.size(0))
-            node_pool = node_emb[node_off[i]:node_off[i] + n_i].mean(dim=0)
-            phys_slice = edge_emb[cum_phys:cum_phys + n_phys[i]]
-            demand_slice = edge_emb[num_phys_total + cum_demand:num_phys_total + cum_demand + n_demand[i]]
+            node_pool = node_sum[i] / node_cnt[i].clamp(min=1.0)
             if pooling == "typed_mean":
-                if n_phys[i] > 0:
-                    physical_pool = phys_slice.mean(dim=0)
-                else:
-                    physical_pool = torch.zeros(hidden, device=edge_emb.device, dtype=edge_emb.dtype)
-                if n_demand[i] > 0:
-                    demand_pool = demand_slice.mean(dim=0)
-                else:
-                    demand_pool = torch.zeros(hidden, device=edge_emb.device, dtype=edge_emb.dtype)
+                physical_pool = phys_sum[i] / phys_cnt[i].clamp(min=1.0)
+                demand_pool = dem_sum[i] / dem_cnt[i].clamp(min=1.0)
                 scale_counts = torch.log1p(
                     torch.tensor(
-                        [n_i, n_phys[i] // 2, n_demand[i] // 2],
+                        [n_nodes[i], n_phys[i] // 2, n_demand[i] // 2],
                         dtype=torch.float32,
                         device=edge_emb.device,
                     )
                 )
                 value_inputs.append(torch.cat([node_pool, physical_pool, demand_pool, scale_counts], dim=-1))
             else:
-                if n_phys[i] or n_demand[i]:
-                    edge_i = torch.cat([phys_slice, demand_slice], dim=0)
-                    edge_pool = edge_i.mean(dim=0)
-                else:
-                    edge_pool = torch.zeros(hidden, device=edge_emb.device, dtype=edge_emb.dtype)
+                n_edge_i = n_phys[i] + n_demand[i]
+                edge_pool = (phys_sum[i] + dem_sum[i]) / max(n_edge_i, 1)
                 value_inputs.append(torch.cat([node_pool, edge_pool], dim=-1))
-            cum_phys += n_phys[i]
-            cum_demand += n_demand[i]
         if value_inputs:
             values_all = self.critic.value_head(torch.stack(value_inputs, dim=0)).squeeze(-1)
             values = [values_all[i] for i in range(len(tensors_list))]

@@ -1,5 +1,5 @@
 # Unified training mode profiles. Select with:
-#   python scripts/rl/train_graph_mappo.py --mode continuous
+#   python scripts/train/train_graph_mappo.py --mode continuous
 train_profiles:
   random_episode:
     env:

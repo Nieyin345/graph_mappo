@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-import random
 from bisect import bisect_right
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from qkd_rl.core.types import KeyRequest
 from qkd_rl.env.qkp import LinkQKPPool
+
+if TYPE_CHECKING:
+    from qkd_rl.env.routing import RoutingPolicy
 
 
 @dataclass
@@ -475,6 +478,3 @@ class RequestHistoryTracker:
                 nprefix = self._node_prefix.setdefault(nkey, [0.0])
                 ntimes.append(t)
                 nprefix.append(nprefix[-1] + amount)
-
-
-from qkd_rl.env.routing import RoutingPolicy  # noqa: E402

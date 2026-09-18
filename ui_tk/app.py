@@ -15,8 +15,21 @@ import matplotlib
 matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
-from ui_tk.utils.config_manager import get_profile_keys, list_checkpoints, get_baselines, load_baselines_config, save_baselines_config
+from ui_tk.utils.config_manager import (
+    get_profile_keys, get_profile, list_checkpoints, get_baselines,
+    load_baselines_config, save_baselines_config,
+)
 from ui_tk.utils.train_manager import TrainProcess, generate_command, register_train_process
+
+
+def _deep_merge_profile(base: dict, override: dict) -> dict:
+    result = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge_profile(result[key], value)
+        else:
+            result[key] = value
+    return result
 
 
 class QKDRLApp:
@@ -97,7 +110,7 @@ class QKDRLApp:
         ttk.Label(sf, text="Mode", font=("", 10, "bold")).grid(row=r, column=0, columnspan=2, sticky="w", pady=(6,2)); r+=1
         ttk.Label(sf, text="mode:").grid(row=r, column=0, sticky="w", padx=5, pady=2)
         self.combo_mode = ttk.Combobox(sf, values=get_profile_keys(), state="readonly", width=26)
-        self.combo_mode.set("fixed_episode")
+        self.combo_mode.set("fixed_day")
         self.combo_mode.bind("<<ComboboxSelected>>", self._on_mode_change)
         self.combo_mode.grid(row=r, column=1, sticky="ew", padx=5, pady=2); r+=1
         ttk.Label(sf, text="run name:").grid(row=r, column=0, sticky="w", padx=5, pady=2)
@@ -162,9 +175,8 @@ class QKDRLApp:
 
     def _load_mode_config(self):
         try:
-            profile = self.combo_mode.get(); p = ROOT/"configs"/"modes"/f"{profile}.yaml"
-            if not p.is_file(): return
-            c = yaml.safe_load(open(p, encoding="utf-8")) or {}
+            profile = self.combo_mode.get()
+            c = get_profile(profile)
             tr = c.get("train", {})
             for k in ["num_updates","rollout_steps","episodes_per_update","gamma"]:
                 if k in tr: self.pv[k].set(str(tr[k]))
@@ -185,8 +197,6 @@ class QKDRLApp:
             if "start" in ts: self.pv["temp_start"].set(str(ts["start"]))
             if "end" in ts: self.pv["temp_end"].set(str(ts["end"]))
             if "updates" in ts: self.pv["temp_updates"].set(str(ts["updates"]))
-            env = c.get("env", {})
-            if "episode_steps" in env: self.pv["rollout_steps"].set(str(env["episode_steps"]))
             feats = c.get("features", {})
             self.hist_var.set(feats.get("history_encoder", {}).get("enabled", True))
         except Exception as e: self.t_st.configure(text=f"load err: {e}", foreground="red")
@@ -195,7 +205,6 @@ class QKDRLApp:
         try:
             profile = self.combo_mode.get()
             cfg = {
-                "env": {"episode_steps": int(self.pv["rollout_steps"].get()), "episode_start_mode": "random_day", "day_steps": 1440},
                 "train": {"num_updates": int(self.pv["num_updates"].get()), "rollout_steps": int(self.pv["rollout_steps"].get()),
                     "episodes_per_update": int(self.pv["episodes_per_update"].get()), "episode_steps_fixed": True,
                     "n_rollout_workers": 1, "rollout_batch": True, "gamma": float(self.pv["gamma"].get()),
@@ -220,7 +229,17 @@ class QKDRLApp:
                     "physical_edge": {"include_qkp_level": False, "include_available": False, "include_activated": False},
                     "demand_edge": {"include_pending_wait_buckets": True}}}
             else: cfg["features"] = {"history_encoder": {"enabled": False}}
-            yaml.safe_dump(cfg, open(ROOT/"configs"/"modes"/f"{profile}.yaml", "w", encoding="utf-8"), sort_keys=False, allow_unicode=True, indent=2)
+            path = ROOT / "configs" / "train_profiles.yaml"
+            all_profiles = yaml.safe_load(path.read_text(encoding="utf-8")) or {"train_profiles": {}}
+            profiles = all_profiles.setdefault("train_profiles", {})
+            current = profiles.get(profile, {})
+            # Preserve mode-specific fields (e.g. continuous_session_days,
+            # curriculum stages, demand-edge model settings) and update only
+            # values exposed by this UI.
+            current = _deep_merge_profile(current, cfg)
+            profiles[profile] = current
+            with path.open("w", encoding="utf-8") as f:
+                yaml.safe_dump(all_profiles, f, sort_keys=False, allow_unicode=True, indent=2)
             self.t_st.configure(text="saved", foreground="green")
             self.root.after(2000, lambda: self.t_st.configure(text=""))
         except Exception as e: self.t_st.configure(text=f"save err: {e}", foreground="red")
@@ -236,9 +255,8 @@ class QKDRLApp:
             if not name: messagebox.showerror("err", "enter run name"); return
             self._save_mode()
             profile = self.combo_mode.get(); ckpt = self.ckpt_var.get().strip() or None
-            known = {"random_episode", "continuous", "fixed_day", "curriculum", "demand_edge"}
-            mode = profile if profile in known else "random_episode"
-            cmd = generate_command(mode, name, config_files=[f"modes/{profile}.yaml"], checkpoint=ckpt)
+            mode = profile if profile in get_profile_keys() else "random_episode"
+            cmd = generate_command(mode, name, checkpoint=ckpt)
             od = ROOT/"outputs"/name; od.mkdir(parents=True, exist_ok=True)
             self.train_proc = TrainProcess(name, od); register_train_process(name, self.train_proc)
             self._clear_console(); self._append_console(f"start: {name}")
@@ -392,7 +410,6 @@ class QKDRLApp:
             ttk.Checkbutton(sf, text=label, variable=enabled, onvalue=1, offvalue=0).grid(row=algo_row, column=0, sticky="w", padx=4)
             self.e_algo_vars[bl] = {"_enabled": enabled, "_type": "baseline"}
             params = [(k, v) for k, v in bl_yaml.items() if k not in ("enabled", "_enabled", "_type")]
-            total_cols = _param_cols(len(params))
             col = 1
             for i, (k, v) in enumerate(params):
                 # wrap to next row every PARAMS_PER_ROW params

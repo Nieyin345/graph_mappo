@@ -41,7 +41,6 @@ load_validation_profile = _tp_.load_validation_profile
 from qkd_rl.core.config import ConfigValidator
 from qkd_rl.env.factory import build_env_from_config
 from qkd_rl.env.action_space import NodeActionSpace
-from qkd_rl.baselines.greedy_relay_diffusion import GreedyRelayDiffusionPolicyV3
 
 
 DEFAULT_W = [1.0, 10.0, 1.0, 0.5, 0.2]  # rate, importance, completion, keep, switch
@@ -198,7 +197,7 @@ def main():
 
     print(f"\nBEST weights real SR = {best_f:.4f} -> w={tuple(round(x,3) for x in best_w)} "
           f"({seed=}, {start_seed=})")
-    print(f"(default greedy V3 = 0.2874 on seed7)")
+    print("(default greedy V3 = 0.2874 on seed7)")
 
 
 if __name__ == "__main__":

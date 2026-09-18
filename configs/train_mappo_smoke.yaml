@@ -1,18 +1,24 @@
 # Fixed-scenario smoke run: validate model + reward design on ONE scenario.
 #
-#   env: day 0 only (episode_start_day=0, single 1440-step episode)
+#   env: day 0 only (episode_start_day=0, single 360-step episode)
 #   requests: fixed across updates (fixed_episode_seed -> seeds 7..14 replay
 #     every update), so the per-update training mean_success_rate is directly
 #     comparable and isolates learning in one scenario.
 #
+#   NOTE (v10): episode_steps == rollout_steps == 360 (unified). The env
+#     terminates naturally at 360 (env.terminated = steps >= episode_steps),
+#     so GAE never bootstraps a truncated horizon — no critic-dependent
+#     last_value pollution. The shorter window also lowers memory/GPU load.
+#     Training success-rate is computed over this 360-step window only.
+#
 # Usage:
-#   python scripts/rl/train_graph_mappo.py --configs train_mappo_smoke.yaml \
+#   python scripts/train/train_graph_mappo.py --configs train_mappo_smoke.yaml \
 #       --checkpoint outputs/supervised_pg_phased/supervised_pg_phased_latest.pt \
 #       --run-name rl_smoke_day0
 env:
   episode_start_mode: fixed
   episode_start_day: 0
-  episode_steps: 1440
+  episode_steps: 360
   continuous: false
   activation_window_start_day: 0
   activation_window_days: 0
@@ -36,10 +42,17 @@ train:
   rollout_worker_device: cpu
   rollout_batch: true
   temperature_schedule:
-    start: 1.2
+    start: 1.05
     end: 1.0
     updates: 60
   ppo:
+    # v9: BC warm-start is already near-expert (0.862), so high-temperature
+    # exploration (1.2) only pushed the policy toward uniform (entropy
+    # 3.33->4.01) and every seed regressed slightly. Use mild exploration.
+    # minibatch 1024 gave only ~3 grad steps/update (2880/1024) — too few to
+    # learn; 256 gives ~11 steps. target_kl 0.02 tripped KL-stop immediately.
+    minibatch_size: 256
+    target_kl: 0.03
     # 8GB laptop GPU: the 512-graph block-diagonal forward OOMs; 256 halves
     # the peak update memory while keeping the same math (pure chunk size).
     batch_chunk: 256

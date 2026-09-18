@@ -18,15 +18,16 @@
 # the reward/algorithm under test.
 #
 # `n_rollout_workers: 1` + `rollout_batch: true` is the single-process lockstep
-# path: it is the only path that fills rollout_debug.jsonl with the per-component
-# reward breakdown, and it avoids shipping ~1 MB observations through worker
-# temp files every update.
+# path. The worker path now also fills rollout_debug.jsonl (shared
+# accumulate_rollout_debug); this preset keeps 1 worker because a small fixed
+# scenario gains nothing from process parallelism and lockstep keeps its
+# numbers directly comparable across runs.
 #
 # This is a debugging preset. Do NOT quote its absolute numbers as results: the
 # horizon is shorter than the real training config.
 #
 # Usage:
-#   python scripts/rl/train_graph_mappo.py --configs train_diag_fast.yaml \
+#   python scripts/train/train_graph_mappo.py --configs train_diag_fast.yaml \
 #       --checkpoint outputs/supervised_pg_phased/supervised_pg_phased_latest.pt \
 #       --run-name diag_bc --num-updates 12
 env:

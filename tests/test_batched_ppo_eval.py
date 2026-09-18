@@ -129,3 +129,47 @@ def test_batched_gradients_match_single(device):
         assert torch.allclose(
             grads_single[name], grads_batched[name], rtol=1.0e-2, atol=5.0e-3
         ), name
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"] if torch.cuda.is_available() else ["cpu"])
+def test_batch_chunk_size_does_not_change_ppo_loss(device):
+    """``ppo.batch_chunk`` must be a pure performance knob, not a semantic one.
+
+    The PPO update slices the minibatch into chunks and runs one block-diagonal
+    forward per chunk, accumulating actor/critic/entropy/KL sums into shared
+    accumulators before dividing by the total step count. So the chunk size only
+    decides how many graphs share one forward -- the arithmetic is identical.
+
+    That matters because ``configs/rl_algorithm.yaml`` is merged AFTER
+    ``train_mappo.yaml`` and silently overrode its tuned ``batch_chunk: 64`` with
+    ``512`` (1.35x slower and far noisier, see the comment there). This test pins
+    the equivalence so the two files cannot drift apart again unnoticed.
+
+    Chunk boundaries do change the BLAS reduction order, so this compares with a
+    float32-appropriate tolerance rather than bit-exactness.
+    """
+    torch.set_num_threads(1)
+    env, policy = _build(device)
+    pairs = _collect(env, policy, 5, seed=3)
+    policy.model.train()
+
+    def total_loss(chunk_size: int):
+        policy.model.zero_grad()
+        loss = torch.zeros((), dtype=torch.float32, device=policy.device)
+        for start in range(0, len(pairs), chunk_size):
+            chunk = pairs[start : start + chunk_size]
+            results = policy.evaluate_actions_batched(
+                [obs for obs, _actions, _matched in chunk],
+                [actions for _obs, actions, _matched in chunk],
+                [matched for _obs, _actions, matched in chunk],
+            )
+            for (_obs, _actions, _matched), (lp, _ent, val) in zip(chunk, results):
+                loss = loss + val + sum(lp.values()).sum()
+        return loss
+
+    ref = total_loss(len(pairs))  # one chunk = everything at once
+    for chunk_size in (1, 2, 3):
+        got = total_loss(chunk_size)
+        assert torch.allclose(ref, got, rtol=1.0e-3, atol=1.0e-3), (
+            f"batch_chunk={chunk_size} changed the PPO loss: {ref.item()} vs {got.item()}"
+        )

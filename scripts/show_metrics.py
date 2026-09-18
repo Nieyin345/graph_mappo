@@ -18,13 +18,16 @@ DEFAULT_COLS = [
     ("elapsed_s", "{:>8.1f}"),
     ("mean_success_rate", "{:>7.4f}"),
     ("eval_validation", "{:>7.4f}"),
+    ("validation_success_rate", "{:>7.4f}"),
     ("mean_served_keys", "{:>8.0f}"),
     ("value_std", "{:>7.4f}"),
     ("return_std", "{:>8.3f}"),
     ("value_return_corr", "{:>6.3f}"),
-    ("mean_kl", "{:>8.5f}"),
+    # The trainer writes these as `kl` / `entropy`, not `mean_kl` /
+    # `mean_entropy` -- listing the mean_* spelling silently showed nothing.
+    ("kl", "{:>9.5f}"),
     ("mean_ratio", "{:>7.4f}"),
-    ("mean_entropy", "{:>7.3f}"),
+    ("entropy", "{:>7.3f}"),
     ("actor_grad_norm", "{:>7.3f}"),
     ("critic_grad_norm", "{:>7.3f}"),
 ]

@@ -41,4 +41,4 @@ if [ ! -f "$DATASET_DIR/link_data.h5" ]; then
 fi
 
 echo "Setup complete."
-echo "Run training with: conda run -n pytorch python $REPO_DIR/scripts/rl/train_graph_mappo.py --mode random_episode"
+echo "Run training with: conda run -n pytorch python $REPO_DIR/scripts/train/train_graph_mappo.py --mode random_episode"

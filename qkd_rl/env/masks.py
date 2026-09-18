@@ -70,6 +70,8 @@ class ActionMaskBuilder:
             for node_id in self.action_space.node_ids
         }
         self._edge_type: dict[str, str] = {}
+        # Cached allowed-link-type vector (static for the run, see build()).
+        self._type_ok: np.ndarray | None = None
         # All candidate positions across nodes in one flat array so build() is
         # a few vectorized ops instead of per-node numpy work (8625 candidates).
         self._flat_pos = np.concatenate([self._node_pos[nid] for nid in self.action_space.node_ids])
@@ -121,13 +123,21 @@ class ActionMaskBuilder:
                 rates[i] = window.rates[0]
         type_ok: np.ndarray | None = None
         if self._mask_types:
-            type_ok = np.zeros(n, dtype=bool)
-            for edge_id in self._ref_edges:
-                link_type = self._edge_type.get(edge_id)
-                if link_type is None:
-                    link_type = windows[edge_id].link_type.value
-                    self._edge_type[edge_id] = link_type
-                type_ok[self._edge_pos[edge_id]] = link_type in self.allowed_link_types
+            # Link types are static for the whole run, so the allowed-type
+            # vector is computed once and cached. It used to be rebuilt every
+            # step with a per-edge dict probe over all ~150 referenced edges;
+            # profiling put masks.build at 14% of env.step, and this loop was
+            # the largest single contributor to it.
+            if self._type_ok is None:
+                type_ok = np.zeros(n, dtype=bool)
+                for edge_id in self._ref_edges:
+                    link_type = self._edge_type.get(edge_id)
+                    if link_type is None:
+                        link_type = windows[edge_id].link_type.value
+                        self._edge_type[edge_id] = link_type
+                    type_ok[self._edge_pos[edge_id]] = link_type in self.allowed_link_types
+                self._type_ok = type_ok
+            type_ok = self._type_ok
         cap_left: np.ndarray | None = None
         if self._mask_full:
             cap_left = np.array([qkp.get_capacity_left(edge_id) > 0 for edge_id in self._ref_edges], dtype=bool)

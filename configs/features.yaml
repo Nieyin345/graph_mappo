@@ -44,8 +44,11 @@ features:
     # 给模型显式的"哪条边在请求通路上"的结构提示，帮助可学习扩散快速对齐。
     include_req_hop: true
     relay_importance:
-      max_path_links: 3
-      hop_decay_factor: 0.25
+      # 窗口 8 / 衰减 0.8：诊断场景需求路径平均 6.2 跳，旧默认 3/0.25 让 72% 的
+      # （请求,槽）路径一跳都拿不到分（探针 Q 实锤，见 docs/训练诊断记录.md）。
+      # 放开后 imp 覆盖率 7%→50%，专家 0.7801→0.7886。
+      max_path_links: 8
+      hop_decay_factor: 0.8
       wait_urgency_tau_ratio: 0.8
       ignore_consumption: false
       include_stocked_unavailable: true

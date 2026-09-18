@@ -1,36 +1,35 @@
-# configs 配置目录索引
+# configs 閰嶇疆鐩綍绱㈠紩
 
-本目录的 yaml 分三类：**默认加载链**（任何入口都会加载）、**场景/窗口覆盖**（训练与基线脚本显式加载）、**独立工作流**。所有文件都被代码或脚本引用，**不要随意删除**（删除会破坏引用它的脚本/测试）；如需精简请先确认引用方（见下表"主要使用者"）。
+鏈洰褰曠殑 yaml 鍒嗕笁绫伙細**榛樿鍔犺浇閾?*锛堜换浣曞叆鍙ｉ兘浼氬姞杞斤級銆?*鍦烘櫙/绐楀彛瑕嗙洊**锛堣缁冧笌鍩虹嚎鑴氭湰鏄惧紡鍔犺浇锛夈€?*鐙珛宸ヤ綔娴?*銆傛墍鏈夋枃浠堕兘琚唬鐮佹垨鑴氭湰寮曠敤锛?*涓嶈闅忔剰鍒犻櫎**锛堝垹闄や細鐮村潖寮曠敤瀹冪殑鑴氭湰/娴嬭瘯锛夛紱濡傞渶绮剧畝璇峰厛纭寮曠敤鏂癸紙瑙佷笅琛?涓昏浣跨敤鑰?锛夈€?
+## 鍔犺浇鏈哄埗
 
-## 加载机制
+- **榛樿閾?*锛坄qkd_rl/env/factory.py::DEFAULT_CONFIG_FILES`锛屼换浣曞叆鍙?娴嬭瘯鍏堝姞杞借繖 6 涓紝鎸夐『搴忓悎骞讹級锛?  `default.yaml 鈫?rate_provider.yaml 鈫?features.yaml 鈫?env_small.yaml 鈫?graph_mappo.yaml 鈫?train_mappo.yaml`
+- **RL 璁粌涓诲叆鍙?* `scripts/train/train_graph_mappo.py`锛?  榛樿閾?鈫?鏄惧紡瑕嗙洊 `env_full.yaml` 鈫?`global.yaml`锛堣缁?楠岃瘉绐楀彛锛夆啋 `train_profiles.yaml`锛坄--mode` 閫夎缁冩ā寮忥級鈫?鍙€?`--configs` 杩藉姞
+- **鍩虹嚎** `scripts/baselines/run_baselines.py`锛歚global.yaml`锛坄--config`锛? `baselines.yaml`
+- **鐩戠潱棰勭儹** `scripts/train/supervised_train_bfs_greedy.py`锛歚supervised_train.yaml`
 
-- **默认链**（`qkd_rl/env/factory.py::DEFAULT_CONFIG_FILES`，任何入口/测试先加载这 6 个，按顺序合并）：
-  `default.yaml → rate_provider.yaml → features.yaml → env_small.yaml → graph_mappo.yaml → train_mappo.yaml`
-- **RL 训练主入口** `scripts/rl/train_graph_mappo.py`：
-  默认链 → 显式覆盖 `env_full.yaml` → `global.yaml`（训练/验证窗口）→ `train_profiles.yaml`（`--mode` 选训练模式）→ 可选 `--configs` 追加
-- **基线** `scripts/baselines/run_baselines.py`：`global.yaml`（`--config`）+ `baselines.yaml`
-- **监督预热** `scripts/rl/supervised_train_bfs_greedy.py`：`supervised_train.yaml`
+## 鏂囦欢娓呭崟
 
-## 文件清单
-
-| 文件 | 用途 | 加载位置 | 主要使用者 | 备注 |
+| 鏂囦欢 | 鐢ㄩ€?| 鍔犺浇浣嶇疆 | 涓昏浣跨敤鑰?| 澶囨敞 |
 |---|---|---|---|---|
-| `default.yaml` | project / seed / runtime 基础 | 默认链① | 全部入口 | 必留 |
-| `rate_provider.yaml` | H5 数据源、可用性口径、越界策略 | 默认链② | 全部入口 | 必留 |
-| `features.yaml` | 节点/物理边/需求边特征开关与归一化、relay importance | 默认链③ | 全部入口 | 必留 |
-| `env_small.yaml` | 小场景（4 GS/1 HAP/1 SAT）：环境、请求流、QKP、路由、奖励 | 默认链④ | 测试与默认实验 | 与 `env_full.yaml` 是同一组键的不同取值（二选一场景），不是重复 |
-| `graph_mappo.yaml` | 模型结构：GNN 层数/隐藏维、actor/critic、mask 分布 | 默认链⑤ | 训练/评估 | 必留 |
-| `train_mappo.yaml` | 训练超参：rollout、GAE、PPO、optimizer、logging | 默认链⑥ | RL 训练默认 | `--mode` 时会被 profile 覆盖 |
-| `env_full.yaml` | 全规模场景（真实 H5）：请求/奖励/QKP 标定 | `train_graph_mappo.py` 显式覆盖 | RL 训练主流程 | 注意：deadline_steps=30 与 env_small 的 960 尺度不同，参数族不同 |
-| `train_mappo_smoke.yaml` | 固定单日冒烟：一个场景上验证模型+奖励 | `train_graph_mappo.py --configs` | 调试 | 与 `train_diag_fast.yaml` 用途重叠 |
-| `train_diag_fast.yaml` | 快速诊断预设：240步×4局、固定种子+固定温度、单进程批量 rollout | `train_graph_mappo.py --configs` | 奖励/算法迭代 | 保留 128×3 的模型尺寸以便从 BC checkpoint 续训；只有这条路径会写 `rollout_debug.jsonl` 的奖励分解 |
-| `global.yaml` | 全局训练/验证时间窗口、请求种子 | `train_graph_mappo.py` / `run_baselines.py` | 训练、基线 | 全局实验窗口，所有算法共用 |
-| `train_profiles.yaml` | `--mode` 训练模式：`random_episode`/`continuous`/`fixed_day`/`curriculum`/`demand_edge` | `train_graph_mappo.py --mode` | RL 训练 | 覆盖 `train` 段（含 `value_target`、`replay_days`、PPO 参数） |
-| `baselines.yaml` | 基线策略开关与参数（greedy 系列） | `run_baselines.py` / `supervised_train_bfs_greedy.py` | 基线对比 | 离线理想上界由 `scripts/milp/compute_milp_upper_bound.py` 单独运行（UI "milp" 勾选） |
-| `supervised_train.yaml` | 监督预热：BFS+greedy expert 的评估窗口与输出 | `supervised_train_bfs_greedy.py` | 可选预热工作流 | 独立工作流，与 RL 训练无关 |
+| `default.yaml` | project / seed / runtime 鍩虹 | 榛樿閾锯憼 | 鍏ㄩ儴鍏ュ彛 | 蹇呯暀 |
+| `rate_provider.yaml` | H5 鏁版嵁婧愩€佸彲鐢ㄦ€у彛寰勩€佽秺鐣岀瓥鐣?| 榛樿閾锯憽 | 鍏ㄩ儴鍏ュ彛 | 蹇呯暀 |
+| `features.yaml` | 鑺傜偣/鐗╃悊杈?闇€姹傝竟鐗瑰緛寮€鍏充笌褰掍竴鍖栥€乺elay importance | 榛樿閾锯憿 | 鍏ㄩ儴鍏ュ彛 | 蹇呯暀 |
+| `env_small.yaml` | 灏忓満鏅紙4 GS/1 HAP/1 SAT锛夛細鐜銆佽姹傛祦銆丵KP銆佽矾鐢便€佸鍔?| 榛樿閾锯懀 | 娴嬭瘯涓庨粯璁ゅ疄楠?| 涓?`env_full.yaml` 鏄悓涓€缁勯敭鐨勪笉鍚屽彇鍊硷紙浜岄€変竴鍦烘櫙锛夛紝涓嶆槸閲嶅 |
+| `graph_mappo.yaml` | 妯″瀷缁撴瀯锛欸NN 灞傛暟/闅愯棌缁淬€乤ctor/critic銆乵ask 鍒嗗竷 | 榛樿閾锯懁 | 璁粌/璇勪及 | 蹇呯暀 |
+| `train_mappo.yaml` | 璁粌瓒呭弬锛歳ollout銆丟AE銆丳PO銆乷ptimizer銆乴ogging | 榛樿閾锯懃 | RL 璁粌榛樿 | `--mode` 鏃朵細琚?profile 瑕嗙洊 |
+| `env_full.yaml` | 鍏ㄨ妯″満鏅紙鐪熷疄 H5锛夛細璇锋眰/濂栧姳/QKP 鏍囧畾 | `train_graph_mappo.py` 鏄惧紡瑕嗙洊 | RL 璁粌涓绘祦绋?| 娉ㄦ剰锛歞eadline_steps=30 涓?env_small 鐨?960 灏哄害涓嶅悓锛屽弬鏁版棌涓嶅悓 |
+| `train_mappo_smoke.yaml` | 鍥哄畾鍗曟棩鍐掔儫锛氫竴涓満鏅笂楠岃瘉妯″瀷+濂栧姳 | `train_graph_mappo.py --configs` | 璋冭瘯 | 涓?`train_diag_fast.yaml` 鐢ㄩ€旈噸鍙?|
+| `train_diag_fast.yaml` | 蹇€熻瘖鏂璁撅細240姝ッ?灞€銆佸浐瀹氱瀛?鍥哄畾娓╁害銆佸崟杩涚▼鎵归噺 rollout | `train_graph_mappo.py --configs` | 濂栧姳/绠楁硶杩唬 | 淇濈暀 128脳3 鐨勬ā鍨嬪昂瀵镐互渚夸粠 BC checkpoint 缁锛涘彧鏈夎繖鏉¤矾寰勪細鍐?`rollout_debug.jsonl` 鐨勫鍔卞垎瑙?|
+| `global.yaml` | 鍏ㄥ眬璁粌/楠岃瘉鏃堕棿绐楀彛銆佽姹傜瀛?| `train_graph_mappo.py` / `run_baselines.py` | 璁粌銆佸熀绾?| 鍏ㄥ眬瀹為獙绐楀彛锛屾墍鏈夌畻娉曞叡鐢?|
+| `train_profiles.yaml` | `--mode` 璁粌妯″紡锛歚random_episode`/`continuous`/`fixed_day`/`curriculum`/`demand_edge` | `train_graph_mappo.py --mode` | RL 璁粌 | 瑕嗙洊 `train` 娈碉紙鍚?`value_target`銆乣replay_days`銆丳PO 鍙傛暟锛?|
+| `baselines.yaml` | 鍩虹嚎绛栫暐寮€鍏充笌鍙傛暟锛坓reedy 绯诲垪锛?| `run_baselines.py` / `supervised_train_bfs_greedy.py` | 鍩虹嚎瀵规瘮 | 绂荤嚎鐞嗘兂涓婄晫鐢?`scripts/milp/compute_milp_upper_bound.py` 鍗曠嫭杩愯锛圲I "milp" 鍕鹃€夛級 |
+| `supervised_train.yaml` | 鐩戠潱棰勭儹锛欱FS+greedy expert 鐨勮瘎浼扮獥鍙ｄ笌杈撳嚭 | `supervised_train_bfs_greedy.py` | 鍙€夐鐑伐浣滄祦 | 鐙珛宸ヤ綔娴侊紝涓?RL 璁粌鏃犲叧 |
 
-## 调参提醒
+## 璋冨弬鎻愰啋
 
-- 改 `train` 相关参数前先确认生效文件：默认链加载后，`train_graph_mappo.py` 会用 `env_full.yaml`、`global.yaml`、`train_profiles.yaml`（`--mode`）**依次覆盖**——例如 `entropy_coef` 在 `train_mappo.yaml` 为 0.01，而各 profile 统一覆盖为 0.001。
-- `env_small.yaml` 与 `env_full.yaml` 的请求参数族不同（deadline 960 vs 30 步），跑实验时不要混用两套参数的经验值。
-- `value_target` 默认 `gae`（推荐）；`mc` 仅保留用于消融。`replay_days` 默认 0（PPO 保持 on-policy）。
+- 鏀?`train` 鐩稿叧鍙傛暟鍓嶅厛纭鐢熸晥鏂囦欢锛氶粯璁ら摼鍔犺浇鍚庯紝`train_graph_mappo.py` 浼氱敤 `env_full.yaml`銆乣global.yaml`銆乣train_profiles.yaml`锛坄--mode`锛?*渚濇瑕嗙洊**鈥斺€斾緥濡?`entropy_coef` 鍦?`train_mappo.yaml` 涓?0.01锛岃€屽悇 profile 缁熶竴瑕嗙洊涓?0.001銆?- `env_small.yaml` 涓?`env_full.yaml` 鐨勮姹傚弬鏁版棌涓嶅悓锛坉eadline 960 vs 30 姝ワ級锛岃窇瀹為獙鏃朵笉瑕佹贩鐢ㄤ袱濂楀弬鏁扮殑缁忛獙鍊笺€?- `value_target` 榛樿 `gae`锛堟帹鑽愶級锛沗mc` 浠呬繚鐣欑敤浜庢秷铻嶃€俙replay_days` 榛樿 0锛圥PO 淇濇寔 on-policy锛夈€?
+
+## 閰嶇疆缁存姢瑙勫垯
+
+- `train_profiles.yaml` 鏄敮涓€鐨?RL 璁粌妯″紡娉ㄥ唽琛紱CLI 涓庢闈?UI 鍏辩敤瀹冦€?- `configs/archive/` 鍙繚瀛樺巻鍙查厤缃紝涓嶅弬涓庨粯璁ゅ姞杞介摼锛屼篃涓嶄綔涓哄疄楠屽叆鍙ｃ€?- UI 淇濆瓨妯″紡鏃跺彧鏇存柊鐣岄潰鏆撮湶鐨勮缁冨弬鏁帮紝淇濈暀杩炵画璁粌銆佽绋嬪涔犮€侀渶姹傝竟绛夋ā寮忎笓灞炲瓧娈点€?- `env.episode_steps` 涓?`train.rollout_steps` 涓嶅啀鐢?UI 寮鸿浜掔浉瑕嗙洊锛涜繛缁ā寮忕瓑閰嶇疆鍙互淇濇寔鑷繁鐨勯暱浼氳瘽璇箟銆?

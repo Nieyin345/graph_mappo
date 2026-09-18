@@ -2,11 +2,20 @@
 """Correctness tests for the vectorized geometry/orbit helpers in build_global_tensor.py."""
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import numpy as np
 import pytest
 
+# build_global_tensor.py and its geometry helpers moved under
+# tools/data_generation/ (the latter was renamed helper.py -> legacy_physics.py);
+# the imports below kept pointing at the old top-level layout and broke
+# collection for the whole suite.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "data_generation"))
+
 import build_global_tensor as bgt
-from helper import GeoMath, KeplerianPropagator
+from legacy_physics import GeoMath, KeplerianPropagator
 
 
 def _random_coords(n: int = 2000, seed: int = 0) -> tuple:

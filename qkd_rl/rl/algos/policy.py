@@ -39,13 +39,43 @@ class MAPPOPolicy:
         self.model = model
         self.device = torch.device(device)
         self.model.to(self.device)
+        # Static topology cache for the hottest matching path. Arc encoding
+        # does not change during a rollout on a fixed QKD topology, so avoid
+        # rebuilding numpy arrays at every action sample.
+        self._matching_cache = None
+
+    def _get_matching_cache(self, arcs):
+        """Build/reuse integer arc indices used by matching feasibility tests."""
+        cache_key = tuple(arcs)
+        if self._matching_cache is not None and self._matching_cache[0] == cache_key:
+            return self._matching_cache[1]
+
+        node_code = {node_id: i for i, node_id in enumerate(sorted({n for arc in arcs for n in arc}))}
+        n_arcs = len(arcs)
+        src_code = np.fromiter((node_code[arc[0]] for arc in arcs), dtype=np.int64, count=n_arcs)
+        dst_code = np.fromiter((node_code[arc[1]] for arc in arcs), dtype=np.int64, count=n_arcs)
+        pair_ids = {}
+        pair_code = np.empty(n_arcs, dtype=np.int64)
+        for i, arc in enumerate(arcs):
+            s_c, d_c = node_code[arc[0]], node_code[arc[1]]
+            key = (s_c, d_c) if s_c <= d_c else (d_c, s_c)
+            pair_code[i] = pair_ids.setdefault(key, len(pair_ids))
+
+        cache = (src_code, dst_code, pair_code)
+        self._matching_cache = (cache_key, cache)
+        return cache
 
     def _sample_matching(
         self,
         arc_scores: dict[tuple[str, str], torch.Tensor],
         deterministic: bool = False,
         build_scores: bool = True,
-    ) -> tuple[dict[str, tuple[str, str]], dict[str, dict[str, float]], list[tuple[str, str]], torch.Tensor, torch.Tensor]:
+    ) -> tuple[
+        tuple[dict[str, tuple[str, str]], dict[str, dict[str, float]]],
+        list[tuple[str, str]],
+        torch.Tensor,
+        torch.Tensor,
+    ]:
         """Sample one global directed matching by sequentially picking arcs.
 
         The actor scores every legal directed arc ``(src -> dst)`` separately,
@@ -84,15 +114,7 @@ class MAPPOPolicy:
         # already matched in either direction"; all three are equality tests on
         # precomputed per-arc codes, so the whole check collapses to three
         # comparisons plus one bitwise-and over the arc array.
-        node_code = {node_id: i for i, node_id in enumerate(sorted({n for arc in arcs for n in arc}))}
-        src_code = np.fromiter((node_code[arc[0]] for arc in arcs), dtype=np.int64, count=n_arcs)
-        dst_code = np.fromiter((node_code[arc[1]] for arc in arcs), dtype=np.int64, count=n_arcs)
-        pair_ids: dict[tuple[int, int], int] = {}
-        pair_code = np.empty(n_arcs, dtype=np.int64)
-        for i, arc in enumerate(arcs):
-            s_c, d_c = node_code[arc[0]], node_code[arc[1]]
-            key = (s_c, d_c) if s_c <= d_c else (d_c, s_c)
-            pair_code[i] = pair_ids.setdefault(key, len(pair_ids))
+        src_code, dst_code, pair_code = self._get_matching_cache(arcs)
 
         # alive[:-1] mirrors ``remaining``/feasibility; the trailing entry is the
         # STOP option, which stays available at every decision.
@@ -420,8 +442,8 @@ class MAPPOPolicy:
                 (
                     (actions, action_scores),
                     matched_edges,
-                    torch.tensor(float(lp_sum[g]) / divisor, dtype=torch.float32, device=self.device),
-                    torch.tensor(float(ent_sum[g]) / divisor, dtype=torch.float32, device=self.device),
+                    torch.as_tensor(float(lp_sum[g]) / divisor, dtype=torch.float32, device=self.device),
+                    torch.as_tensor(float(ent_sum[g]) / divisor, dtype=torch.float32, device=self.device),
                 )
             )
         return results
@@ -545,7 +567,8 @@ class MAPPOPolicy:
         """Batched PPO evaluation: one block-diagonal model forward for many
         graphs instead of one forward per step. Per-graph math is identical to
         ``evaluate_actions``; returns (log_probs, entropies, value) per obs."""
-        outputs = self.model.batched_forward(obs_list, self.device)
+        outputs = self.model.batched_forward(obs_list, self.device, want_edge_maps=False)
+        arrays = outputs.edge_arrays or []
         results: list[tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], torch.Tensor]] = []
         for i, (obs, value) in enumerate(zip(
             obs_list,
@@ -555,8 +578,11 @@ class MAPPOPolicy:
             if not node_order:
                 results.append(({}, {}, value))
                 continue
-            edge_scores = outputs.edge_score_maps[i] or {}
-            mean_lp, mean_entropy = self._matching_log_prob_entropy_fast(edge_scores, matched_edges_list[i])
+            src_arr, dst_arr, scores = arrays[i]
+            node_pos = {node_id: j for j, node_id in enumerate(node_order)}
+            mean_lp, mean_entropy = self._matching_log_prob_entropy_arrays(
+                src_arr, dst_arr, scores, node_pos, matched_edges_list[i]
+            )
             log_probs, entropies = self._fill_node_tensors(node_order, mean_lp, mean_entropy)
             results.append((log_probs, entropies, value))
         return results
@@ -759,6 +785,94 @@ class MAPPOPolicy:
         mean_lp = logp.gather(-1, choices_t).mean()
         # -inf padding would turn into 0 * -inf = nan, so only finite logits
         # contribute to the entropy.
+        safe = torch.where(torch.isfinite(logits), logp, torch.zeros_like(logp))
+        mean_entropy = -(safe.exp() * safe).sum(dim=-1).mean()
+        return mean_lp, mean_entropy
+
+    def _matching_log_prob_entropy_arrays(
+        self,
+        src_arr: np.ndarray,
+        dst_arr: np.ndarray,
+        scores: torch.Tensor,
+        node_pos: dict[str, int],
+        matched_edges: list[tuple[str, str]],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Array-input twin of ``_matching_log_prob_entropy_fast`` for PPO updates.
+
+        The dict-input version re-derives the arc order from ``arc_scores.keys()``
+        and spends most of its time building that dict (``_edge_score_map``) and
+        re-pairing arcs. Here the candidate order is already the flat index order
+        of ``src_arr``/``dst_arr``/``scores`` (exactly what ``edge_arrays`` handed
+        to ``_sample_matching_arrays``), so the per-arc codes fall out of integer
+        indexing and the scores come straight off the array. Math is bit-identical
+        to ``_matching_log_prob_entropy_fast``: same feasibility rows, same
+        ``log_softmax`` + gather over them.
+        """
+        n_arcs = int(len(src_arr))
+        if n_arcs == 0:
+            return (
+                torch.zeros((), dtype=torch.float32, device=self.device),
+                torch.zeros((), dtype=torch.float32, device=self.device),
+            )
+        temperature = float(self.model.actor.temperature)
+        if temperature != 1.0:
+            scores = scores / temperature
+            stop_score = self.model.actor.stop_logit / temperature
+        else:
+            stop_score = self.model.actor.stop_logit
+
+        src_code = np.asarray(src_arr, dtype=np.int64)
+        dst_code = np.asarray(dst_arr, dtype=np.int64)
+        # Undirected pair id via min/max, matching the sampler's canonical key.
+        n_nodes = max(1, len(node_pos))
+        pair_code = np.minimum(src_code, dst_code) * n_nodes + np.maximum(src_code, dst_code)
+
+        alive = np.ones(n_arcs, dtype=bool)
+        rows = np.empty((len(matched_edges) + 1, n_arcs), dtype=np.float32)
+        choices: list[int] = []
+        n_rows = 0
+        for arc in matched_edges:
+            pos = node_pos.get(arc[0])
+            if pos is None:
+                raise ValueError(f"Stored matching arc {arc!r} is not in the observation.")
+            # Find src via node_pos[arc[0]]; the matched edge is a directed arc
+            # (src->dst), and the candidates are ordered by (source, dst). The
+            # candidate with this source and this dst must exist among the alive
+            # arcs; the canonical position is where dst_code == pos of dst and
+            # src_code == pos of src.
+            dst_pos = node_pos.get(arc[1])
+            if dst_pos is None:
+                raise ValueError(f"Stored matching arc {arc!r} dst not in the observation.")
+            cand = np.flatnonzero((src_code == pos) & (dst_code == dst_pos))
+            if cand.size == 0 or not alive[cand[0]]:
+                raise ValueError(f"Stored matching arc {arc!r} is not available for evaluation.")
+            arc_pos = int(cand[0])
+            rows[n_rows] = alive
+            choices.append(arc_pos)
+            n_rows += 1
+            alive &= ~(
+                (src_code == src_code[arc_pos])
+                | (dst_code == dst_code[arc_pos])
+                | (pair_code == pair_code[arc_pos])
+            )
+        if alive.any():
+            rows[n_rows] = alive
+            choices.append(n_arcs)  # STOP among the still-feasible arcs
+            n_rows += 1
+        rows = rows[:n_rows]
+        if n_rows == 0:
+            return (
+                torch.zeros((), dtype=torch.float32, device=self.device),
+                torch.zeros((), dtype=torch.float32, device=self.device),
+            )
+        A = torch.from_numpy(rows).to(device=self.device)
+        logits = (A * scores.unsqueeze(0)).masked_fill(A == 0.0, float("-inf"))
+        logits = torch.cat(
+            [logits, stop_score.reshape(1).expand(logits.size(0), 1)], dim=-1
+        )
+        logp = torch.log_softmax(logits, dim=-1)
+        choices_t = torch.tensor(choices, dtype=torch.long, device=self.device).unsqueeze(-1)
+        mean_lp = logp.gather(-1, choices_t).mean()
         safe = torch.where(torch.isfinite(logits), logp, torch.zeros_like(logp))
         mean_entropy = -(safe.exp() * safe).sum(dim=-1).mean()
         return mean_lp, mean_entropy

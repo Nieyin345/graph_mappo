@@ -2,7 +2,7 @@
 # over `global.yaml`'s real training window (days 0-295, random day start) with
 # varying requests, instead of the single fixed diagnostic scenario.
 #
-#   python scripts/rl/train_graph_mappo.py \
+#   python scripts/train/train_graph_mappo.py \
 #       --configs rl_algorithm.yaml train_full_rl.yaml \
 #       --checkpoint outputs/supervised_pg_phased/supervised_pg_phased_latest.pt \
 #       --run-name full_rl --num-updates 30

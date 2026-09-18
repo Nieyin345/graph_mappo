@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import torch
 from torch import nn
 
 
@@ -21,8 +20,4 @@ def build_mlp(
             layers.append(nn.Dropout(dropout))
     layers.append(nn.Linear(dims[-1], output_dim))
     return nn.Sequential(*layers)
-
-
-def masked_logits(logits: torch.Tensor, mask: torch.Tensor, invalid_value: float) -> torch.Tensor:
-    return torch.where(mask.bool(), logits, torch.full_like(logits, invalid_value))
 

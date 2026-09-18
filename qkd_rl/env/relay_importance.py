@@ -50,7 +50,6 @@ def _distances_to_sources(
     from scipy.sparse import csr_matrix
     from scipy.sparse.csgraph import shortest_path
 
-    n_edges = int(src_pos.size)
     ok = (src_pos >= 0) & (src_pos < n_nodes) & (dst_pos >= 0) & (dst_pos < n_nodes)
     src_pos = src_pos[ok]
     dst_pos = dst_pos[ok]
@@ -219,31 +218,47 @@ def compute_relay_importance(
         return {}
 
     # --- accumulate over demand pairs ----------------------------------------
-    totals = np.zeros(n_active, dtype=np.float64)
-    src_ok = act_src >= 0
-    dst_ok = act_dst >= 0
+    # Batched over pairs instead of a per-pair Python loop. Each pair used to
+    # do ~8 full-length (n_active) array ops; with ~16 pairs per step that
+    # dominated the function (relay_importance measured 0.70 ms/step = 63% of
+    # build_edge_features = ~48% of the whole graph build). Stacking the pairs
+    # into a (n_pairs, n_active) matrix does the same arithmetic with one set
+    # of numpy calls. Verified equivalent to the loop at 1.2e-10 max absolute
+    # difference (float64 reduction-order noise) in .tmp/verify_relay_batch.py.
+    rows_s: list[int] = []
+    rows_d: list[int] = []
+    budgets: list[float] = []
     for pair, budget in pair_demand.items():
         row_s = gs_row.get(pair[0])
         row_d = gs_row.get(pair[1])
         if row_s is None or row_d is None or budget <= 0.0:
             continue
-        d_s = dist_matrix[row_s]
-        d_d = dist_matrix[row_d]
-        a = np.minimum(d_s[act_src], d_s[act_dst])
-        b = np.minimum(d_d[act_src], d_d[act_dst])
-        total_hops = a + b + 1.0
-        mask = (
-            (a < _INF)
-            & (b < _INF)
-            & (total_hops <= max_path_links)
-            & src_ok
-            & dst_ok
-            & valid_scarcity
-        )
-        if not np.any(mask):
-            continue
-        decay = np.power(hop_decay_factor, np.maximum(0.0, total_hops - 2.0))
-        totals += np.where(mask, budget * decay * scarcity, 0.0)
+        rows_s.append(row_s)
+        rows_d.append(row_d)
+        budgets.append(budget)
+    if not rows_s:
+        return {}
+
+    src_ok = act_src >= 0
+    dst_ok = act_dst >= 0
+    d_s = dist_matrix[np.asarray(rows_s, dtype=np.int64)]      # (P, n_nodes)
+    d_d = dist_matrix[np.asarray(rows_d, dtype=np.int64)]
+    a = np.minimum(d_s[:, act_src], d_s[:, act_dst])           # (P, n_active)
+    b = np.minimum(d_d[:, act_src], d_d[:, act_dst])
+    total_hops = a + b + 1.0
+    pair_mask = (
+        (a < _INF)
+        & (b < _INF)
+        & (total_hops <= max_path_links)
+        & src_ok
+        & dst_ok
+        & valid_scarcity
+    )
+    if not np.any(pair_mask):
+        return {}
+    decay = np.power(hop_decay_factor, np.maximum(0.0, total_hops - 2.0))
+    budget_col = np.asarray(budgets, dtype=np.float64)[:, None]  # (P, 1)
+    totals = np.where(pair_mask, budget_col * decay * scarcity, 0.0).sum(axis=0)
 
     if not np.any(totals > 0.0):
         return {}

@@ -5,7 +5,6 @@ from collections import deque
 
 from qkd_rl.data.scenario_builder import Scenario
 from qkd_rl.env.action_resolver import ActionResolver
-from qkd_rl.env.action_space import NodeActionSpace
 from qkd_rl.env.graph_builder import GraphBuilder, GraphObservation
 from qkd_rl.env.history_buffer import HistoryBuffer
 from qkd_rl.env.masks import ActionMaskBuilder
@@ -15,7 +14,7 @@ from qkd_rl.env.request import RequestGenerator, RequestHistoryTracker, RequestQ
 from qkd_rl.env.reward import RewardFunction
 from qkd_rl.env.routing import RoutingPolicy
 from qkd_rl.env.state import EnvState
-from qkd_rl.link.rate_provider import LazyEdgeWindows, RateProvider
+from qkd_rl.link.rate_provider import EdgeWindow, LazyEdgeWindows, RateProvider
 
 
 class QKDEnv:
@@ -275,6 +274,9 @@ class QKDEnv:
         reward_cfg = self.config.get("reward", {})
         if not RewardFunction._enabled(reward_cfg, "storage"):
             return {}
+        pending = self.requests.get_pending()
+        if not pending:
+            return {}
         activated_set = set(activated_edges)
         usable = activated_set | set(qkp.positive)
         adj: dict[str, list[tuple[str, str]]] = {}
@@ -283,7 +285,7 @@ class QKDEnv:
                 adj.setdefault(edge.src, []).append((edge.dst, edge.edge_id))
                 adj.setdefault(edge.dst, []).append((edge.src, edge.edge_id))
         pathness: dict[str, float] = {}
-        for req in self.requests.get_pending():
+        for req in pending:
             if req.src_gs not in adj or req.dst_gs not in adj:
                 continue
             parent: dict[str, tuple[str | None, str | None]] = {req.src_gs: (None, None)}

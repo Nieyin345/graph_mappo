@@ -40,7 +40,20 @@ train:
     clip_eps: 0.2
     # PPO eval chunk: one block-diagonal forward per chunk (pure
     # implementation-level kernel merging, same math).
-    batch_chunk: 512
+    #
+    # 64, down from 512. The chunk sets how many steps go into one forward, so
+    # it sets the size of the edge tensor the backward walks: at ~393 directed
+    # edges per step, 512 steps is ~103 MB -- the whole L3 of the machine this
+    # was tuned on. At 64 it is ~13 MB and stays resident.
+    #
+    # Measured on the canonical preset (1440x8), interleaved two rounds so the
+    # first-update warm-up could not land on one setting:
+    #     512 -> 94.06 / 72.40 s   (median 83.2, and it swings 30% between runs)
+    #     128 -> 67.10 / 66.91 s   (median 67.0)
+    #      64 -> 61.59 / 61.65 s   (median 61.6)
+    # 1.35x on the update, and it also removes the variance: 512 sits right at
+    # the cache boundary and its timing depends on what else is on the box.
+    batch_chunk: 64
     normalize_advantages: true
     # EMA update rate of the running return statistics used to standardize the
     # critic target. Set to 0 to keep the return scale fixed for generalized

@@ -17,6 +17,7 @@ htmlcov/
 # Runtime outputs
 outputs/
 *.log
+node-compile-cache/
 
 # Model / data artifacts (checkpoints, trajectories, arrays)
 *.pt
@@ -53,6 +54,15 @@ Thumbs.db
 .reasonix/
 # Scratch scripts (see workspace red line: write scripts to .tmp/ then run)
 .tmp/
+
+# Agent/skill tooling (editor-side artifacts, not project source)
+agent/
+.agents/
+skills-lock.json
+
+# Rescued server run records (kept locally on purpose, not versioned -- see
+# server_results/README.md; it is experiment data, not source)
+server_results/
 
 # Trae IDE local project docs
 .trae/

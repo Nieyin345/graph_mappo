@@ -74,7 +74,6 @@ class GreedyRelayScheduler:
             entry = pairs.setdefault(pair, {"amount": 0.0, "urgency": 1.0})
             entry["amount"] += remaining
             entry["urgency"] = max(entry["urgency"], urgency)
-        demand_now = set(pairs)
 
         # Drop schedules whose relay is no longer legal for the pair, and
         # evict the least recently active pairs beyond max_pairs (LRU). A

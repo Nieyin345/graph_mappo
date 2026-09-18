@@ -20,7 +20,7 @@
 #   - if neither climbs, the blocker is optimisation on the 1440-step horizon.
 #
 # Use with:
-#   python scripts/rl/train_graph_mappo.py \
+#   python scripts/train/train_graph_mappo.py \
 #       --configs rl_algorithm.yaml train_full_rl_fixdays.yaml \
 #       --checkpoint outputs/supervised_pg_phased/supervised_pg_phased_latest.pt \
 #       --run-name full_d8 --num-updates 30

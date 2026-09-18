@@ -1,168 +1,101 @@
-# QKD-SAGIN 生产端调度（Graph-MAPPO）
-
-面向 QKD-SAGIN（量子密钥分发-天地一体化网络）生产端的**密钥生成链路调度**项目。
-三层 FSO-QKD 网络：30 地面站（GS）、30 高空平台（HAP）、30 卫星（SAT），1978 条候选物理链路；
-每个时隙（1 分钟）智能体要为每个节点决定一条密钥生成链路，约束是**双端口**（Tx-out ≤ 1、
-Rx-in ≤ 1、同一对链路不能双向同时开）。链路速率 / LOS 全部从 H5 数据集读取（`H5RateProvider`）。
-
-项目核心是**一条启发式预训练 + 强化学习微调**的训练管线：
+# QKD-SAGIN 鐢熶骇绔皟搴︼紙Graph-MAPPO锛?
+闈㈠悜 QKD-SAGIN锛堥噺瀛愬瘑閽ュ垎鍙?澶╁湴涓€浣撳寲缃戠粶锛夌敓浜х鐨?*瀵嗛挜鐢熸垚閾捐矾璋冨害**椤圭洰銆?涓夊眰 FSO-QKD 缃戠粶锛?0 鍦伴潰绔欙紙GS锛夈€?0 楂樼┖骞冲彴锛圚AP锛夈€?0 鍗槦锛圫AT锛夛紝1978 鏉″€欓€夌墿鐞嗛摼璺紱
+姣忎釜鏃堕殭锛? 鍒嗛挓锛夋櫤鑳戒綋瑕佷负姣忎釜鑺傜偣鍐冲畾涓€鏉″瘑閽ョ敓鎴愰摼璺紝绾︽潫鏄?*鍙岀鍙?*锛圱x-out 鈮?1銆?Rx-in 鈮?1銆佸悓涓€瀵归摼璺笉鑳藉弻鍚戝悓鏃跺紑锛夈€傞摼璺€熺巼 / LOS 鍏ㄩ儴浠?H5 鏁版嵁闆嗚鍙栵紙`H5RateProvider`锛夈€?
+椤圭洰鏍稿績鏄?*涓€鏉″惎鍙戝紡棰勮缁?+ 寮哄寲瀛︿範寰皟**鐨勮缁冪绾匡細
 
 ```text
-BFS 需求扩散启发式（PG-Phased 专家）
-        │  行为克隆（BC 预热）
-        ▼
-Graph-MAPPO 强化学习（warm-start 自 BC 权重）
-```
+BFS 闇€姹傛墿鏁ｅ惎鍙戝紡锛圥G-Phased 涓撳锛?        鈹? 琛屼负鍏嬮殕锛圔C 棰勭儹锛?        鈻?Graph-MAPPO 寮哄寲瀛︿範锛坵arm-start 鑷?BC 鏉冮噸锛?```
 
 ---
 
-## 1. 强化学习模型：Graph-MAPPO
+## 1. 寮哄寲瀛︿範妯″瀷锛欸raph-MAPPO
 
-**架构**：共享 GNN 编码器（GraphSAGE，3 层，128 维）→ 共享 actor（edge scorer）→ 全局 critic。
-`mixed` 模式把节点/物理边/需求边一起编码，需求信息沿物理边传播；critic 用 typed-mean 池化输出
-每时隙一个全局 value。
+**鏋舵瀯**锛氬叡浜?GNN 缂栫爜鍣紙GraphSAGE锛? 灞傦紝128 缁达級鈫?鍏变韩 actor锛坋dge scorer锛夆啋 鍏ㄥ眬 critic銆?`mixed` 妯″紡鎶婅妭鐐?鐗╃悊杈?闇€姹傝竟涓€璧风紪鐮侊紝闇€姹備俊鎭部鐗╃悊杈逛紶鎾紱critic 鐢?typed-mean 姹犲寲杈撳嚭
+姣忔椂闅欎竴涓叏灞€ value銆?
+**鍔ㄤ綔绌洪棿锛氬叏灞€鍖归厤锛堝叧閿璁★級**銆傛棭鏈熺増鏈槸"姣忎釜鑺傜偣鐙珛閲囨牱涓€鏉¤竟 + resolver 璐績娑堣В"锛?PPO 浼樺寲鐨勬彁璁垎甯冧笌鐜鐪熸鎵ц鐨勫尮閰嶄笉涓€鑷达紝鎴愬姛鐜囬暱鏈熷仠鍦ㄧ害 30%锛涘綋鍓嶇増鏈細
 
-**动作空间：全局匹配（关键设计）**。早期版本是"每个节点独立采样一条边 + resolver 贪心消解"，
-PPO 优化的提议分布与环境真正执行的匹配不一致，成功率长期停在约 30%；当前版本：
-
-1. actor 对每条合法**定向弧** `(tx_target, rx_source)` 打分；
-2. 策略从全部合法弧出发，每步只考虑两端点仍空闲的弧，按 softmax 采样一条（含 STOP 选项），
-   直到没有可用弧——**采样的匹配就是环境执行的匹配**；
-3. PPO 优化的是该匹配的联合 log-prob（`_matching_log_prob_entropy_fast` 向量化实现）。
-
-**训练**：多进程 rollout（worker 池，权重+温度随任务下发保证探索温度同步）→ GAE →
-PPO（clip、advantage 归一化、KL 早停、按角色梯度裁剪）。
-
-**RL 效果（实测）**：
-- 固定场景（day 0 + 固定请求种子）20 轮：**0.728 → 0.819**，超过启发式（0.7765）✓
-- 标准验证协议（5 种子）：30 轮评估均值 **0.713 ± 0.033**，无上升趋势（详见 §4 困境）
-
-## 2. 启发式算法：BFS 需求扩散 + 分阶段路径调度
-
-启发式由两部分组成：一个**边打分器**（谁值得开）和一个**路径级调度器**（按什么顺序、开整条路）。
-它同时是强化学习的**行为克隆专家**。
-
-- **需求扩散重要性（relay importance）**：对每个等待中的请求，用其两端 GS 当起点，在当前合法
-  可见物理边构成的图上做 BFS，得到两端到各节点的最短跳数，据此给中继节点/链路打分；
-- **分阶段路径调度（PG-Phased）**：三阶段策略——①存量密钥网络（先用已持有的密钥库存服务）、
-  ②混用库存的辅助路径、③全新路径（生成新密钥服务）；配合 ServeProbe 路由按瓶颈跳部分服务。
-- 网络原始生成能力约 4.7×10⁶ 密钥/时隙，而需求约 6–10×10⁴ 密钥/时隙——约束不在产量，
-  而在**稀疏时变拓扑上的可达性**（每时隙仅约 9.6% 的 (链路,时隙) 组合速率非零）。
-
-**启发式效果（实测）**：`path_score_greedy_phased` 成功率 **0.8104 ± 0.0575**（标准协议），
-是最强的非学习方法，比第二名 `greedy_relay`（0.435）高 1.86 倍。
-
-## 3. 效果对比一览（实测）
-
-| 策略 | 协议 | 成功率 |
+1. actor 瀵规瘡鏉″悎娉?*瀹氬悜寮?* `(tx_target, rx_source)` 鎵撳垎锛?2. 绛栫暐浠庡叏閮ㄥ悎娉曞姬鍑哄彂锛屾瘡姝ュ彧鑰冭檻涓ょ鐐逛粛绌洪棽鐨勫姬锛屾寜 softmax 閲囨牱涓€鏉★紙鍚?STOP 閫夐」锛夛紝
+   鐩村埌娌℃湁鍙敤寮р€斺€?*閲囨牱鐨勫尮閰嶅氨鏄幆澧冩墽琛岀殑鍖归厤**锛?3. PPO 浼樺寲鐨勬槸璇ュ尮閰嶇殑鑱斿悎 log-prob锛坄_matching_log_prob_entropy_fast` 鍚戦噺鍖栧疄鐜帮級銆?
+**璁粌**锛氬杩涚▼ rollout锛坵orker 姹狅紝鏉冮噸+娓╁害闅忎换鍔′笅鍙戜繚璇佹帰绱㈡俯搴﹀悓姝ワ級鈫?GAE 鈫?PPO锛坈lip銆乤dvantage 褰掍竴鍖栥€並L 鏃╁仠銆佹寜瑙掕壊姊害瑁佸壀锛夈€?
+**RL 鏁堟灉锛堝疄娴嬶級**锛?- 鍥哄畾鍦烘櫙锛坉ay 0 + 鍥哄畾璇锋眰绉嶅瓙锛?0 杞細**0.728 鈫?0.819**锛岃秴杩囧惎鍙戝紡锛?.7765锛夆湏
+- 鏍囧噯楠岃瘉鍗忚锛? 绉嶅瓙锛夛細30 杞瘎浼板潎鍊?**0.713 卤 0.033**锛屾棤涓婂崌瓒嬪娍锛堣瑙?搂4 鍥板锛?
+## 2. 鍚彂寮忕畻娉曪細BFS 闇€姹傛墿鏁?+ 鍒嗛樁娈佃矾寰勮皟搴?
+鍚彂寮忕敱涓ら儴鍒嗙粍鎴愶細涓€涓?*杈规墦鍒嗗櫒**锛堣皝鍊煎緱寮€锛夊拰涓€涓?*璺緞绾ц皟搴﹀櫒**锛堟寜浠€涔堥『搴忋€佸紑鏁存潯璺級銆?瀹冨悓鏃舵槸寮哄寲瀛︿範鐨?*琛屼负鍏嬮殕涓撳**銆?
+- **闇€姹傛墿鏁ｉ噸瑕佹€э紙relay importance锛?*锛氬姣忎釜绛夊緟涓殑璇锋眰锛岀敤鍏朵袱绔?GS 褰撹捣鐐癸紝鍦ㄥ綋鍓嶅悎娉?  鍙鐗╃悊杈规瀯鎴愮殑鍥句笂鍋?BFS锛屽緱鍒颁袱绔埌鍚勮妭鐐圭殑鏈€鐭烦鏁帮紝鎹缁欎腑缁ц妭鐐?閾捐矾鎵撳垎锛?- **鍒嗛樁娈佃矾寰勮皟搴︼紙PG-Phased锛?*锛氫笁闃舵绛栫暐鈥斺€斺憼瀛橀噺瀵嗛挜缃戠粶锛堝厛鐢ㄥ凡鎸佹湁鐨勫瘑閽ュ簱瀛樻湇鍔★級銆?  鈶℃贩鐢ㄥ簱瀛樼殑杈呭姪璺緞銆佲憿鍏ㄦ柊璺緞锛堢敓鎴愭柊瀵嗛挜鏈嶅姟锛夛紱閰嶅悎 ServeProbe 璺敱鎸夌摱棰堣烦閮ㄥ垎鏈嶅姟銆?- 缃戠粶鍘熷鐢熸垚鑳藉姏绾?4.7脳10鈦?瀵嗛挜/鏃堕殭锛岃€岄渶姹傜害 6鈥?0脳10鈦?瀵嗛挜/鏃堕殭鈥斺€旂害鏉熶笉鍦ㄤ骇閲忥紝
+  鑰屽湪**绋€鐤忔椂鍙樻嫇鎵戜笂鐨勫彲杈炬€?*锛堟瘡鏃堕殭浠呯害 9.6% 鐨?(閾捐矾,鏃堕殭) 缁勫悎閫熺巼闈為浂锛夈€?
+**鍚彂寮忔晥鏋滐紙瀹炴祴锛?*锛歚path_score_greedy_phased` 鎴愬姛鐜?**0.8104 卤 0.0575**锛堟爣鍑嗗崗璁級锛?鏄渶寮虹殑闈炲涔犳柟娉曪紝姣旂浜屽悕 `greedy_relay`锛?.435锛夐珮 1.86 鍊嶃€?
+## 3. 鏁堟灉瀵规瘮涓€瑙堬紙瀹炴祴锛?
+| 绛栫暐 | 鍗忚 | 鎴愬姛鐜?|
 |---|---|---|
-| 启发式 `path_score_greedy_phased` | 标准验证（5 种子，确定性） | **0.8104** |
-| 启发式 `path_score_greedy_phased` | 固定场景（12 种子） | **0.7765** |
-| BC 预热权重（克隆启发式） | 标准验证（5 种子，确定性） | **0.7581** |
-| BC 预热权重 | 固定场景（12 种子，确定性） | **0.7280** |
-| RL（固定场景 20 轮） | 固定场景 | **0.819**（从 0.728 涨起） |
-| RL（全局训练 30 轮） | 标准验证 | **0.713 ± 0.033**（无趋势） |
-| 随机策略 | — | ≈ 0.18 |
+| 鍚彂寮?`path_score_greedy_phased` | 鏍囧噯楠岃瘉锛? 绉嶅瓙锛岀‘瀹氭€э級 | **0.8104** |
+| 鍚彂寮?`path_score_greedy_phased` | 鍥哄畾鍦烘櫙锛?2 绉嶅瓙锛?| **0.7765** |
+| BC 棰勭儹鏉冮噸锛堝厠闅嗗惎鍙戝紡锛?| 鏍囧噯楠岃瘉锛? 绉嶅瓙锛岀‘瀹氭€э級 | **0.7581** |
+| BC 棰勭儹鏉冮噸 | 鍥哄畾鍦烘櫙锛?2 绉嶅瓙锛岀‘瀹氭€э級 | **0.7280** |
+| RL锛堝浐瀹氬満鏅?20 杞級 | 鍥哄畾鍦烘櫙 | **0.819**锛堜粠 0.728 娑ㄨ捣锛?|
+| RL锛堝叏灞€璁粌 30 杞級 | 鏍囧噯楠岃瘉 | **0.713 卤 0.033**锛堟棤瓒嬪娍锛?|
+| 闅忔満绛栫暐 | 鈥?| 鈮?0.18 |
 
-要点：
-- BC 克隆会丢 5.2 个点（0.8104 → 0.7581），但把 RL 起点从"随机 ≈0.18"抬到"≈0.73–0.86"；
-- **RL 在固定场景能显著超过启发式，但全局训练卡住**。
-
-## 4. 当前困境：RL 全局训练成功率没有提升
-
-全局训练（30+ 轮）在标准验证协议上出现**成功率停滞**：
-
-- 6 次评估 = 0.706 / 0.715 / 0.759 / 0.711 / 0.729 / 0.659，均值 0.713 ± 0.033，
-  与"纯噪声围绕 0.713 波动"一致；低于 BC 起点（0.758）与启发式（0.810）；
-- 训练侧指标全平：8 局采样均值 0.858 → 0.842，reward 92 → 91，无趋势；
-- **critic 全程健康**（corr(V,R) = 0.89），说明问题在 actor 侧；
-- 固定场景 smoke 验证同样观察到：60 轮后 RL checkpoint 同口径评估 0.8574，
-  **低于** BC 基线 0.8622，且策略熵从 3.33 升到 4.01（向随机化漂移）。
-
-**假设方向**（待验证）：探索温度过高（1.2 起步）把策略推向高熵；PPO 每轮更新量太小
-（2880 步 ÷ minibatch 1024 ≈ 3 次梯度/轮）学不动；BC 起点已接近局部最优，继续 PPO 反而
-被高熵样本轻微污染。当前正在做：降低探索温度、加大每轮更新量、同口径评估验证。
-
-## 5. 代码结构
+瑕佺偣锛?- BC 鍏嬮殕浼氫涪 5.2 涓偣锛?.8104 鈫?0.7581锛夛紝浣嗘妸 RL 璧风偣浠?闅忔満 鈮?.18"鎶埌"鈮?.73鈥?.86"锛?- **RL 鍦ㄥ浐瀹氬満鏅兘鏄捐憲瓒呰繃鍚彂寮忥紝浣嗗叏灞€璁粌鍗′綇**銆?
+## 4. 褰撳墠鍥板锛歊L 鍏ㄥ眬璁粌鎴愬姛鐜囨病鏈夋彁鍗?
+鍏ㄥ眬璁粌锛?0+ 杞級鍦ㄦ爣鍑嗛獙璇佸崗璁笂鍑虹幇**鎴愬姛鐜囧仠婊?*锛?
+- 6 娆¤瘎浼?= 0.706 / 0.715 / 0.759 / 0.711 / 0.729 / 0.659锛屽潎鍊?0.713 卤 0.033锛?  涓?绾櫔澹板洿缁?0.713 娉㈠姩"涓€鑷达紱浣庝簬 BC 璧风偣锛?.758锛変笌鍚彂寮忥紙0.810锛夛紱
+- 璁粌渚ф寚鏍囧叏骞筹細8 灞€閲囨牱鍧囧€?0.858 鈫?0.842锛宺eward 92 鈫?91锛屾棤瓒嬪娍锛?- **critic 鍏ㄧ▼鍋ュ悍**锛坈orr(V,R) = 0.89锛夛紝璇存槑闂鍦?actor 渚э紱
+- 鍥哄畾鍦烘櫙 smoke 楠岃瘉鍚屾牱瑙傚療鍒帮細60 杞悗 RL checkpoint 鍚屽彛寰勮瘎浼?0.8574锛?  **浣庝簬** BC 鍩虹嚎 0.8622锛屼笖绛栫暐鐔典粠 3.33 鍗囧埌 4.01锛堝悜闅忔満鍖栨紓绉伙級銆?
+**鍋囪鏂瑰悜**锛堝緟楠岃瘉锛夛細鎺㈢储娓╁害杩囬珮锛?.2 璧锋锛夋妸绛栫暐鎺ㄥ悜楂樼喌锛汸PO 姣忚疆鏇存柊閲忓お灏?锛?880 姝?梅 minibatch 1024 鈮?3 娆℃搴?杞級瀛︿笉鍔紱BC 璧风偣宸叉帴杩戝眬閮ㄦ渶浼橈紝缁х画 PPO 鍙嶈€?琚珮鐔垫牱鏈交寰薄鏌撱€傚綋鍓嶆鍦ㄥ仛锛氶檷浣庢帰绱㈡俯搴︺€佸姞澶ф瘡杞洿鏂伴噺銆佸悓鍙ｅ緞璇勪及楠岃瘉銆?
+## 5. 浠ｇ爜缁撴瀯
 
 ```text
-qkd_rl/                  # 核心库：env / rl / link / data / baselines / evaluation
-configs/                 # 所有 YAML 配置（索引见 configs/README.md）
-scripts/rl/              # 训练入口：BC 预训练、MAPPO 训练、评估
-scripts/baselines/       # 启发式 / 基线
-scripts/milp/            # MILP 最优解与演示数据生成
-tests/                   # pytest 测试
-docs/                    # 算法说明与汇报（含全部实测数字与复现协议）
-```
+qkd_rl/                  # 鏍稿績搴擄細env / rl / link / data / baselines / evaluation
+configs/                 # 鎵€鏈?YAML 閰嶇疆锛堢储寮曡 configs/README.md锛?scripts/train/              # 璁粌鍏ュ彛锛欱C 棰勮缁冦€丮APPO 璁粌銆佽瘎浼?scripts/baselines/       # 鍚彂寮?/ 鍩虹嚎
+scripts/milp/            # MILP 鏈€浼樿В涓庢紨绀烘暟鎹敓鎴?tests/                   # pytest 娴嬭瘯
+docs/                    # 绠楁硶璇存槑涓庢眹鎶ワ紙鍚叏閮ㄥ疄娴嬫暟瀛椾笌澶嶇幇鍗忚锛?```
 
-## 6. 快速开始
-
+## 6. 蹇€熷紑濮?
 ```powershell
-# 生成速率归一化参考值（缺失时 p99 退化为常量 10.0）
-conda run -n pytorch python scripts/estimate_rate_stats.py
+# 鐢熸垚閫熺巼褰掍竴鍖栧弬鑰冨€硷紙缂哄け鏃?p99 閫€鍖栦负甯搁噺 10.0锛?conda run -n pytorch python scripts/estimate_rate_stats.py
 
-# 冒烟测试环境
+# 鍐掔儫娴嬭瘯鐜
 conda run -n pytorch python scripts/smoke_test_env.py
 
-# 跑测试
-conda run -n pytorch python -m pytest
+# 璺戞祴璇?conda run -n pytorch python -m pytest
 ```
 
-### 训练管线
+### 璁粌绠＄嚎
 
 ```powershell
-# ① 启发式专家预训练（行为克隆，默认边收集边训练）
-conda run -n pytorch python scripts/rl/supervised_train_pg_phased.py `
+# 鈶?鍚彂寮忎笓瀹堕璁粌锛堣涓哄厠闅嗭紝榛樿杈规敹闆嗚竟璁粌锛?conda run -n pytorch python scripts/train/supervised_train_pg_phased.py `
   --run-name supervised_pg_phased
 
-# ② Graph-MAPPO 强化学习（从 BC checkpoint warm-start）
-conda run -n pytorch python scripts/rl/train_graph_mappo.py `
+# 鈶?Graph-MAPPO 寮哄寲瀛︿範锛堜粠 BC checkpoint warm-start锛?conda run -n pytorch python scripts/train/train_graph_mappo.py `
   --mode curriculum --run-name exp1 `
   --checkpoint outputs/supervised_pg_phased/supervised_pg_phased_latest.pt `
   --device cuda
 
-# ③ 固定场景 smoke 验证（调参 / 验证奖励设计）
-conda run -n pytorch python scripts/rl/train_graph_mappo.py `
+# 鈶?鍥哄畾鍦烘櫙 smoke 楠岃瘉锛堣皟鍙?/ 楠岃瘉濂栧姳璁捐锛?conda run -n pytorch python scripts/train/train_graph_mappo.py `
   --configs train_mappo_smoke.yaml `
   --checkpoint outputs/supervised_pg_phased/supervised_pg_phased_latest.pt `
   --run-name rl_smoke_day0
 
-# ④ 同口径评估 checkpoint（与训练 success_rate 直接可比）
-conda run -n pytorch python scripts/rl/eval_fixed_scenario.py `
+# 鈶?鍚屽彛寰勮瘎浼?checkpoint锛堜笌璁粌 success_rate 鐩存帴鍙瘮锛?conda run -n pytorch python scripts/evaluate/eval_fixed_scenario.py `
   --checkpoint outputs/rl_smoke_day0/checkpoint_final.pt `
   --steps 1440 --seeds 7-14 --device cuda
 ```
 
-### 数据与产物（均不上传到仓库）
+### 鏁版嵁涓庝骇鐗╋紙鍧囦笉涓婁紶鍒颁粨搴擄級
 
 ```text
-dataset/global/*.h5     # 全年链路物理数据（525600 分钟 × 1978 链路）
-outputs/                # 训练产物：轨迹 / BC 权重 / RL checkpoint / 指标
-  trajs_pg_phased/      #   启发式引导数据（BC 训练用轨迹，pkl）
-  supervised_pg_phased/ #   BC 权重
-  rl_smoke_day0*/       #   RL checkpoint 与 metrics.jsonl
-weather/                # 天气数据
+dataset/global/*.h5     # 鍏ㄥ勾閾捐矾鐗╃悊鏁版嵁锛?25600 鍒嗛挓 脳 1978 閾捐矾锛?outputs/                # 璁粌浜х墿锛氳建杩?/ BC 鏉冮噸 / RL checkpoint / 鎸囨爣
+  trajs_pg_phased/      #   鍚彂寮忓紩瀵兼暟鎹紙BC 璁粌鐢ㄨ建杩癸紝pkl锛?  supervised_pg_phased/ #   BC 鏉冮噸
+  rl_smoke_day0*/       #   RL checkpoint 涓?metrics.jsonl
+weather/                # 澶╂皵鏁版嵁
 ```
 
-> 仓库只保留**代码 + 配置 + 文档 + 测试**。所有 `.h5`、`*.pkl` 轨迹、`*.pt` checkpoint、
-> `outputs/`、`dataset/global/*`（除 `rate_stats.json` 参考值）、`weather/` 均由 `.gitignore` 排除。
+> 浠撳簱鍙繚鐣?*浠ｇ爜 + 閰嶇疆 + 鏂囨。 + 娴嬭瘯**銆傛墍鏈?`.h5`銆乣*.pkl` 杞ㄨ抗銆乣*.pt` checkpoint銆?> `outputs/`銆乣dataset/global/*`锛堥櫎 `rate_stats.json` 鍙傝€冨€硷級銆乣weather/` 鍧囩敱 `.gitignore` 鎺掗櫎銆?
+## 7. 閰嶇疆绱㈠紩
 
-## 7. 配置索引
+閲嶈閰嶇疆瑙?[configs/README.md](configs/README.md)銆傝鐐癸細
 
-重要配置见 [configs/README.md](configs/README.md)。要点：
+- `configs/global.yaml`锛氬叏灞€璁粌/楠岃瘉绐楀彛涓庡叡浜姹傜瀛愩€?- `configs/features.yaml`锛氳妭鐐广€佺墿鐞嗚竟銆侀渶姹傝竟鐗瑰緛寮€鍏充笌瑙ｆ瀽缁村害銆?- `configs/env_small.yaml` / `configs/env_full.yaml`锛氬満鏅妯°€侀摼璺?QKP 瀹归噺銆佽姹傘€佽矾鐢便€佸鍔便€乺esolver 妯″紡銆?- `configs/graph_mappo.yaml`锛歟ncoder銆佸叡浜?actor銆乧ritic銆乵asked categorical 璁剧疆銆?- `configs/train_mappo.yaml`锛歳ollout 闀垮害銆丟AE/PPO 瓒呭弬銆佸涔犵巼銆佹棩蹇椾笌 checkpoint 闂撮殧銆?- `configs/train_mappo_smoke.yaml`锛氬浐瀹氬満鏅?smoke 璁粌锛堝浐瀹?day + 鍥哄畾璇锋眰绉嶅瓙锛夈€?- `configs/train_profiles.yaml`锛氳缁冩ā寮忥紙`continuous`銆乣fixed_day`銆乣curriculum`銆乣demand_edge`锛夈€?- `configs/baselines.yaml`锛氬惎鍙戝紡鍩虹嚎寮€鍏充笌鍙傛暟銆?
+## 8. 鏂囨。
 
-- `configs/global.yaml`：全局训练/验证窗口与共享请求种子。
-- `configs/features.yaml`：节点、物理边、需求边特征开关与解析维度。
-- `configs/env_small.yaml` / `configs/env_full.yaml`：场景规模、链路 QKP 容量、请求、路由、奖励、resolver 模式。
-- `configs/graph_mappo.yaml`：encoder、共享 actor、critic、masked categorical 设置。
-- `configs/train_mappo.yaml`：rollout 长度、GAE/PPO 超参、学习率、日志与 checkpoint 间隔。
-- `configs/train_mappo_smoke.yaml`：固定场景 smoke 训练（固定 day + 固定请求种子）。
-- `configs/train_profiles.yaml`：训练模式（`continuous`、`fixed_day`、`curriculum`、`demand_edge`）。
-- `configs/baselines.yaml`：启发式基线开关与参数。
-
-## 8. 文档
-
-- [configs/README.md](configs/README.md)：配置索引
-- [TRAINING_GUIDE.md](TRAINING_GUIDE.md)：完整训练操作手册
-- [docs/启发式与强化学习算法说明.md](docs/启发式与强化学习算法说明.md)：算法原理、基线、效果对比、RL 训练过程（含全部实测数字）
-- [docs/BFS引导强化学习预训练汇报.md](docs/BFS引导强化学习预训练汇报.md)：预训练汇报
+- [configs/README.md](configs/README.md)锛氶厤缃储寮?- [TRAINING_GUIDE.md](TRAINING_GUIDE.md)锛氬畬鏁磋缁冩搷浣滄墜鍐?- [docs/鍚彂寮忎笌寮哄寲瀛︿範绠楁硶璇存槑.md](docs/鍚彂寮忎笌寮哄寲瀛︿範绠楁硶璇存槑.md)锛氱畻娉曞師鐞嗐€佸熀绾裤€佹晥鏋滃姣斻€丷L 璁粌杩囩▼锛堝惈鍏ㄩ儴瀹炴祴鏁板瓧锛?- [docs/BFS寮曞寮哄寲瀛︿範棰勮缁冩眹鎶?md](docs/BFS寮曞寮哄寲瀛︿範棰勮缁冩眹鎶?md)锛氶璁粌姹囨姤

@@ -7,7 +7,7 @@ import json
 import pytest
 import torch
 
-from qkd_rl.rl.algos.mappo_trainer import MAPPOTrainer
+from qkd_rl.rl.algos.mappo_trainer import MAPPOTrainer, _MIN_BATCHES_BEFORE_KL_STOP
 from qkd_rl.rl.algos.policy import MAPPOPolicy
 from qkd_rl.core.config import deep_merge
 from qkd_rl.env.factory import build_env_from_config, load_default_config
@@ -231,10 +231,19 @@ def test_update_with_replay_steps(tmp_path):
     assert stats.actor_loss is not None
 
 
-def test_target_kl_stops_all_remaining_ppo_epochs(tmp_path):
-    """A KL breach must stop the update, not merely one epoch's minibatches."""
+def test_target_kl_stops_update_after_the_guard_floor(tmp_path):
+    """A KL breach ends the whole update -- but not on one noisy draw.
+
+    The trip test is on the RUNNING MEAN KL and is gated by
+    ``_MIN_BATCHES_BEFORE_KL_STOP``. Both halves matter and both are pinned
+    here: with ``epochs=1`` an early stop aborts the entire update, so a
+    per-minibatch test would throw the epoch away on a single noisy estimate
+    (measured: one batch of ~45 ended an update after 18.4 s of a 302 s
+    budget). This asserts the stop still happens -- well before the 5 epochs on
+    offer -- and that it happens exactly at the floor, not sooner.
+    """
     config = _tiny_config(tmp_path)
-    config["train"]["ppo"]["epochs"] = 3
+    config["train"]["ppo"]["epochs"] = 5
     config["train"]["ppo"]["target_kl"] = 0.01
     env = build_env_from_config(config)
     model = GraphMAPPOActorCritic(env.action_resolver.action_space, config)
@@ -247,8 +256,9 @@ def test_target_kl_stops_all_remaining_ppo_epochs(tmp_path):
             self.sample_calls = 0
 
         def sample(self, _minibatch_size, _rng):
+            # One minibatch per epoch, so sample_calls counts minibatches.
             self.sample_calls += 1
-            return [[object()], [object()]]
+            return [[object()]]
 
     buffer = Buffer()
     parameter = next(model.parameters())
@@ -258,9 +268,11 @@ def test_target_kl_stops_all_remaining_ppo_epochs(tmp_path):
         return zero, zero, zero, torch.tensor(1.0), zero
 
     trainer._loss_for_batch = high_kl_loss
-    trainer.update(buffer)
+    stats = trainer.update(buffer)
 
-    assert buffer.sample_calls == 1
+    assert stats.n_minibatches == _MIN_BATCHES_BEFORE_KL_STOP
+    assert buffer.sample_calls == _MIN_BATCHES_BEFORE_KL_STOP
+    assert buffer.sample_calls < config["train"]["ppo"]["epochs"]
 
 
 def test_curriculum_switches_rollout_length_and_episode_count(tmp_path):

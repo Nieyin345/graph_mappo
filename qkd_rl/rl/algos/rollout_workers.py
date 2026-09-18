@@ -23,7 +23,13 @@ from pathlib import Path
 import torch
 
 from qkd_rl.rl.algos.policy import MAPPOPolicy
-from qkd_rl.rl.algos.rollout_buffer import RolloutBuffer, RolloutStep, state_free_obs
+from qkd_rl.rl.algos.rollout_buffer import (
+    RolloutBuffer,
+    RolloutStep,
+    accumulate_rollout_debug,
+    new_rollout_debug,
+    state_free_obs,
+)
 from qkd_rl.env.factory import build_env_from_config
 from qkd_rl.rl.models.graph_mappo import GraphMAPPOActorCritic
 
@@ -40,19 +46,23 @@ def _run_episode(
 ):
     """Run one episode and return finished ``RolloutStep``s (CPU tensors).
 
-    Returns ``(steps, episode_reward, episode_summary)``.
+    Returns ``(steps, episode_reward, episode_summary, rollout_debug)`` where
+    ``rollout_debug`` is the per-episode telemetry accumulated with the same
+    shared helper the trainer's single-process loop uses, so the trainer can
+    keep writing rollout_debug.jsonl with n_workers > 1.
     """
     if episode_steps is not None:
         env.config["env"]["episode_steps"] = int(episode_steps)
     obs = env.reset(seed=seed)
     buffer = RolloutBuffer(gamma, gae_lambda, device="cpu", value_target=value_target)
+    rollout_debug = new_rollout_debug()
     ep_reward = 0.0
     steps = 0
     while steps < rollout_steps:
         resolver_mode = env.action_resolver.mode
         with torch.no_grad():
             step = policy.act(obs, build_scores=resolver_mode != "mutual_choice")
-        next_obs, reward, terminated, truncated, _info = env.step(
+        next_obs, reward, terminated, truncated, info = env.step(
             step.actions,
             step.action_scores,
             edge_scores=step.edge_scores,
@@ -62,6 +72,7 @@ def _run_episode(
                 else list(step.matched_edges or [])
             ),
         )
+        accumulate_rollout_debug(rollout_debug, info, len(env.last_activated_edges))
         if resolver_mode == "max_weight_matching":
             matched_edges = list(env.last_matched_arcs)
             mean_lp, mean_entropy = policy.log_prob_entropy_for_matching(
@@ -99,7 +110,7 @@ def _run_episode(
         with torch.no_grad():
             last_value = policy.act(obs).value.detach().cpu()
     buffer.finish_episode(last_value)
-    return buffer.steps, ep_reward, env.metrics.episode_summary()
+    return buffer.steps, ep_reward, env.metrics.episode_summary(), rollout_debug
 
 
 def _worker_entry(config: dict, device: str, task_queue, result_queue, job_dir: str, _worker_id: int) -> None:
@@ -124,12 +135,16 @@ def _worker_entry(config: dict, device: str, task_queue, result_queue, job_dir: 
         # schedule as the trainer's PPO evaluation, or the old/new log-probs
         # disagree and every PPO ratio/KL is systematically biased.
         policy.model.actor.temperature = float(temperature)
-        steps, ep_reward, summary = _run_episode(
+        steps, ep_reward, summary, rollout_debug = _run_episode(
             env, policy, seed, rollout_steps, gamma, gae_lambda, value_target, episode_steps
         )
         path = Path(job_dir) / f"job_{seed}.pkl"
         with path.open("wb") as f:
-            pickle.dump((steps, ep_reward, summary), f, protocol=4)
+            # Protocol 5: numpy arrays use the out-of-band buffer path, which is
+            # materially faster than 4 on the multi-hundred-MB episodes this
+            # ships back. Raise the floor rather than probing -- Python 3.10's
+            # default is already 5 for most objects.
+            pickle.dump((steps, ep_reward, summary, rollout_debug), f, protocol=5)
         result_queue.put(seed)
 
 
@@ -162,20 +177,25 @@ class RolloutWorkerPool:
         rollout_steps: int,
         episode_steps_list: list[int] | None = None,
         temperature: float = 1.0,
-    ) -> list[tuple[int, list, float, dict]]:
-        """Dispatch one episode per seed; returns results sorted by seed."""
+    ) -> list[tuple[int, list, float, dict, dict]]:
+        """Dispatch one episode per seed; returns results sorted by seed.
+
+        Each item is ``(seed, steps, episode_reward, episode_summary,
+        rollout_debug)``; the trainer sums the per-episode ``rollout_debug``
+        dicts to keep the per-component reward breakdown available.
+        """
         if episode_steps_list is None:
             episode_steps_list = [int(rollout_steps)] * len(seeds)
         for seed, episode_steps in zip(seeds, episode_steps_list):
             self.task_queue.put((weights, seed, int(rollout_steps), int(episode_steps), float(temperature)))
-        results: list[tuple[int, list, float, dict]] = []
+        results: list[tuple[int, list, float, dict, dict]] = []
         for _ in seeds:
             seed_done = self.result_queue.get()
             path = self.job_dir / f"job_{seed_done}.pkl"
             with path.open("rb") as f:
-                steps, ep_reward, summary = pickle.load(f)
+                steps, ep_reward, summary, rollout_debug = pickle.load(f)
             path.unlink(missing_ok=True)
-            results.append((seed_done, steps, ep_reward, summary))
+            results.append((seed_done, steps, ep_reward, summary, rollout_debug))
         results.sort(key=lambda item: item[0])
         return results
 

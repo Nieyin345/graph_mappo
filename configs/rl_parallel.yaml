@@ -1,0 +1,23 @@
+# A/B overlay: multi-process rollout workers. Load it AFTER rl_algorithm.yaml
+# so these values win (later --configs entries override earlier ones):
+#
+#   python scripts/train/train_graph_mappo.py \
+#       --configs rl_algorithm.yaml train_full_rl.yaml rl_parallel.yaml \
+#       --checkpoint outputs/supervised_pg_phased/supervised_pg_phased_latest.pt \
+#       --run-name full_rl_w8 --num-updates 5
+#
+# Why this is now safe: the worker path accumulates the same per-component
+# reward telemetry as the single-process lockstep loop (shared
+# accumulate_rollout_debug in rollout_buffer.py; workers sum per episode, the
+# trainer sums across episodes), so rollout_debug.jsonl keeps being written
+# -- that was the only documented reason for pinning n_rollout_workers: 1.
+#
+# Why 8: server measurements (docs/deployment/server.md §5.2, 2026-09-15,
+# real config 1440 steps x 8 episodes) show rollout 71.3 s at 4 workers vs
+# 46.1 s at 8 (1.55x), and success rate unchanged vs the 1-process baseline
+# (0.8635/0.8662/0.8632 vs 0.865). Workers are Python/numpy-bound, so each
+# stays pinned to 1 torch thread (rollout_workers.py); the trainer's own
+# thread budget still comes from OMP_NUM_THREADS/MKL_NUM_THREADS (THREADS=2
+# protocol unchanged).
+train:
+  n_rollout_workers: 8

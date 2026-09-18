@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import networkx as nx
 
@@ -18,7 +18,7 @@ class ResolvedAction:
     # The directed arcs ``(src, dst)`` actually matched this slot. The policy
     # verifies / reconstructs its sampled matching from these; key generation
     # uses ``activated_edges`` (undirected pair ids) so routing/QKP are unchanged.
-    matched_arcs: list[tuple[str, str]] = None
+    matched_arcs: list[tuple[str, str]] = field(default_factory=list)
 
 
 class ActionResolver:

@@ -18,6 +18,92 @@ from qkd_rl.rl.algos.gae import compute_gae
 from qkd_rl.env.graph_builder import GraphObservation
 
 
+# ---- rollout telemetry shared by trainer and workers -----------------------
+# The per-component reward breakdown (rollout_debug.jsonl) must be accumulated
+# in BOTH rollout paths: the trainer's single-process loop and the worker
+# processes (which see `info` first and ship episodes back). Keeping the key
+# list and the accumulation here means the two paths cannot drift apart --
+# historically that drift is what made n_rollout_workers>1 lose the breakdown
+# and the pin to 1 stick.
+_ROLLOUT_DEBUG_KEYS: tuple[str, ...] = (
+    "steps",
+    "activated_edges",
+    "generated_keys",
+    "served_keys",
+    "failed_keys",
+    "waiting_keys",
+    "qkp_utilization",
+    "conflict_count",
+    "arrived_keys",
+    "reward_total",
+    "reward_served",
+    "reward_generated",
+    "reward_dense",
+    "reward_storage",
+    "reward_keep_active",
+    "reward_failed",
+    "reward_waiting",
+    "reward_switch",
+    "reward_expired",
+    "reward_conflict",
+    # attribution split: how much of the served volume earned the full
+    # served reward (keys generated this slot) vs the discounted
+    # history-stock part vs nothing at all (pure stock service).
+    "attributed_served",
+    "history_utilized",
+)
+
+# Scalar info fields copied straight from the env step.
+_ROLLOUT_DEBUG_INFO_KEYS: tuple[str, ...] = (
+    "generated_keys",
+    "served_keys",
+    "failed_keys",
+    "waiting_keys",
+    "qkp_utilization",
+    "conflict_count",
+    "arrived_keys",
+)
+
+# (debug key, RewardDetail attribute) pairs summed when the env provides the
+# per-component reward breakdown.
+_ROLLOUT_DEBUG_DETAIL_KEYS: tuple[tuple[str, str], ...] = (
+    ("reward_total", "total"),
+    ("reward_served", "served_reward"),
+    ("reward_generated", "generated_reward"),
+    ("reward_dense", "dense_reward"),
+    ("reward_storage", "storage_reward"),
+    ("reward_keep_active", "keep_active_reward"),
+    ("reward_failed", "failed_penalty"),
+    ("reward_waiting", "waiting_penalty"),
+    ("reward_switch", "switch_penalty"),
+    ("reward_expired", "expired_key_penalty"),
+    ("reward_conflict", "conflict_penalty"),
+    ("attributed_served", "attributed_served"),
+    ("history_utilized", "history_utilized"),
+)
+
+
+def new_rollout_debug() -> dict[str, float]:
+    """Fresh accumulator with the canonical rollout-debug key set."""
+    return dict.fromkeys(_ROLLOUT_DEBUG_KEYS, 0.0)
+
+
+def accumulate_rollout_debug(debug: dict[str, float], info: dict, activated_count: int) -> None:
+    """Fold one env step's telemetry into a rollout-debug accumulator.
+
+    ``debug`` comes from ``new_rollout_debug()`` (trainer) or is created per
+    episode in the worker; the trainer sums the per-episode dicts afterwards.
+    """
+    debug["steps"] += 1.0
+    debug["activated_edges"] += float(activated_count)
+    for key in _ROLLOUT_DEBUG_INFO_KEYS:
+        debug[key] += float(info.get(key, 0.0))
+    detail = info.get("reward_detail")
+    if detail is not None:
+        for key, attr in _ROLLOUT_DEBUG_DETAIL_KEYS:
+            debug[key] += float(getattr(detail, attr))
+
+
 @dataclass
 class RolloutStep:
     obs: GraphObservation
@@ -33,6 +119,43 @@ class RolloutStep:
     returns: torch.Tensor | None = None
     advantages: torch.Tensor | None = None
     matched_edges: list[tuple[str, str]] | None = None
+
+    # ---- cross-process shipping -------------------------------------------
+    # RolloutStep is what the workers send back to the trainer, and the trainer
+    # is on the critical path: it unpickles every episode serially while the
+    # workers sit idle, so the payload size IS the rollout's wall time.
+    #
+    # Measured: 115 KB per step is shipped, but the observation is only 58 KB
+    # of that. The difference is `log_probs` / `entropies`, which hold ONE TORCH
+    # TENSOR PER NODE even though every node carries the same scalar (see the
+    # PPO comment in MAPPOTrainer: "every node shares the same scalar, so any
+    # node id yields it"). That is ~180 tiny tensors per step, and pickling
+    # runs at ~10 MB/s because of them.
+    #
+    # Collapsing each to (keys, value) keeps the field's meaning identical --
+    # __setstate__ rebuilds the same dict, with the nodes sharing one tensor --
+    # while cutting the object count per step by roughly two orders of magnitude.
+    _SHARED_FIELDS = ("log_probs", "entropies")
+
+    def __getstate__(self) -> dict:
+        state = self.__dict__.copy()
+        for name in self._SHARED_FIELDS:
+            value = state.get(name)
+            if not value or len(value) < 2:
+                continue
+            first = next(iter(value.values()))
+            if all(item is first or torch.equal(item, first) for item in value.values()):
+                state[name] = (tuple(value.keys()), first)
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        for name in self._SHARED_FIELDS:
+            value = state.get(name)
+            # A 2-tuple of (keys, value); the expanded form is a dict.
+            if isinstance(value, tuple) and len(value) == 2 and isinstance(value[0], tuple):
+                keys, shared = value
+                state[name] = dict.fromkeys(keys, shared)
+        self.__dict__.update(state)
 
 
 def state_free_obs(obs: GraphObservation | None) -> GraphObservation | None:

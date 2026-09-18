@@ -125,3 +125,65 @@ def test_mc_value_target_invalid_mode_rejected():
     with pytest.raises(ValueError):
         RolloutBuffer(gamma=0.9, gae_lambda=0.95, value_target="nope")
 
+
+def _shipped_step(log_probs: dict[str, torch.Tensor]) -> RolloutStep:
+    return RolloutStep(
+        obs=None,
+        actions={"n0": ("a", "b")},
+        log_probs=log_probs,
+        entropies={k: v * 2 for k, v in log_probs.items()},
+        value=torch.tensor(1.0),
+        reward=1.0,
+        terminated=False,
+        truncated=False,
+    )
+
+
+def test_shipping_collapses_repeated_per_node_scalars():
+    """Every node carries the same log-prob, so the pickled form collapses it.
+
+    Workers ship one episode back per update and the trainer unpickles all of
+    it serially, so the object count in this payload is the rollout's critical
+    path. The observation is only half the bytes; the other half is ~180 tiny
+    per-node tensors per step that all hold the same value.
+    """
+    import pickle
+
+    nodes = [f"n{i}" for i in range(50)]
+    shared = torch.tensor(-1.25)
+
+    back = pickle.loads(pickle.dumps(_shipped_step({n: shared for n in nodes})))
+    assert list(back.log_probs) == nodes
+    for node in nodes:
+        torch.testing.assert_close(back.log_probs[node], shared)
+        torch.testing.assert_close(back.entropies[node], shared * 2)
+
+    # The effect that matters: at a fixed node count the shipped payload no
+    # longer carries one tensor per node. Measured against the same step with
+    # genuinely distinct per-node values -- which is also the case the collapse
+    # must NOT fire on, so the two tests pin each other.
+    n = 500
+    collapsed = pickle.dumps(_shipped_step({f"n{i}": shared.clone() for i in range(n)}))
+    distinct = pickle.dumps(_shipped_step({f"n{i}": torch.tensor(-1.0 - i * 1e-3) for i in range(n)}))
+    assert len(collapsed) < len(distinct) / 2
+
+
+def test_shipping_preserves_distinct_per_node_values():
+    """The collapse must not fire when the values actually differ."""
+    import pickle
+
+    step = _shipped_step({f"n{i}": torch.tensor(-1.25 * (i + 1)) for i in range(6)})
+    back = pickle.loads(pickle.dumps(step))
+    for i in range(6):
+        torch.testing.assert_close(back.log_probs[f"n{i}"], torch.tensor(-1.25 * (i + 1)))
+
+
+def test_shipping_handles_empty_and_single_entry_dicts():
+    import pickle
+
+    for value in ({}, {"only": torch.tensor(0.5)}):
+        back = pickle.loads(pickle.dumps(_shipped_step(value)))
+        assert list(back.log_probs) == list(value)
+        for node, tensor in value.items():
+            torch.testing.assert_close(back.log_probs[node], tensor)
+

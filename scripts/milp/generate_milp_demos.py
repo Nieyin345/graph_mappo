@@ -23,7 +23,7 @@ Usage:
     python scripts/generate_milp_demos.py --append --out outputs/milp_demos
 """
 from __future__ import annotations
-import os, sys, time, json, random, math, threading
+import os, sys, time, json, threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]

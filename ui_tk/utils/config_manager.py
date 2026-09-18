@@ -9,8 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
-import os
-import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -55,28 +54,23 @@ def load_default_config() -> dict:
 
 
 def load_train_profiles() -> dict[str, dict]:
-    """Return {profile_name: profile_dict} from configs/modes/ directory."""
-    modes_dir = CONFIG_DIR / "modes"
-    if not modes_dir.is_dir():
-        return {}
-    profiles: dict[str, dict] = {}
-    for f in sorted(modes_dir.glob("*.yaml")):
-        name = f.stem  # e.g. "random_episode" from "random_episode.yaml"
-        profiles[name] = _load_yaml(f)
-    return profiles
+    """Return {profile_name: profile_dict} from train_profiles.yaml."""
+    path = CONFIG_DIR / "train_profiles.yaml"
+    data = _load_yaml(path) if path.is_file() else {}
+    return copy.deepcopy(data.get("train_profiles", {}))
 
 
 def get_profile_keys() -> list[str]:
-    """Return sorted list of available profile names from modes/ directory."""
+    """Return sorted list of available profile names from train_profiles.yaml."""
     return sorted(load_train_profiles().keys())
 
 
 def get_profile(name: str) -> dict:
-    """Return the profile dict for a given name from configs/modes/{name}.yaml."""
-    path = CONFIG_DIR / "modes" / f"{name}.yaml"
-    if not path.is_file():
+    """Return the profile dict for a given name from train_profiles.yaml."""
+    profiles = load_train_profiles()
+    if name not in profiles:
         raise ValueError(f"Unknown profile: {name}. Available modes: {get_profile_keys()}")
-    return copy.deepcopy(_load_yaml(path))
+    return copy.deepcopy(profiles[name])
 
 
 def build_resolved_config(profile_name: str, overrides: dict | None = None) -> dict:
@@ -196,11 +190,11 @@ def save_baselines_config(cfg: dict) -> None:
         yaml.safe_dump(data, f, sort_keys=False, allow_unicode=True, indent=2)
 
 
-def generate_command(profile_name: str, overrides: dict, run_name: str, checkpoint: str | None = None) -> str:
+def generate_command(profile_name: str, overrides: dict, run_name: str, checkpoint: str | None = None) -> tuple[str, Path]:
     """Generate the CLI command for training."""
     parts = [
-        "D:\\anaconda1\\envs\\pytorch\\python.exe",
-        "scripts/rl/train_graph_mappo.py",
+        sys.executable,
+        "scripts/train/train_graph_mappo.py",
         f"--mode {profile_name}",
         f"--run-name {run_name}",
     ]
@@ -208,7 +202,7 @@ def generate_command(profile_name: str, overrides: dict, run_name: str, checkpoi
     override_path = ROOT / "outputs" / ".ui_override.yaml"
     with override_path.open("w", encoding="utf-8") as f:
         yaml.safe_dump(overrides, f, sort_keys=False, allow_unicode=True)
-    parts.append(f"--configs ui_override.yaml" if not Path(override_path.name).exists() else f"--configs {override_path.name}")
+    parts.append(f"--configs {override_path.relative_to(ROOT)}")
 
     # Actually, need to handle the path correctly. Let's generate the override relative to project root.
     # The override file will be written before training starts.

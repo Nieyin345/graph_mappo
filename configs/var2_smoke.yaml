@@ -1,0 +1,8 @@
+# 冒烟用：把 eval_interval 压到 1，让**第 1 轮**就触发一次验证。
+#
+# 存在的唯一理由：刚给 evaluate_validation 加了 `per_seed_success`，而
+# train_diag_fast 的 eval_interval 是 5 —— 直接开整浪的话，要等 12 分钟才
+# 知道字段有没有落盘；万一没写进去，整浪（70 分钟）都得重跑。
+train:
+  logging:
+    eval_interval: 1
