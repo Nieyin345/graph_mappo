@@ -11,7 +11,19 @@
 #
 # 事件：RUNNING/VAL 变化、ALERT（某个 run 消失但别的还在跑 = 疑似被杀）、
 #       LOST（连续 3 次不通）、ALLDONE。
+#
+# 两种用法：
+#   wake_poll.sh          一直轮询，每次变化打一行（配 Monitor 用，Monitor 上限 30 分钟）
+#   wake_poll.sh --once   **看到第一次变化就退出**（配后台 bash 用）
+#
+# 为什么要 --once：后台 bash 只在**进程退出**时才唤醒主代理。一个永不退出的
+# 轮询循环因此**永远叫不醒人**——它照样在跑，但那是"静默"，而静默看起来和
+# "还在跑"完全一样（这正是本文件开头反对 tail -f 的同一个理由，只是换了一层）。
+# 所以长等待要用 --once：条件满足 → 打印 → 退出 → 唤醒。
 set -u
+
+ONCE=0
+[ "${1:-}" = "--once" ] && ONCE=1
 
 PREV=""
 FAILS=0
@@ -25,6 +37,7 @@ while true; do
     FAILS=$((FAILS + 1))
     if [ "$FAILS" -eq 3 ]; then
       echo "LOST ssh 连续 3 次不通，服务器可能已到期"
+      [ "$ONCE" -eq 1 ] && exit 0
     fi
     sleep 120
     continue
@@ -52,6 +65,7 @@ while true; do
         echo "  仍存活：$RUNS"
         printf '%s\n' "$OUT"
         echo "---"
+        [ "$ONCE" -eq 1 ] && exit 0
       fi
     fi
   fi
@@ -60,6 +74,7 @@ while true; do
   if [ -n "$PREV" ] && [ "$HASH" != "$PREV" ] && [ -n "$HASH" ]; then
     printf '%s\n' "$OUT"
     echo "---"
+    [ "$ONCE" -eq 1 ] && exit 0
   fi
   PREV="$HASH"
 
