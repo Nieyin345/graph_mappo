@@ -66,6 +66,28 @@ def align(d: Path):
     return last_u, vals
 
 
+def series(d: Path):
+    """返回 {轮: (均值, 逐种子 list)} —— 配对比较要逐种子值，align() 只给均值。
+
+    为什么要逐种子：本项目的规矩是**配对才是可比口径**（docs/测试规范.md §4）。
+    两臂各自对同一批验证种子求均值再相减，与"逐种子相减再求均值"不是一回事；
+    后者能把种子间的难度差抵掉，前者不能。所以配对比较必须拿到 per_seed_success。
+    """
+    out = {}
+    last_u = None
+    for r in lines(d / "metrics.jsonl"):
+        if "update" in r:
+            last_u = r["update"]
+        ev = r.get("eval_validation")
+        if isinstance(ev, dict) and ev.get("per_seed_success"):
+            try:
+                out[last_u] = (float(ev["mean_success_rate"]),
+                               [float(x) for x in ev["per_seed_success"]])
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
 def meminfo():
     mi = {}
     try:
@@ -233,6 +255,36 @@ def main():
             if parts:
                 cmp_s += "  vs_r8base: " + " ".join(parts)
         print(f"VAL {n} u={u} {s}{cmp_s}")
+
+    # 旋钮臂 vs ent01 基线：**配对**差（同训练种子 → 同验证种子集）。
+    # 这是本轮实验唯一要回答的问题，所以直接打出来，不必等我去手工配对：
+    # 唤醒时看到的就是判决所需的那一行。
+    for arm in ("vcoef1", "ep2", "mini512", "runt"):
+        tot = []
+        for seed in ("42", "43", "44"):
+            a = f"{arm}_s{seed}"
+            b = f"ent01_s{seed}"
+            sa, sb = series(OUT / a), series(OUT / b)
+            if not sa or not sb:
+                continue
+            common = sorted(set(sa) & set(sb))
+            if not common:
+                continue
+            u = common[-1]
+            pa, pb = sa[u][1], sb[u][1]
+            if len(pa) != len(pb) or not pa:
+                continue
+            d = [pb[i] - pa[i] for i in range(len(pa))]
+            md = sum(d) / len(d)
+            tot.append(md)
+            print(f"PAIR {arm}_s{seed} u={u} {md:+.4f} "
+                  f"(臂 {sa[u][0]:.4f} − 基线 {sb[u][0]:.4f})")
+        if tot:
+            m = sum(tot) / len(tot)
+            tag = ("有效 >=+0.035" if m >= 0.035 else
+                   "有害 <=-0.035" if m <= -0.035 else
+                   "测不出（<0.035）")
+            print(f"VERDICT {arm} 三种子均值 Δ={m:+.4f} → {tag}")
 
 
 if __name__ == "__main__":

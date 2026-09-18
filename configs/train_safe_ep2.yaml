@@ -1,0 +1,20 @@
+# 旋钮 B：`epochs` 1 → 2
+#
+# 依据：诊断场景 90 轮 `ent_ep2` 是全场第一（0.8359），且 **vs ent 的增量独立
+# 显著**：+0.0123 (t=4.31)。这是 r4 里唯一的**新**真增益，但同样只有 1 个种子、
+# 且在诊断场景（本项目已证实"诊断场景只能筛能不能学，不能定哪个配置更好"）。
+#
+# 代价（必须记住）：epochs 2 每轮要跑两遍 minibatch，90 轮时比其他臂晚 1 小时
+# （3.9h vs 2.9h）。也就是说它若只是"打平"，**在预算上是亏的**——
+# 判据因此不能只看 Δ，还要看"同预算下谁更高"：epochs 2 的 30 轮 ≈ 其他臂的 60 轮。
+#
+# 已知的相互作用：`target_kl=0.02` 的早停语义在 epochs>1 时**不同**——
+# epochs=1 时早停会中止整轮更新，epochs=2 时可以只停掉第二个 epoch。
+# 代码注释（mappo_trainer.py:713-722）明确写了这一点，所以本臂的
+# `stop_for_kl` 行为与基线不可直接比，读指标时要注意 total_batches。
+#
+# 用法（排在 train_full_rl.yaml 之后）：
+#   --configs rl_algorithm.yaml train_full_rl.yaml train_safe_ep2.yaml
+train:
+  ppo:
+    epochs: 2

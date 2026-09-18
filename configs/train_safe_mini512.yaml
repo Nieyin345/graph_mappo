@@ -1,0 +1,21 @@
+# 旋钮 C：`minibatch_size` 256 → 512
+#
+# 依据：诊断场景 `mini512` = +0.0546 (t=10.3) 对 base，是 r4 三臂里诊断场景最强的；
+# 但搬到真实配置**掉到不显著**（+0.0167, t=0.80）。它正是"跨场景不保持"那条
+# 方法論结论的样本，所以真实配置上的复筛对它最有价值 —— 要么它其实有效
+# （r4 是噪声埋掉了），要么"诊断场景胜出者搬不过来"这条规律再得一分。
+#
+# 只改 `train.ppo.minibatch_size`，**不动 `rollout_batch_envs`**（保持 8）。
+# 后者是 block-diagonal forward 的图上上限，是另一个旋钮；rl_algorithm.yaml
+# 里记着它的调优是"G=8 比两次 G=4 便宜"，与 minibatch 无关。
+#
+# 语义代价（重要）：minibatch 越大，一轮内的梯度更新次数越少
+# （256 → 45 次，512 → 23 次，见 mappo_trainer.py 的 forward 计数记录）。
+# epochs 也乘在上面。所以本臂与基线**不是"同一算法的不同实现"**，
+# 而是**同预算下梯度噪声更大的版本**——若它更好，是"噪声更小"，不是"算得更准"。
+#
+# 用法（排在 train_full_rl.yaml 之后）：
+#   --configs rl_algorithm.yaml train_full_rl.yaml train_safe_mini512.yaml
+train:
+  ppo:
+    minibatch_size: 512

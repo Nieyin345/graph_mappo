@@ -1,0 +1,19 @@
+# 旋钮 A：`value_coef` 0.5 → 1.0
+#
+# 依据：诊断场景 90 轮 `vcoef1` = +0.0542 (t=8.6) 对 base（见 docs/训练诊断记录.md
+# 「第四浪」）；真实配置 r4 里它是唯一胜者（+0.0614, t=2.49）——但 r4 跑在
+# 播种修复之前、且每臂 1 个种子，所以那条读数只能当"待复筛的线索"。
+#
+# 机理（与"降低 actor 更新方差"同族）：提高 critic 权重让 critic 拟合更稳，
+# 优势估计的噪声变小，actor 的更新方向因此更一致。注意 critic_lr 已经是
+# actor_lr 的 3.3 倍（0.001 vs 0.0003），所以这条不是"critic 学得不够快"，
+# 而是"critic 在 loss 里的相对权重"。
+#
+# 风险：value_coef 过大可能让 critic 主导梯度。r4 的 value_return_corr 未记录，
+# 本轮要在 metrics 里看 value_return_corr 有没有塌。
+#
+# 用法（排在 train_full_rl.yaml 之后）：
+#   --configs rl_algorithm.yaml train_full_rl.yaml train_safe_vcoef1.yaml
+train:
+  ppo:
+    value_coef: 1.0
