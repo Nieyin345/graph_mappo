@@ -88,7 +88,7 @@ rollout_s, update_s, elapsed_s
 | `num_updates` | 更新次数 |
 | `rollout_steps` | 每次更新采样的步数 |
 | `episodes_per_update` | 每次更新并行跑几局 |
-| `value_target` | `gae`（截断局用 bootstrap，推荐）或 `mc` |
+| `value_target` | **critic 的目标**：`gae`（GAE 回报，推荐）或 `mc`（无 bootstrap 的蒙特卡洛回报，仅供消融）。它**不控制 bootstrap 与否** —— 那是 env 返回的 `terminated`/`truncated` 决定的（`terminated` 抑制 bootstrap 并经 `γλ` 向后衰减，`truncated` 则照常 bootstrap）。actor 的 GAE 优势在两种模式下都保留 |
 | `gamma` | 折扣因子 |
 | `gae_lambda` | GAE 参数 |
 | `curriculum.stages` | 课程阶段，每阶段含 `until_update / rollout_steps / episodes_per_update` |
