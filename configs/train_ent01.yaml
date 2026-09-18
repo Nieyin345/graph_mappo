@@ -1,0 +1,32 @@
+# entropy_coef: 0.001 → 0.01
+#
+# 依据（2026-09-19 从 outputs/ 历史 run 挖出，两次**同种子配对**对照）：
+#
+#   对照一（r7，配置差异只有这一个字段，diff 确认 2/271 字段不同）：
+#     字段                    r7_base    r7_fix_ent
+#     train.ppo.entropy_coef  0.001      0.01
+#     验证成功率(u20)         0.6159     **0.7113**     +0.0954
+#     且 0.7113 已超过专家 0.6980 —— 全项目唯一超过专家的单参数改动。
+#
+#   对照二（r8，同种子 42，只差 entropy_coef）：
+#     r8_base_s42  (0.001) u5 = 0.6480
+#     r8_ent01_s42 (0.01)  u5 = **0.6896**              +0.0416
+#
+#   两次独立对照一致偏向 0.01，且第二次是同种子配对，按 docs/测试规范.md §4⑦
+#   的 0.035 分辨率，+0.0416 是**可分辨**的。
+#
+# 机理：本项目训练侧优势早已饱和（mean_abs_advantage 1.08 → 0.32），策略在
+# 训练分布上已近确定性。熵系数过小（0.001）时探索迅速坍缩，rollout 分布变窄，
+# 到验证 regime 就吃不到新的状态覆盖；0.01 让策略在验证分布上仍有熵，这与
+# r8 的发现（涨的是验证侧、不是训练侧）方向一致。
+#
+# 注意：本文件必须排在 train_full_rl.yaml **之后**（后覆盖前）。
+#
+# 用法：
+#   python scripts/train/train_graph_mappo.py \
+#       --configs rl_algorithm.yaml train_full_rl.yaml train_ent01.yaml \
+#       --checkpoint outputs/supervised_pg_phased/supervised_pg_phased_latest.pt \
+#       --seed 72 --num-updates 30 --run-name ent01_s72
+train:
+  ppo:
+    entropy_coef: 0.01
