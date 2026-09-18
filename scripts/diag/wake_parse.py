@@ -140,6 +140,32 @@ def maybe_respawn(avail: float, n_train: int, names: list[str], update: int):
     return f"g999_s43 已补起（当时余量 {avail:.1f}G，需 {need:.1f}G）"
 
 
+def finished_cleanly(run: str) -> bool:
+    """这个 run 是**正常跑完**退出的吗？
+
+    仅凭"run 数变少"分不清"跑完退出"与"被杀"。正常收尾有两个硬标志：
+      1. `checkpoint_final.pt` 存在（`train()` 的收尾只在这里写）；
+      2. 日志里有 `Final: UpdateStats` 那一行。
+    两个都查，任一缺失就按"可疑"处理——宁可疑报，不可漏报。
+
+    为什么要这个：本地唤醒链把"run 数变少"一律报成 `ALERT 疑似被杀`，
+    于是每次正常收尾都误报一次事故。**误报的代价是真实的**——它训练使用者
+    去忽视 ALERT，而 ALERT 是整条链里唯一的事故信号。
+    """
+    d = OUT / run
+    if (d / "checkpoint_final.pt").exists():
+        return True
+    log = Path("/tmp") / f"{run}.log"
+    try:
+        if log.exists():
+            tail = log.read_text(encoding="utf-8", errors="replace")[-8000:]
+            if "Final: UpdateStats" in tail:
+                return True
+    except OSError:
+        pass
+    return False
+
+
 def main():
     runs = trainers()
     names = sorted(runs)
@@ -156,6 +182,22 @@ def main():
           f"committed {mi.get('Committed_AS', -1):.0f}G runs {len(names)}")
     print(f"RESPAWN {respawn}")
     print("RUNNING " + " ".join(names) if names else "RUNNING (无)")
+
+    # 已经收尾的 run：本地链据此区分"正常跑完"与"被杀"，
+    # 否则每次正常结束都会误报一次 ALERT（已验证过一次）。
+    done = sorted(
+        p.name for p in OUT.iterdir()
+        if p.is_dir() and p.name not in names and finished_cleanly(p.name)
+    ) if OUT.exists() else []
+    # 只报最近改动的那些，避免把几百个历史 run 全打出来（输出要稳定，
+    # 否则指纹每次都变，又会每轮唤醒）。
+    if done:
+        recent = sorted(
+            done, key=lambda n: (OUT / n / "metrics.jsonl").stat().st_mtime
+            if (OUT / n / "metrics.jsonl").exists() else 0,
+            reverse=True,
+        )[:8]
+        print("FINISHED " + " ".join(sorted(recent)))
 
     # 参照臂：所有实验都用同一个 BC 起点的专家/基线数字
     refs = {

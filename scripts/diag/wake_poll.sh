@@ -57,8 +57,13 @@ while true; do
   HASH=$(printf '%s' "$STABLE" | md5sum | cut -c1-32)
 
   RUNS=$(printf '%s\n' "$OUT" | grep '^RUNNING ' | sed 's/^RUNNING //')
+  FIN=$(printf '%s\n' "$OUT" | grep '^FINISHED ' | sed 's/^FINISHED //')
 
-  # 崩溃检测：上一轮有 N 个，这一轮数量变少而没到 0 —— 是"被杀"不是"跑完"
+  # 崩溃检测：上一轮有 N 个，这一轮数量变少而没到 0。
+  # **但要先排除"正常跑完"**——否则每次正常收尾都误报一次事故，
+  # 而误报会训练使用者忽视 ALERT（ALERT 是这条链唯一的事故信号）。
+  # 服务器端的 wake_parse.py 会打 `FINISHED <run...>`（有 checkpoint_final.pt
+  # 或日志里有 `Final: UpdateStats`），拿它做区分。
   if [ -n "$PREV_RUNS" ] && [ -n "$RUNS" ]; then
     n_prev=$(printf '%s' "$PREV_RUNS" | wc -w)
     n_now=$(printf '%s' "$RUNS" | wc -w)
@@ -68,11 +73,23 @@ while true; do
         case " $RUNS " in *" $r "*) ;; *) gone="$gone $r";; esac
       done
       if [ -n "$gone" ]; then
-        echo "ALERT run 消失（疑似被杀，非正常结束）：$gone"
-        echo "  仍存活：$RUNS"
-        printf '%s\n' "$OUT"
-        echo "---"
-        [ "$ONCE" -eq 1 ] && exit 0
+        crashed=""
+        normal=""
+        for r in $gone; do
+          case " $FIN " in *" $r "*) normal="$normal $r";; *) crashed="$crashed $r";; esac
+        done
+        if [ -n "$normal" ]; then
+          echo "DONE run 正常跑完：$normal"
+          [ -n "$crashed" ] || printf '%s\n' "$OUT" | grep '^VAL ' || true
+          [ "$ONCE" -eq 1 ] && exit 0
+        fi
+        if [ -n "$crashed" ]; then
+          echo "ALERT run 消失且无收尾标志（疑似被杀）：$crashed"
+          echo "  仍存活：$RUNS"
+          printf '%s\n' "$OUT"
+          echo "---"
+          [ "$ONCE" -eq 1 ] && exit 0
+        fi
       fi
     fi
   fi
