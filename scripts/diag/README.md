@@ -35,3 +35,26 @@ ssh qkd 'cd /opt/qkd/graph_mappo && /opt/qkd/venv/bin/python scripts/diag/val_al
    测的，和并发时不可比 —— chunk 扫描就是被这个坑误导成"chunk=128 快 1.23x"。
 3. **不许用 `pkill -f <模式>`**：远程 `bash -c` 的命令行自身含该模式，
    `pkill -f` 会杀掉自己（exit 255，后续命令一条都不跑）。先 `pgrep` 取 PID。
+
+## 怎么送到节点
+
+```bash
+scp scripts/diag/* qkd:/opt/qkd/graph_mappo/scripts/diag/
+```
+
+**注意**：`deployment/sync.sh` 走 git push 到节点的 `deploy` 分支，要求节点工作区
+**干净**（`receive.denyCurrentBranch=updateInstead`）。而节点上有我 scp 上去、
+尚未进入节点 git 历史的文件（`configs/train_ent01*.yaml` 等），于是推送会被拒：
+
+```
+! [remote rejected] ... -> deploy (Working directory has unstaged changes)
+```
+
+处理原则：**先逐字核对节点文件与本地已提交版本是否一致**，一致才能丢弃
+（`git checkout --` / `git clean -fd`）。这次的核对结果：
+`mappo_trainer.py`、`train_graph_mappo.py`、`train_ent01.yaml`、
+`train_ent01_g999.yaml` 的 sha256 与本地**完全相同**；
+`train_window_329.yaml` 的 sha256 不同但 `diff` **逐字相同**——只是行尾符
+（本地 CRLF / 节点 LF）所致，`sha256` 会被行尾符骗过。
+
+不想动节点 git 状态时，`scp` 新脚本上去是**完全安全**的替代方案（本次就走这条）。
