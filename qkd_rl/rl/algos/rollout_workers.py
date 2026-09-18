@@ -105,11 +105,12 @@ def _run_episode(
         if terminated or truncated:
             break
     if terminated:
-        # True terminal only; a time limit arrives as `truncated` and
-        # bootstraps off V(s_T) (see the note in QKDEnv.step).
         last_value = torch.zeros((), dtype=torch.float32)
     else:
         with torch.no_grad():
+            # The bootstrap only needs V(s), not the per-arc scores: with
+            # action_resolver.mode=mutual_choice the scores are built and then
+            # discarded, which cost ~300 extra syncs per episode tail.
             last_value = policy.act(obs, build_scores=False).value.detach().cpu()
     buffer.finish_episode(last_value)
     return buffer.steps, ep_reward, env.metrics.episode_summary(), rollout_debug

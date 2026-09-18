@@ -229,11 +229,7 @@ class RolloutBuffer:
         returns, advantages = compute_gae(
             rewards=[step.reward for step in episode],
             values=values,
-            # Only a *natural* terminal state suppresses the bootstrap. A step
-            # that is both flagged terminated and truncated is a time limit
-            # masquerading as a terminal, and must still bootstrap -- see the
-            # note in QKDEnv.step.
-            terminated=[step.terminated and not step.truncated for step in episode],
+            terminated=[step.terminated for step in episode],
             last_value=last_value,
             gamma=self.gamma,
             gae_lambda=self.gae_lambda,

@@ -420,7 +420,6 @@ class MAPPOTrainer:
                 if terminated or truncated:
                     break
             if terminated:
-                # A true terminal state: no future, so no bootstrap.
                 last_value = torch.zeros((), dtype=torch.float32, device=self.device)
             else:
                 with torch.no_grad():
