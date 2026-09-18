@@ -101,7 +101,18 @@ def test_train_writes_rollout_debug(tmp_path):
 
 def test_collect_rollout_stores_sampled_matching_log_prob(tmp_path):
     """The rollout must keep the sampled matching order and its log-prob,
-    not re-derive them from the resolver's output order."""
+    not re-derive them from the resolver's output order.
+
+    Seeding note: this test used to pin both sides with ``torch.manual_seed``.
+    That stopped working in d4bd79c, which moved the matching sampler onto an
+    explicit ``torch.Generator`` (``MAPPOPolicy.set_sample_seed``) precisely
+    *because* the global RNG is not reproducible across spawned workers. With
+    the global RNG the two sides below drew different Gumbel noise, so they
+    sampled different matchings and the comparison failed for a reason that had
+    nothing to do with what it asserts. Both sides now go through the real
+    contract — env seed and sample seed from the same value — which is also a
+    strictly stronger check: a manual rollout and the trainer must agree.
+    """
     config = _tiny_config(tmp_path)
     config["action_resolver"]["mode"] = "mutual_choice"
     config["train"]["n_rollout_workers"] = 1
@@ -112,12 +123,13 @@ def test_collect_rollout_stores_sampled_matching_log_prob(tmp_path):
     policy = MAPPOPolicy(model)
     trainer = MAPPOTrainer(env_trainer, policy, config, tmp_path)
 
-    obs = env_manual.reset(seed=int(config["seed"]["env_seed"]))
-    torch.manual_seed(123)
+    # update_count is 0, so the trainer's first episode uses base_seed itself.
+    seed = int(config["seed"]["env_seed"])
+    obs = env_manual.reset(seed=seed)
+    policy.set_sample_seed(seed)
     step = policy.act(obs)
     env_manual.step(step.actions, step.action_scores, edge_scores=step.edge_scores)
 
-    torch.manual_seed(123)
     buffer = trainer.collect_rollout()
     first = buffer.steps[0]
     assert first.matched_edges == list(step.matched_edges or [])
