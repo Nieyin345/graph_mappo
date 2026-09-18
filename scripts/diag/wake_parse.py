@@ -37,6 +37,18 @@ STATE = Path("/tmp/qkd_g999_respawn.json")
 RUN_BASE_GB = 23.3
 RUN_GROWTH_GB = 0.21   # 多点拟合均值（+0.085~+0.298），不是心算的 0.43
 SAFETY_GB = 10.0
+# 本文件自动补起的 run 只跑 30 轮（见下面 cmd 里的 --num-updates）。
+# 内存判据要推演到这个轮数，不能只看"现在够不够"——内存是增长的。
+TARGET_UPDATES = 30
+# 单 run 跑到 TARGET_UPDATES 的峰值占用。
+RUN_FULL_GB = RUN_BASE_GB + RUN_GROWTH_GB * TARGET_UPDATES   # ≈ 29.6 GB
+# 全部跑到头时，机器**绝对**要留的余量。
+#
+# 来历：本项目记录说「125 GB 机器上并发 3 稳、**4 勉强（108 GB，余 17 GB）**、
+# 5 一定 OOM」。那个 108 GB 是 4 个 run 跑到头的物理占用，余 17 GB 是它的余量。
+# 所以 17 不是拍脑袋的数，是**记录里那条"勉强"线的余量本身**。
+# 低于它就等于把机器推到"勉强"或更差，而机器上还有探针、pytest、ssh 要吃内存。
+MIN_HEADROOM_GB = 17.0
 
 
 def lines(p: Path):
@@ -114,8 +126,25 @@ def trainers():
     return out
 
 
-def maybe_respawn(avail: float, n_train: int, names: list[str], update: int):
-    """内存够就补 ent01_g999_s43。判据：余量 ≥ 所需 + 安全垫。"""
+def maybe_respawn(avail: float, n_train: int, names: list[str], update: int,
+                  total: float = 0.0):
+    """内存够就补 ent01_g999_s43。**两个视角都要过。**
+
+    视角 A（增量）：MemAvailable 还够不够填未来的增长？
+        在跑的各补足增长 + 新 run 从 0 到顶 + 安全垫
+    视角 B（峰值）：全部跑到头时，机器还剩多少**绝对**余量？
+        现在的占用 + 未来的增长，机器总量减去它 ≥ MIN_HEADROOM_GB
+
+    为什么需要两个：视角 A 单独不够。2026-09-18 17:42，旧判据（只看新 run 自己）
+    在余量 62.8G 时放行了第 4 个 run；我第一版"修正"改成视角 A，**变异测试证明
+    它照样放行**（62.8 >= 55.98）。真正该拒绝的理由在视角 B：全部跑到头要
+    108.6 GB，机器 125.4，余 16.8 < 17 —— 正好落在记录里那条"4 勉强"线上。
+
+    视角 A 单独也不够的另一面：它是个**相对**判据，机器上别的东西（探针、
+    pytest、ssh）吃掉的量它看不见；视角 B 是绝对的，看得见。
+
+    `total` 缺省为 0 时**拒绝**，不是跳过视角 B。理由见函数体里的注释。
+    """
     if any(n.startswith("ent01_g999_s43") for n in names):
         return "g999_s43 已在跑"
     st = {}
@@ -129,9 +158,30 @@ def maybe_respawn(avail: float, n_train: int, names: list[str], update: int):
     if st.get("done"):
         return f"g999_s43 已补过（{st.get('at')}）"
 
-    need = RUN_BASE_GB + RUN_GROWTH_GB * update + SAFETY_GB
+    # **没有 total 就拒绝，不能"跳过视角 B 继续"。**
+    # 初稿写的是 `if total > 0:` ——缺 total 时静默降级成只看视角 A，而视角 A
+    # 正是被证明会放行 17:42 那一次的那个判据。也就是说：一个**静默丢掉一半
+    # 保护**的守卫。本项目已经有过一次同类的教训（阈值设错的看门狗精确杀掉了
+    # 唯一想保的对照臂）——**建在错误数量级上的自动保护就是破坏措施，比没有更糟**。
+    # 调用方（main）一定传 MemTotal，所以这条分支正常走不到；走到就说明调用方
+    # 改了，宁可拒绝并报错，也不假装保护还在。
+    if total <= 0:
+        return ("g999_s43 未补：未拿到 MemTotal，无法做绝对余量判断"
+                "（两个视角缺一个 → 按拒绝处理）")
+
+    growth_running = n_train * RUN_GROWTH_GB * max(0, TARGET_UPDATES - update)
+    need = growth_running + RUN_FULL_GB + SAFETY_GB
     if avail < need:
-        return f"g999_s43 未补：余量 {avail:.1f}G < 需 {need:.1f}G"
+        return (f"g999_s43 未补：余量 {avail:.1f}G < 需 {need:.1f}G"
+                f"（在跑 {n_train} 个还要涨 {growth_running:.1f}G"
+                f" + 新 run 到顶 {RUN_FULL_GB:.1f}G + 垫 {SAFETY_GB:.0f}G）")
+
+    peak = (total - avail) + growth_running + RUN_FULL_GB
+    head = total - peak
+    if head < MIN_HEADROOM_GB:
+        return (f"g999_s43 未补：跑到头占 {peak:.1f}G / 机器 {total:.1f}G，"
+                f"余 {head:.1f}G < 底线 {MIN_HEADROOM_GB:.0f}G"
+                f"（记录：4 并发 108G 只是「勉强」）")
 
     cfg = ["configs/train_ent01.yaml", "configs/train_ent01_g999.yaml"]
     for c in cfg:
@@ -198,7 +248,8 @@ def main():
     for n in names:
         u, _ = align(OUT / n)
         max_u = max(max_u, u or 0)
-    respawn = maybe_respawn(avail, len(names), names, max_u)
+    respawn = maybe_respawn(avail, len(names), names, max_u,
+                            mi.get("MemTotal", 0.0))
 
     print(f"MEM {avail:.1f}G swap {mi.get('SwapFree', -1):.1f}G "
           f"committed {mi.get('Committed_AS', -1):.0f}G runs {len(names)}")
