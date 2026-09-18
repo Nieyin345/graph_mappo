@@ -12,6 +12,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 长任务必须 `setsid nohup ... &`，否则 ssh 通道被挂住
 - 探针/临时脚本写在 `.tmp/`（gitignored），scp 到服务器 `/tmp/` 再跑。**禁止内联命令**（`python -c "..."`）——Windows 三层转义 + GBK 编码几乎必败，永远先写脚本文件
 
+## 并行跑 run 前先算内存，不是先看 load
+
+**每个训练 run 真实占用 ~13 GB（PSS），不是 1–2 GB。** 125 GB 机器上
+**5 个并发是安全上限**（5×13=65G，留余量给评测/探针）。
+
+- 判据是 `MemAvailable / 13`，**不是 CPU 核数**。每个 run 只吃 ~3 核，
+  32 核"看起来"能跑 10 个——2026-09-19 就是照 load 判断铺了 6 个，
+  被 OOM 杀掉 4 个
+- `load average` 和 `%CPU` 都看不见这个墙。过载的症状是**每轮耗时上涨**
+  （`rollout_s` 46→82s、`update_s` 145→196s），不是进程变慢
+- 内存看门狗（`.tmp/mem_watchdog.py`，`--apply`）在 OOM 前回收孤儿 worker
+- 分波启动用 `.tmp/wave_launch.sh`（按内存预算排队，不是一次全铺）
+
+**OOM 会遗留孤儿 worker，这是本项目最阴的坑**：killer 用 SIGKILL 杀的是
+**trainer 父进程**，`multiprocessing.spawn` 的 8 个 rollout worker 被 reparent
+到 init 后**继续空转，永不退出**。一次 OOM 泄漏 ~14 GB，累积两次就到 58 GB。
+`pkill -f train_graph` **只杀父进程，会制造新的孤儿**。
+
+清理用 `.tmp/kill_orphans.py`（判据：`PPid==1` 且 cmdline 含 `multiprocess`；
+带保护名单闸，不会误杀活着的 run）。**worker 自身 cmdline 里没有 run-name**，
+别试图从它自证归属。诊断内存现状用 `.tmp/mem_audit.py`（按 PSS 分组，RSS 会把
+共享页重复计数，误导性极强）。
+
 ## 常用命令（都在服务器上执行）
 
 ```bash
