@@ -15,13 +15,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 并行跑 run 前先算内存，不是先看 load
 
 **每个训练 run 实测 23.3 GB（PSS）**：父进程 14.5 GB + 8 个 spawn worker
-× 1.1 GB。**而且不是稳态——每轮还涨约 0.43 GB**，外推到 u30 约 31 GB/run。
+× 1.1 GB。**而且不是稳态——还在缓慢增长**（多点线性拟合：+0.085 ~ +0.298，
+**均值约 +0.21 GB/轮**），外推到 u30 约 27 GB/run。
 
 - 判据是 **`MemAvailable / 30`**（按跑满算），**不是 CPU 核数**，也不是
   启动时的内存。每个 run 只吃 ~3 核，32 核"看起来"能跑 10 个——
   照 load 判断铺 6 个，被 OOM 杀掉 4 个
-- 125 GB 机器上**安全并发是 3**。按 23 GB 排 5 个（116 GB）到 u15
-  就涨到 150 GB，**一定 OOM**（2026-09-18 实测）
+- 125 GB 机器上**并发 3 稳、4 勉强（108 GB，余 17 GB）、5 一定 OOM**。
+  按启动时的 23 GB 排 5 个（116 GB）看似可行，涨到 u15 就顶格
 - `load average` 和 `%CPU` 都看不见这个墙。过载的症状是**每轮耗时上涨**
   （`rollout_s` 46→82s、`update_s` 145→196s），不是进程变慢
 - 分波启动用 `.tmp/wave_launch.sh`（按内存预算排队，不是一次全铺）
