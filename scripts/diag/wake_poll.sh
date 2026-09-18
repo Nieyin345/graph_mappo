@@ -46,7 +46,14 @@ while true; do
 
   # 指纹：稳定行（去掉 MEM/RESPAWN 这类带易变数字的行）
   BODY=$(printf '%s\n' "$OUT")
-  STABLE=$(printf '%s\n' "$OUT" | grep -Ev '^(MEM|RESPAWN) ')
+  # VAL 行里的 `u=<末轮>` 每轮都变，但它**不是新信息**——真正的新信息是
+  # 验证点（`u5=`/`u10=`/… 这些只在 eval_interval 轮才多一个）。不归一化掉，
+  # 指纹每轮都变 → 每 ~3.5 分钟唤醒一次，正好是"只在有新信息时唤醒"的反面。
+  # 这与本文件开头排除 MEM 的理由是同一条，只是位置不同。
+  # 正则 ` u=[0-9]+` 不会误伤验证点，因为验证点是 `u5=`（u 后直接跟数字再跟 =）。
+  STABLE=$(printf '%s\n' "$OUT" \
+           | grep -Ev '^(MEM|RESPAWN) ' \
+           | sed -E 's/^(VAL [^ ]+) u=[0-9]+/\1/')
   HASH=$(printf '%s' "$STABLE" | md5sum | cut -c1-32)
 
   RUNS=$(printf '%s\n' "$OUT" | grep '^RUNNING ' | sed 's/^RUNNING //')
