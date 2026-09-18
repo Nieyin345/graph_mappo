@@ -525,8 +525,12 @@ class MAPPOTrainer:
         else:
             # Seed each row's exploration noise from its own episode seed, so a
             # row's sampled matching does not depend on how many rows share the
-            # batch or on which ones ran first.
-            self._reset_envs(group, base_seed, env_indices=env_indices)
+            # batch or on which ones ran first. The returned obs MUST be kept:
+            # dropping it (as a refactor once did) leaves `obs_list` unbound on
+            # this path -- a latent UnboundLocalError that fires only when
+            # `n_rollout_workers <= 1`, i.e. exactly the single-process runs
+            # that are otherwise the most reproducible configuration.
+            obs_list = self._reset_envs(group, base_seed, env_indices=env_indices)
         n_group = len(env_indices)
         ep_steps: list[list[RolloutStep]] = [[] for _ in range(n_group)]
         ep_rewards = [0.0] * n_group
