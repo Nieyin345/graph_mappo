@@ -105,10 +105,12 @@ def _run_episode(
         if terminated or truncated:
             break
     if terminated:
+        # True terminal only; a time limit arrives as `truncated` and
+        # bootstraps off V(s_T) (see the note in QKDEnv.step).
         last_value = torch.zeros((), dtype=torch.float32)
     else:
         with torch.no_grad():
-            last_value = policy.act(obs).value.detach().cpu()
+            last_value = policy.act(obs, build_scores=False).value.detach().cpu()
     buffer.finish_episode(last_value)
     return buffer.steps, ep_reward, env.metrics.episode_summary(), rollout_debug
 

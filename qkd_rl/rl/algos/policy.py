@@ -258,6 +258,7 @@ class MAPPOPolicy:
         (actions, action_scores), matched_edges, mean_lp, mean_entropy = self._sample_matching(
             edge_scores,
             deterministic=deterministic,
+            build_scores=build_scores,
         )
         log_probs, entropies = self._fill_node_tensors(node_ids, mean_lp, mean_entropy)
         return PolicyStep(

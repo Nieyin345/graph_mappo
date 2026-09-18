@@ -247,10 +247,17 @@ class QKDEnv:
         self.steps += 1
         obs = self._build_observation()
         episode_steps = int(self.config["env"]["episode_steps"])
-        terminated = (not self.continuous) and self.steps >= episode_steps
+        # This is a *time limit*, not a natural terminal state: the world keeps
+        # going past it, we just stop looking. It must be reported as `truncated`
+        # so GAE bootstraps off V(s_T) instead of off 0. Reporting it as
+        # `terminated` made the agent undervalue late-arriving reward -- the
+        # return of a relay link that only pays off hundreds of steps later --
+        # which is exactly the horizon the gamma=0.999 arm was fighting for.
+        truncated = (not self.continuous) and self.steps >= episode_steps
         terminate_on_year_end = bool(self.config["env"].get("terminate_on_year_end", True))
-        truncated = self.t >= self.scenario.end_t if terminate_on_year_end else False
-        return obs, reward_detail.total, terminated, truncated, self.metrics.last_info(reward_detail)
+        if terminate_on_year_end and self.t >= self.scenario.end_t:
+            truncated = True
+        return obs, reward_detail.total, False, truncated, self.metrics.last_info(reward_detail)
 
     def _active_edge_ids(self, masks: dict[str, list[bool]]) -> list[str]:
         """Edge ids legal for both endpoints at the current time step."""

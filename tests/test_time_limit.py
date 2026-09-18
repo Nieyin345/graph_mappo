@@ -100,3 +100,34 @@ def test_time_limit_env_end_to_end_terminates_early() -> None:
             first_truncated_step = step + 1
             break
     assert first_truncated_step == 50, f"expected truncation at step 50, got {first_truncated_step}"
+
+
+def test_episode_steps_is_a_time_limit_not_a_termination() -> None:
+    """``episode_steps`` must surface as ``truncated``, never as ``terminated``.
+
+    The world keeps running past ``episode_steps``; we just stop looking.
+    Reporting it as ``terminated`` told GAE the episode had ended naturally and
+    suppressed the bootstrap off ``V(s_T)``, which biased the tail of every
+    episode toward myopic actions -- the opposite of what a relay link needs,
+    since its payoff lands hundreds of steps later.
+
+    ``test_time_limit_env_end_to_end_terminates_early`` does not cover this: it
+    sets ``episode_steps = 10000``, so this branch never runs there and its
+    ``assert not terminated`` holds whether or not the bug is present.
+    """
+    config = point_config_to_h5(load_default_config("."))
+    config["scenario"]["time_limit"] = {"days": 0}       # no cap: end_t = end_index
+    config["rate_provider"]["time"]["start_index"] = 0
+    config["rate_provider"]["time"]["end_index"] = 5000  # far past episode_steps
+    config["env"]["episode_steps"] = 50
+    env = build_env_from_config(config)
+    assert env.scenario.end_t == 5000
+
+    env.reset(seed=7)
+    idle = {node: "idle" for node in env.scenario.node_ids}
+    for step in range(50):
+        _obs, _reward, terminated, truncated, _info = env.step(idle)
+        assert not terminated, f"step {step + 1}: episode_steps must not report terminated"
+        if step < 49:
+            assert not truncated, f"step {step + 1}: truncated before the time limit"
+    assert truncated, "step 50 is the time limit and must report truncated"
