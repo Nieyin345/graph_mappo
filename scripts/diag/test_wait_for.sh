@@ -46,6 +46,18 @@ expect_lint 1 "多种坏形状同时出现" \
     pgrep -qf X && sleep 1
 done'
 
+# ---- 形状 6：完成标记 = 等进程退出（2026-09-19 实测的真事）----
+# `probe_stop_sensitivity.py` 因 --values 收到负数被 argparse 当成选项标志而**秒退**，
+# 看门狗立刻报「已完成」——一次**从未运行**的探针差点被当成跑完。
+expect_lint 1 "形状6 等进程退出后 touch 完成标记（秒死也算完成）" \
+'PID=$!
+while kill -0 "$PID" 2>/dev/null; do sleep 10; done
+touch /tmp/probe.done'
+
+expect_lint 1 "形状6 变体：用 pgrep 等进程、同样 touch done" \
+'while pgrep -f "[p]robe_x" > /dev/null; do sleep 10; done
+touch /tmp/probe_complete'
+
 echo
 echo "=== 2. 正确写法不能被误报（否则 linter 会被绕过）==="
 
@@ -74,6 +86,16 @@ wait_gone train_graph_mappo.py 600 "描述"'
 
 expect_lint 0 "pgrep -cf 显式兜底（不用 || echo 0）" \
 'n="$(pgrep -cf PAT 2>/dev/null)"; n=${n:-0}'
+
+# ★ 形状 6 的对偶：**等输出产物**出现则不算坏形状。这是它要逼出来的正确写法。
+expect_lint 0 "等输出 JSON 出现再 touch（不是等进程退出）" \
+'J=/opt/qkd/graph_mappo/outputs/eval/r.json
+for i in $(seq 1 360); do
+    if [ -f "$J" ]; then touch /tmp/probe.done; exit 0; fi
+    if ! pgrep -f "[p]robe_x" > /dev/null 2>&1; then touch /tmp/probe.failed; exit 1; fi
+    sleep 20
+done
+touch /tmp/probe.timeout'
 
 # ★ 这条是 2026-09-19 实测踩到的**误报**：我在 .tmp/run_mode_de.sh 的注释里
 #   写了「无超时的 `while pgrep ...; do sleep; done` 是坏形状」，结果被形状 3

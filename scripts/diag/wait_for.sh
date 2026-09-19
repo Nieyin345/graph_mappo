@@ -146,6 +146,22 @@ lint_waits() {
     local n6; n6="$(printf '%s\n' "$body" | _count 'pgrep +-[a-zA-Z]*f[^|]*\$\{?[A-Za-z_]*(SCRIPT|SELF|BASH_SOURCE)' /dev/stdin)"
     [ "$n6" -gt 0 ] && { echo "✗ $n6 处 pgrep -f 用了 \$0/\$BASH_SOURCE 类模式（会匹配到自己）；需写 [x] 转义"; bad=1; }
 
+    # 形状 6：完成标记 = 等**进程退出**。
+    # 起因（2026-09-19 实测）：`probe_stop_sensitivity.py` 因 `--values` 收到负数
+    # 被 argparse 当成选项标志，**秒退**；而看门狗的条件是
+    # `while kill -0 <pid>; do sleep; done; touch done` —— 进程一死标记就生成，
+    # 于是它报「已完成」。我差点把一次**从未运行**的探针当成跑完。
+    # ⟹ 标记的条件必须是**本次运行真的产出了结果**（如输出文件存在），
+    #   而不是「进程没了」。失败要有**不同的**标记，否则原因被吞掉。
+    local n7 n8
+    n7="$(printf '%s\n' "$body" | _count '(kill -0|pgrep)[^|]*;[[:space:]]*do sleep' /dev/stdin)"
+    n8="$(printf '%s\n' "$body" | _count '(touch|>)[^|]*(done|complete|ok)' /dev/stdin)"
+    if [ "$n7" -gt 0 ] && [ "$n8" -gt 0 ]; then
+        echo "✗ $n7 处「等进程退出 → touch 完成标记」：进程秒死时标记照样生成，"
+        echo "  「失败了」与「跑完了」无法区分。改成等**输出产物**出现，并给失败单独标记"
+        bad=1
+    fi
+
     [ "$bad" -eq 0 ] && echo "✓ $f：等待句柄未见已知坏形状"
     [ "$bad" -ne 0 ] && echo "  ↑ 以上问题属于：$f"
     return $bad
