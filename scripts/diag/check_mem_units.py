@@ -84,6 +84,30 @@ def main() -> int:
     print()
     print("判据：若 launch_g2 内部混用两种单位，则**稳态被低估 7.4%**，门偏松。")
     print("     修法：让 launch_g2 **全程用 GiB**（与 mem_pss 及模型常数同单位）。")
+    print()
+
+    # ---- 反向检查：mem_pss.py 自己的**标签**写错了 ----
+    # 它内部用 ÷1024÷1024（GiB），却把标签打成 "GB" ⟹ 读者会把它的读数
+    # 当十进制 GB 用，于是 ≈ +5% 的静默偏松。这正是 2026-09-20 那次单位错
+    # 的**传播路径**：不是谁抄错了数，是**标签**在骗人。
+    mp = "/opt/qkd/graph_mappo/scripts/diag/mem_pss.py"
+    try:
+        s = open(mp, encoding="utf-8").read()
+    except OSError:
+        print("（读不到 %s，跳过标签检查）" % mp)
+        return 0
+    import re as _re
+    gb_labels = len(_re.findall(r"GB", s))
+    gib_labels = len(_re.findall(r"GiB", s))
+    divides_gib = ("/ KB / KB" in s) or ("/1024/1024" in s)
+    print("== mem_pss.py 的标签自检 ==")
+    print("  内部算法是 GiB（÷1024÷1024）：%s" % divides_gib)
+    print("  文中出现 'GB' %d 次、'GiB' %d 次" % (gb_labels, gib_labels))
+    if divides_gib and gb_labels > gib_labels:
+        print("  ⚠ **标签与算法不符** —— 它量的是 GiB 却标成 GB。读者照标签用会偏松 ≈5%。")
+        print("     这不只是笔误：单位错就是**这样传播**的（读的人信任标签）。")
+    else:
+        print("  ✓ 标签与算法一致")
     return 0
 
 

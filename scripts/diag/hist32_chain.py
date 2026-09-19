@@ -49,18 +49,32 @@ MAX_HIST = 2
 def n_hist_live(runs):
     return sum(1 for nm, _, _ in runs if "hist" in nm)
 
-# ★★ 命名约定必须**统一**：本文件的 read() 拼 `outputs/<基名>_s<种子>`，
-#    而 u1_of() 拼 `outputs/<全名>`。原值 ["hist32v3_s42", "hist32_s43", "hist32_s44"]
-#    **混了两种约定** ⟹ read() 对三条臂**全部返回空** ⟹ 判读只会打印「数据不足」，
-#    而那看起来像「还没跑完」，不像 bug。2026-09-20 修正。
-#    s42 原设计是**从 outputs/hist32v3_s42/checkpoint_update_000010.pt 续跑 20 轮**，
+# ★★ ``run`` 的约定**一律是输出目录名**（含 ``_s<种子>``）。别再混两种写法：
+#    上一轮就是因为 ``read()`` 当基名、``u1_of()`` 当全名，判读**恒空**却看起来
+#    像「还没跑完」。见 ``_metrics_path()`` 的说明。
+#
+#    原值 ["hist32v3_s42", "hist32_s43", "hist32_s44"] **混了两种约定**，且 s42 原设计
+#    是**从 outputs/hist32v3_s42/checkpoint_update_000010.pt 续跑 20 轮**，
 #    与 s43/s44（从 BC 新起 30 轮）不对称；那个 u10 checkpoint 已随旧节点 clnode316
 #    丢失 ⟹ 现在三条统一为**从 BC 新起 30 轮**，更干净，但改变了原设计意图。
-ARM_RUNS = ["hist32_s42", "hist32_s43", "hist32_s44"]
+#
+# ★ 现在**由种子直接算出目录名**，不再靠 ARM_RUNS[SEEDS.index(s)] 索引对齐 ——
+#   两处对齐就多一处能分叉的地方。CTRL 同理。
+SEEDS = (42, 43, 44)
+ARM_STEM = "hist32"
+CTRL = "ent01_rerun"
+
+
+def arm_run(seed):
+    return "%s_s%d" % (ARM_STEM, seed)
+
+
+def ctrl_run(seed):
+    return "%s_s%d" % (CTRL, seed)
+
+
 # TODO 已由 .tmp/launch_wave263.py 接管（它用内存门统一排队，不在这里重复起臂）
 TODO = []
-CTRL = "ent01_rerun"
-SEEDS = (42, 43, 44)
 # ★★ 临界值一律从**唯一来源**取（同目录 stats_crit.py），不在这里手写常数。
 #
 #   2026-09-20 修复。原写法是：
@@ -240,8 +254,30 @@ def last_update(run):
 
 
 # ============================ 判读 ============================
-def read(run, seed):
-    p = "%s/outputs/%s_s%d/metrics.jsonl" % (ROOT, run, seed)
+def _metrics_path(run):
+    """``run`` 一律是**输出目录名**（如 ``hist32_s42`` / ``ent01_rerun_s42``）。
+
+    ★★ 本文件出过一个**静默假阴性**：``read()`` 与 ``u1_of()`` 对 ``run`` 的约定
+    **相反** —— ``read()`` 当基名再拼 ``_s<种子>``，``u1_of()`` 当全名。
+    于是 ``read(ARM_RUNS[i], s)`` 去读 ``outputs/hist32_s42_s42/metrics.jsonl``
+    （**永不存在**），恒返回 ``[]`` ⟹ §1 主判据、§2 逐轮 Δ、§3 跨种子 SD、
+    §5 吞吐代价**全部不输出**，只打印「!! 数据不足，无法判读」。
+
+    **而 §0 的 u1 守卫走 ``u1_of()``，是通的** ⟹ 输出看起来像「守卫过了、
+    只是数据还没到」，不像 bug。上一轮「修正」只改了 ``ARM_RUNS`` 的写法
+    （把 ``hist32v3_s42`` 换成 ``hist32_s42``），**没有统一两条路径的约定**
+    ⟹ 修了一半，坏的那半继续静默（见记忆 ``later-sections-retract-earlier-ones``：
+    别信文档说「已修」，要对代码求证）。
+
+    ⟹ 现在**只有这一个函数**拼路径，``read()`` 与 ``u1_of()`` 都调它。
+    ``verdict()`` §0 会打印实际探测的路径，路径写错**当场可见**。
+    """
+    return os.path.join(ROOT, "outputs", run, "metrics.jsonl")
+
+
+def read(run):
+    """读一条臂的 ``metrics.jsonl``。``run`` = **输出目录名**（含 ``_s<种子>``）。"""
+    p = _metrics_path(run)
     out = []
     if not os.path.exists(p):
         return out
@@ -268,7 +304,7 @@ def plat_ps(rows):
 
 
 def u1_of(run):
-    p = "%s/outputs/%s/metrics.jsonl" % (ROOT, run)
+    p = _metrics_path(run)
     try:
         for ln in open(p, encoding="utf-8"):
             ln = ln.strip()
@@ -289,10 +325,14 @@ def verdict():
     A("\n### 0. ★ u1 守卫（同 BC + 同种子 + 同节点 ⟹ 必须逐位相同）")
     A("    hist 是**结构改动**（新增 64 列输入），加载器把它们**置零** ⟹ 前向逐位等价，")
     A("    所以初始策略必须与对照完全相同。不同 ⟹ 加载器没做到承诺，下面全部不可信。")
+    # ★ 打印实际探测的路径 —— 路径写错必须**当场可见**。上一轮 read() 拼错目录名，
+    #   判读恒空而 §0 守卫照过，看起来像「还没跑完」，静默了很久才发现。
+    for s in SEEDS:
+        A("   [路径] %s" % _metrics_path(arm_run(s)))
     guard_ok = True
     for s in SEEDS:
-        a = u1_of(ARM_RUNS[SEEDS.index(s)])
-        b = u1_of("%s_s%d" % (CTRL, s))
+        a = u1_of(arm_run(s))
+        b = u1_of(ctrl_run(s))
         if a is None or b is None:
             A("   s%d  hist=%s  ctrl=%s（数据缺）" % (s, a, b)); guard_ok = False; continue
         d = a - b
@@ -306,8 +346,7 @@ def verdict():
     A("\n### 1. 主判据：平台 u25/u30，逐请求种子配对")
     avail_s = []
     for s in SEEDS:
-        run = ARM_RUNS[SEEDS.index(s)]
-        if read(run, s) and read(CTRL, s):
+        if read(arm_run(s)) and read(ctrl_run(s)):
             avail_s.append(s)
     A("   可用训练种子：%s" % avail_s)
     if len(avail_s) < 2:
@@ -316,8 +355,7 @@ def verdict():
 
     per_seed, nc = [], None
     for s in avail_s:
-        run = ARM_RUNS[SEEDS.index(s)]
-        Aps, Cps = plat_ps(read(run, s)), plat_ps(read(CTRL, s))
+        Aps, Cps = plat_ps(read(arm_run(s))), plat_ps(read(ctrl_run(s)))
         if Aps is None or Cps is None or len(Aps) != len(Cps):
             A("   s%d：平台窗口不全" % s); continue
         nc = len(Aps)
@@ -336,6 +374,11 @@ def verdict():
     A("   n=%d 训练种子 × %d 请求种子   df=%d  临界值=%.3f" % (len(per_seed), nc, df, crit))
     A("   Δ = %+.4f   SD(训练种子) = %.4f   SE = %.4f   t = %+.2f  %s"
       % (m, sd, se, t, "★ 过线" if abs(t) > crit else "未过线"))
+    # ★ t 无定义（df=0，单个训练种子）时不许报「过线/未过线」：nan 比较恒 False
+    #   ⟹ 会静默读成「未过线」，那是把「没有合法判据」伪装成「测过但没测出」。
+    if df == 0 or t != t:
+        A("   ⚠ **n=1（df=0），t 无定义 —— 本框架下没有合法判据**，"
+          "上面的过线/未过线**不成立**，必须补训练种子。")
     A("   逐训练种子 Δ: %s" % " ".join("%+.4f" % x for x in per_seed))
     if m >= T_HI:
         v = "★ 时序信息**有用**（Δ ≥ +0.035）⟹ 值得加深（多通道 / 接边）"
@@ -352,9 +395,8 @@ def verdict():
     for u in evs:
         dd = []
         for s in avail_s:
-            run = ARM_RUNS[SEEDS.index(s)]
-            Aa = {x[0]: x[1] for x in read(run, s)}
-            Cc = {x[0]: x[1] for x in read(CTRL, s)}
+            Aa = {x[0]: x[1] for x in read(arm_run(s))}
+            Cc = {x[0]: x[1] for x in read(ctrl_run(s))}
             if u in Aa and u in Cc and len(Aa[u]) == len(Cc[u]):
                 dd.append(st.mean([Aa[u][i] - Cc[u][i] for i in range(len(Aa[u]))]))
         row += "%+9.4f" % st.mean(dd) if dd else "%9s" % "--"
@@ -367,21 +409,26 @@ def verdict():
         for u in evs:
             vs = []
             for s in avail_s:
-                run = CTRL if nm == "ctrl" else ARM_RUNS[SEEDS.index(s)]
-                for (uu, p, _, _) in read(run, s):
+                run = ctrl_run(s) if nm == "ctrl" else arm_run(s)
+                for (uu, p, _, _) in read(run):
                     if uu == u:
                         vs.append(st.mean(p))
             row += "%9.4f" % st.stdev(vs) if len(vs) > 1 else "%9s" % "--"
         A(row)
 
     A("\n### 4. 绝对水平 vs 专家锚 %.4f（⚠ 臂 vs 专家有节点偏置不抵消）" % EXPERT)
-    for nm, get in (("ctrl", lambda s: read(CTRL, s)),
-                    ("hist32", lambda s: read(ARM_RUNS[SEEDS.index(s)], s))):
+    for nm, get in (("ctrl", lambda s: read(ctrl_run(s))),
+                    ("hist32", lambda s: read(arm_run(s)))):
         vals = []
         for s in avail_s:
             r = get(s)
-            if len(r) >= 2:
-                vals.append(st.mean([st.mean(x[1]) for x in r[-2:]]))
+            # ★ 按**轮号**取平台（u25/u30），不按位置取末两点 ——
+            #   续跑臂（轮号 31…50）或中途缺一轮 eval 的臂，末两点会变成 u45/u50，
+            #   「平台」就不是平台（记忆 window-aggregation-must-align-both-sides）。
+            d = {x[0]: x[1] for x in r}
+            if 25 in d and 30 in d and len(d[25]) == len(d[30]):
+                vals.append(st.mean([st.mean([d[25][i], d[30][i]])
+                                     for i in range(len(d[25]))]))
         if vals:
             A("   %-10s 平台=%.4f  Δ(臂−专家)=%+.4f   逐种子 %s"
               % (nm, st.mean(vals), st.mean(vals) - EXPERT,
@@ -390,8 +437,8 @@ def verdict():
     A("\n### 5. ★ 吞吐代价（决定「值不值得继续投入」的一半）")
     A("   %-12s %10s %10s %10s" % ("臂", "rollout_s", "update_s", "合计"))
     tot = {}
-    for nm, get in (("ctrl", lambda s: read(CTRL, s)),
-                    ("hist32", lambda s: read(ARM_RUNS[SEEDS.index(s)], s))):
+    for nm, get in (("ctrl", lambda s: read(ctrl_run(s))),
+                    ("hist32", lambda s: read(arm_run(s)))):
         rs, us = [], []
         for s in avail_s:
             rows = [x for x in get(s) if x[2] and x[3]]
@@ -459,13 +506,14 @@ def main():
     # ---- 阶段 2：等三臂到 u30 ----
     t0 = time.time()
     while time.time() - t0 < 6 * 3600:
-        n = sum(1 for r in ARM_RUNS if last_update(r) >= UPDATES)
-        if n == len(ARM_RUNS):
+        n = sum(1 for s in SEEDS if last_update(arm_run(s)) >= UPDATES)
+        if n == len(SEEDS):
             log("✓ 三臂全部到 u%d（%.0f 分钟）" % (UPDATES, (time.time() - t0) / 60))
             break
         if int(time.time() - t0) % 900 < 130:
-            log("  进度 %d/%d (%s)" % (n, len(ARM_RUNS),
-                 " ".join("%s=u%d" % (r, last_update(r)) for r in ARM_RUNS)))
+            log("  进度 %d/%d (%s)" % (n, len(SEEDS),
+                 " ".join("%s=u%d" % (arm_run(s), last_update(arm_run(s)))
+                          for s in SEEDS)))
         time.sleep(150)
     else:
         log("!! 等待超时，按现有数据判读")
@@ -473,9 +521,9 @@ def main():
     txt = verdict()
     for ln in txt.splitlines():
         log("  " + ln)
-    n_done = sum(1 for r in ARM_RUNS if last_update(r) >= UPDATES)
+    n_done = sum(1 for s in SEEDS if last_update(arm_run(s)) >= UPDATES)
     with open(VERDICT, "w", encoding="utf-8") as f:
-        f.write("STATE=%s\n" % ("done" if n_done == len(ARM_RUNS) else "timeout"))
+        f.write("STATE=%s\n" % ("done" if n_done == len(SEEDS) else "timeout"))
         f.write(txt)
     log("判读写入 %s" % VERDICT)
 
