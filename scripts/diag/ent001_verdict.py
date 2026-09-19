@@ -25,7 +25,15 @@ R = "/opt/qkd/graph_mappo/outputs"
 CTRL = "ent01_rerun"
 ARM = "ent001"
 SEEDS = (42, 43, 44)
-CRIT3 = 4.303
+# ★ 临界值一律从唯一来源取（见 stats_crit.py）。
+#   2026-09-20 修复：原先是
+#       crit = CRIT3 if df == 2 else (2.776 if df == 4 else 2.145)
+#   这条链**只覆盖 df=2 和 df=4**，其余一律落到 2.145（那是 **df=14** 的值）。
+#   本次 ent001_s44 平台窗口不全 ⟹ df 降到 1 ⟹ 用 2.145 判 df=1
+#   （真值 **12.706**）会让 |t| 在 2.145~12.706 之间时**假显著**。
+#   本例 t=−0.69 离两条线都远，结论未受影响——**是运气不是设计**。
+from stats_crit import t_crit  # noqa: E402
+
 EXPERT = 0.6979220689
 T_LO, T_HI = -0.035, 0.035
 
@@ -116,7 +124,7 @@ sd = st.stdev(per_seed) if len(per_seed) > 1 else float("nan")
 se = sd / math.sqrt(len(per_seed)) if len(per_seed) > 1 else float("nan")
 t = m / se if se and se == se and se != 0 else float("nan")
 df = len(per_seed) - 1
-crit = CRIT3 if df == 2 else (2.776 if df == 4 else 2.145)
+crit = t_crit(df)     # 未知 df 会抛错，不会静默回退成宽松值
 print("   n=%d 训练种子 × %d 请求种子   df=%d  临界值=%.3f" % (len(per_seed), nc, df, crit))
 print("   Δ = %+.4f   SD(训练种子) = %.4f   SE = %.4f   t = %+.2f  %s"
       % (m, sd, se, t, "★ 过线" if abs(t) > crit else "未过线"))
