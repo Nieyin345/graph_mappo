@@ -1,0 +1,44 @@
+# 旋钮：`gae_lambda` 0.95 → 0.90（**从未测过的方向**）
+#
+# 为什么是这个方向：全库 23 个已有臂**无一例外**都是 λ=0.95。唯一动过 λ 的是
+# `gae99`（λ=0.99），它在本节点干净对照下 Δ=−0.0572（逐轮 u5 −0.010 → u30 −0.059，
+# 量级单调放大）。也就是说 **λ 只在"更依赖 bootstrap"这一侧有读数，另一侧是空白**。
+#
+# 预注册的两种可能（跑之前写死，防事后编故事）：
+#   H1「λ 单调」：λ=0.99 变差 ⟹ λ=0.90 应变好。效应量若与 gae99 同量级，
+#      约 +0.03 ~ +0.06 —— 那将是本视角下**第一个既能测出又有实用价值**的旋钮。
+#   H2「λ 平坦」：只有"抱死 bootstrap"有害，λ≤0.95 是平台。则 gae90 ≈ 0。
+# 两种结果都有用：H1 给出可采纳的改动，H2 关掉一整条搜索方向。
+#
+# 机理：λ 控制优势估计里 bootstrap 的衰减长度。λ 小 ⟹ 优势更多来自实际回报、
+# 更少来自 critic 的猜测 ⟹ 对 critic 误差更鲁棒，但**方差更大**（本项目已实测
+# 「更依赖 bootstrap 一致地有害」，见 记忆库 gamma-does-not-stack-on-entropy）。
+# 反过来 λ 降到 0.90 是拿偏差换方差 —— 在这套"critic 拟合好、优势塌缩"的系统里
+# （见 actor-is-frozen-by-advantage-collapse），方差那一侧正是缺的。
+#
+# 只改 `train.gae_lambda`，不动 `gamma`（γ0.999 已单独测过，是有害的）。
+#
+# 用法（★ 必须排在 train_ent01.yaml **之后**）：
+#
+#   OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 /opt/qkd/venv/bin/python -u \
+#       scripts/train/train_graph_mappo.py \
+#       --configs rl_algorithm.yaml train_full_rl.yaml train_ent01.yaml \
+#                 train_gae90.yaml \
+#       --checkpoint outputs/supervised_pg_phased/supervised_pg_phased_latest.pt \
+#       --seed 42 --num-updates 30 --run-name gae90_s42
+#
+# ### 判据（跑之前写死）
+#
+# 对照 `ent01_rerun_s{42,43,44}` —— **本节点、8 线程、同配置重跑**，不是跨节点搬来的
+# `ent01_t8_*`（后者带 ~0.0197 的硬件偏置，见 docs/训练诊断记录.md 重标定节）。
+# n=3，df=2，**临界值 4.303**（不是 2）。主窗口 = 平台 u25/u30，逐种子配对。
+#
+# 起臂自检（免费且决定性）：u1 的 rollout 发生在第一次梯度更新**之前**，只由
+# 「权重+种子+线程+代码+硬件」定，与本臂超参无关 ⟹ 三个种子的 u1
+# `mean_success_rate` 必须与对照**逐位相同**（42→0.872510, 43→0.874097,
+# 44→0.871008）。对不上就说明中间有未记账的变量，先停下查。
+#
+# 报告义务：除平台值外**必须给逐轮曲线与逐轮跨种子 SD**——平台窗口会掩盖早期效应
+# （见 记忆库 platform-window-masks-early-effect）。
+train:
+  gae_lambda: 0.90
