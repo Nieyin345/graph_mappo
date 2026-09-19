@@ -152,8 +152,40 @@ def steady_of(name, mb):
     return PSS_HIST if "hist" in name else (29.5 if mb == 512 else 25.0)
 
 
+def live_run_names():
+    """此刻**真在做**的 run 名集合（走 /proc，与门同一个数据源）。
+
+    ★ 2026-09-20 实测的 bug：本链的 `launched` 是**局部 set**，
+    重启后从空开始 ⟹ 会把**已经在跑**的臂再起一遍。
+    实际发生：`hist32_s43` 被起了第二份（pid 176975），
+    与已在跑、已有 16 轮的那份（pid 141126）**写同一个 outputs 目录**
+    （`metrics.jsonl` 被两个进程交错追加、`checkpoint_*.pt` 互相覆盖）
+    ⟹ **这一臂的读数作废**。
+    ⟹ 判据必须问**进程表**，不能只信自己的账本
+    （同族：[[renaming-running-script-changes-nothing]] 里"内存里的文本"那类错误——
+      **自己的状态 ≠ 世界的状态**）。
+    """
+    names = set()
+    for d in glob.glob("/proc/[0-9]*"):
+        try:
+            with open(d + "/cmdline", "rb") as f:
+                c = f.read().decode("utf-8", "replace").replace("\x00", " ")
+        except OSError:
+            continue
+        if "train_graph_mappo.py" not in c:
+            continue
+        m = re.search(r"--run-name\s+(\S+)", c)
+        if m:
+            names.add(m.group(1))
+    return names
+
+
 def launch(seed):
     run = "hist32_s%d" % seed
+    # ★ 双保险：先问**进程表**。已在跑就直接记账，不重复起。
+    if run in live_run_names():
+        log("  %s **已在跑** ⟹ 不重复启动（只记账）" % run)
+        return None
     cmd = ([PY, "scripts/train/train_graph_mappo.py", "--configs"] + BASE +
            ["--checkpoint", CKPT, "--seed", str(seed),
             "--num-updates", str(UPDATES), "--run-name", run])

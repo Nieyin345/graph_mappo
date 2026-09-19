@@ -158,6 +158,23 @@ def live_runs():
     return out
 
 
+def live_run_names():
+    """此刻**真在做**的 run 名集合（走 /proc，与 `live_runs()` 同一数据源）。
+
+    用于 `launch()` 的防重复守卫：链重启后 `launched` 会从空开始，
+    只信自己的账本就会把在跑的臂再起一遍。
+    """
+    names = set()
+    for d in glob.glob("/proc/[0-9]*"):
+        c = cmdline(int(d.rsplit("/", 1)[1]))
+        if "train_graph_mappo.py" not in c:
+            continue
+        m = re.search(r"--run-name\s+(\S+)", c)
+        if m:
+            names.add(m.group(1))
+    return names
+
+
 def fs_runs(window_s=900):
     """独立读数：用文件系统数「最近还在写的 run」。
 
@@ -223,6 +240,14 @@ def gate(n_left):
 # ---------------------------------------------------------------- 起臂
 
 def launch(run, cfg, seed):
+    # ★ 2026-09-20 修：`launched` 是**局部账本**，链一重启就从空开始
+    #   ⟹ 会把**已经在跑**的臂再起一遍，两份进程写同一个 outputs 目录
+    #   （metrics.jsonl 交错追加、checkpoint 互相覆盖）⟹ 该臂读数作废。
+    #   实测发生在 hist32_chain.py（`hist32_s43` 被起了第二份）。
+    #   ⟹ 判据必须问**进程表**：自己的状态 ≠ 世界的状态。
+    if run in live_run_names():
+        log("  %s **已在跑** ⟹ 不重复启动（只记账）" % run)
+        return None
     env = dict(os.environ, OMP_NUM_THREADS=THREADS, MKL_NUM_THREADS=THREADS)
     args = ([PY, "-u", "scripts/train/train_graph_mappo.py", "--configs"]
             + BASE + [cfg]
