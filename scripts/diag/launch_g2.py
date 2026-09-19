@@ -393,6 +393,38 @@ def driver_alive() -> list[int]:
 
 
 # ---------------------------------------------------------------- 主循环
+def verify_arm(name: str) -> bool:
+    """核对一条臂的**生效配置**（不是启动参数、也不是我写下的意图）。
+
+    ★ **进程在 ≠ 跑对了**：配置链是 `load_default_config → 各 yaml 深合并 →
+    env_full 强制叠加 → profiles`，后面的覆盖前面的，**文档比代码旧**。所以
+    只能读它自己写出来的 `resolved_config.yaml`（记忆：以 resolved_config 为准）。
+
+    判据：
+      · `gae90_*` ⟹ `train.gae_lambda=0.9`
+      · 其它      ⟹ `train.gae_lambda=0.95`
+      · 全体      ⟹ `train.ppo.entropy_coef=0.01`
+    （A/B 的**唯一**差异必须是 λ 本身；若 entropy_coef 也漂了，就不是 A/B 了。）
+    """
+    rc = os.path.join(ROOT, "outputs", name, "resolved_config.yaml")
+    if not os.path.exists(rc):
+        log("  ?? %s: 还没有 resolved_config.yaml（进程可能已死）" % name)
+        return False
+    got = subprocess.run([PY, "/tmp/rc_get.py", rc,
+                          "train.gae_lambda", "train.ppo.entropy_coef"],
+                         capture_output=True, text=True).stdout.strip()
+    log("  %s: %s" % (name, got.replace("\n", " ")))
+    ok = True
+    want = "0.9" if name.startswith("gae90") else "0.95"
+    if ("train.gae_lambda=%s" % want) not in got:
+        log("       ✗ 期望 train.gae_lambda=%s —— **结果不可用**" % want)
+        ok = False
+    if "train.ppo.entropy_coef=0.01" not in got:
+        log("       ✗ 期望 train.ppo.entropy_coef=0.01 —— **结果不可用**")
+        ok = False
+    return ok
+
+
 def main(argv: list[str]) -> int:
     phase = (argv[1] if len(argv) > 1 else "").upper()
     if phase not in ("A", "B", "C"):
@@ -519,6 +551,15 @@ def main(argv: list[str]) -> int:
             started.append((name, pid))
             todo.pop(i)
             progressed = True
+            # ★★ **每条起完立刻验配置**，不等所有臂放完。
+            #   实测教训：放臂会跨越数小时（内存门一条条等），而第一版的验证
+            #   在全部放完之后才做 ⟹ 第一条如果配错，会**白等几小时**才发现，
+            #   期间还白占 25GiB。`failed-launch-must-be-loud` 要的是**尽早吵**，
+            #   不是"吵得完整"。
+            time.sleep(130)          # 等它写出 resolved_config.yaml
+            if not verify_arm(name):
+                log("    ⟹ 本臂生效配置不对 ⟹ 停止（不写标记）")
+                return 1
             break               # 起一条就重新读数（内存窗口会变）
 
         if not progressed:
@@ -527,34 +568,16 @@ def main(argv: list[str]) -> int:
     log("=" * 70)
     log("全部 %d 条已起：%s" % (len(started), "、".join(n for n, _p in started)))
 
-    # ---------- 启动后验证：**进程在 ≠ 跑对了** ----------
-    time.sleep(150)
-    log("=== 启动后验证（resolved_config.yaml 里的生效值）===")
+    # ---------- 收尾扫一遍（每条起时已各验过一次，这里只做汇总）----------
+    log("=== 收尾复核（全部臂的生效配置）===")
     bad = 0
     for name, _pid in started:
-        rc = os.path.join(ROOT, "outputs", name, "resolved_config.yaml")
-        if not os.path.exists(rc):
-            log("  ?? %s: 还没有 resolved_config.yaml（进程可能已死）" % name)
-            bad = 1
-            continue
-        got = subprocess.run([PY, "/tmp/rc_get.py", rc,
-                              "train.gae_lambda", "train.ppo.entropy_coef"],
-                             capture_output=True, text=True).stdout.strip()
-        log("  %s: %s" % (name, got.replace("\n", " ")))
-        want = "0.9" if name.startswith("gae90") else None
-        if want and ("train.gae_lambda=%s" % want) not in got:
-            log("       ✗ 期望 train.gae_lambda=%s —— **结果不可用**" % want)
-            bad = 1
-        if not name.startswith("gae90") and "train.gae_lambda=0.95" not in got:
-            log("       ✗ 期望 train.gae_lambda=0.95 —— **结果不可用**")
-            bad = 1
-        if "train.ppo.entropy_coef=0.01" not in got:
-            log("       ✗ 期望 train.ppo.entropy_coef=0.01 —— **结果不可用**")
-            bad = 1
+        if not verify_arm(name):
+            bad += 1
     if bad:
         log("!! 有臂异常 —— **不写标记**，修好后可重跑")
         return 1
-    log("启动后验证全部通过 ✓")
+    log("收尾复核全部通过 ✓")
 
     # ---------- 等跑完 ----------
     TMO = 10 * 3600
