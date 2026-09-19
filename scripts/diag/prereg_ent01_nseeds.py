@@ -232,3 +232,82 @@ print(f"  判据：合并 **n={need}**，u25/u30 平台均值，单样本 t 检�
 print(f"        df={df_f}，临界值 **{t_crit(df_f):.3f}**，双侧 **p < 0.05**")
 print(f"  报法：无论方向，照实报。显著 → 说「超过」；不显著 → 说「未测出」。")
 print(f"  预算：{need-3} 个种子 = 1 波，约 2h")
+
+# =====================================================================
+# 4. 合并读数 —— **含预先写好的选择性偏差处置**（2026-09-19 补）
+#
+# 为什么必须两读并报：预注册窗口 u25/u30 是用 42/43/44 这三条曲线**挑出来的**
+# （见 docs/训练诊断记录.md「预注册的窗口本身就是选出来的」）。选点与评估用同一批
+# 数据 ⟹ 42/43/44 那部分读数带选择效应，实测偏 **+0.0135**，占效应量的 68%。
+#
+# 45/46 是**新数据，没参与过选窗口**，所以它们是干净的那一半。
+# 合并 n=5 = 3/5 有偏 + 2/5 干净 ⟹ **合并不消除偏差，只稀释**（约稀释到 60%）。
+#
+# ★ 这一节在 s45/s46 **跑完之前**就写好了。若合并后显著，**不许**只报合并读数
+#   ——必须同时报「只用 45/46」的读数，哪怕 n=2 分辨率很差（df=1，临界值 12.706）。
+#   先写下来才叫预注册；跑完再想就是事后找理由。
+# =====================================================================
+print()
+print("=" * 74)
+print("4. 合并读数（**含预先写好的选择性偏差处置**）")
+print("=" * 74)
+
+ALL = [42, 43, 44, 45, 46]
+BIASED = [42, 43, 44]      # 参与过选窗口 → 有偏
+CLEAN = [45, 46]           # 新数据 → 干净
+
+
+def plateau_delta(seed: int):
+    """该种子在 u25/u30 平台的配对差（对专家）。数据不够返回 None。"""
+    pts = points(f"ent01_s{seed}")
+    vals = [statistics.mean([pts[u][i] - base[i] for i in range(len(seeds))])
+            for u in PLATEAU if u in pts and len(pts[u]) == len(seeds)]
+    if not vals:
+        return None
+    return statistics.mean(vals)
+
+
+def report(label: str, vals: list[float]) -> None:
+    if len(vals) < 2:
+        print(f"  {label:<26} 数据不足（n={len(vals)}），跳过")
+        return
+    m = statistics.mean(vals)
+    s = statistics.stdev(vals)
+    df = len(vals) - 1
+    tc = t_crit(df)
+    t = m / (s / math.sqrt(len(vals)))
+    p = 2 * _t_sf(abs(t), df)
+    sig = "**显著**" if abs(t) > tc else "未达显著"
+    print(f"  {label:<26} n={len(vals)}  Δ={m:+.4f}  SD={s:.4f}  "
+          f"t={t:+.3f} (df={df}, 临界 {tc:.3f})  p={p:.4f}  → {sig}")
+
+
+d_all = {s: plateau_delta(s) for s in ALL}
+have = [s for s in ALL if d_all[s] is not None]
+print(f"  已有平台读数的种子: {have}")
+for s in ALL:
+    v = d_all[s]
+    tag = "（有偏：参与过选窗口）" if s in BIASED else "（干净：新数据）"
+    print(f"    ent01_s{s}: {'—' if v is None else f'{v:+.4f}'}  {tag}")
+print()
+
+if len(have) >= 3:
+    report("① 预注册：合并 n=5", [d_all[s] for s in ALL if d_all[s] is not None])
+
+    # 只用干净种子 —— 这一步是**必须**的，不是可选的
+    clean_v = [d_all[s] for s in CLEAN if d_all[s] is not None]
+    biased_v = [d_all[s] for s in BIASED if d_all[s] is not None]
+    report("② 只用干净种子 45/46", clean_v)
+    if biased_v:
+        report("③ 只用有偏种子 42/43/44", biased_v)
+
+    print()
+    print("  ★ 判读（**跑之前就定好的**）：")
+    print("    · 若 ① 显著而 ② 方向不一致或远弱 → 效应量里很大一块是**窗口选择**，")
+    print("      不能写成「ent01 超过专家」。")
+    print("    · 若 ① 与 ② 同向且量级相当 → 选择效应不是主因，结论才站得住。")
+    print("    · ② 的 n=2（df=1，临界值 12.706）**几乎没有功效**——它用来**证伪**，")
+    print("      不是用来**证实**。方向相反就是硬信号；方向相同只是不矛盾。")
+    print(f"    · 若 ① 不显著 → 结论就是「未测出」，**不追加种子到显著为止**（p-hacking）。")
+else:
+    print(f"  还没凑够（目前 {len(have)} 个种子有 u25/u30 读数）—— 等 s45/s46 跑完再跑本脚本。")
