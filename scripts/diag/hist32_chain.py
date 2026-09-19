@@ -49,8 +49,16 @@ MAX_HIST = 2
 def n_hist_live(runs):
     return sum(1 for nm, _, _ in runs if "hist" in nm)
 
-ARM_RUNS = ["hist32v3_s42", "hist32_s43", "hist32_s44"]   # s42 已在跑
-TODO = [("hist32", 43), ("hist32", 44)]
+# ★★ 命名约定必须**统一**：本文件的 read() 拼 `outputs/<基名>_s<种子>`，
+#    而 u1_of() 拼 `outputs/<全名>`。原值 ["hist32v3_s42", "hist32_s43", "hist32_s44"]
+#    **混了两种约定** ⟹ read() 对三条臂**全部返回空** ⟹ 判读只会打印「数据不足」，
+#    而那看起来像「还没跑完」，不像 bug。2026-09-20 修正。
+#    s42 原设计是**从 outputs/hist32v3_s42/checkpoint_update_000010.pt 续跑 20 轮**，
+#    与 s43/s44（从 BC 新起 30 轮）不对称；那个 u10 checkpoint 已随旧节点 clnode316
+#    丢失 ⟹ 现在三条统一为**从 BC 新起 30 轮**，更干净，但改变了原设计意图。
+ARM_RUNS = ["hist32_s42", "hist32_s43", "hist32_s44"]
+# TODO 已由 .tmp/launch_wave263.py 接管（它用内存门统一排队，不在这里重复起臂）
+TODO = []
 CTRL = "ent01_rerun"
 SEEDS = (42, 43, 44)
 CRIT3 = 4.303
