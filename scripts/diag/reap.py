@@ -25,7 +25,14 @@ import time
 
 
 def proc_table():
-    out = subprocess.run(["ps", "-eo", "pid,ppid,etime,args"],
+    # ★ `-ww`（无限宽）：2026-09-21 在服务器上**实测**过，`ps -eo pid,ppid,etime,args`
+    #   在管道下（stdout 不是 tty）**当前不截断** —— 245 字节的 args 完整输出，
+    #   加不加 `-ww` 行宽相同 ⟹ **B-15 那条"未加 -ww 会被截断"在本机不成立**
+    #   （子代理是推的，不是测的；又一次「推出的读数」）。
+    #   仍然加上：零成本，且 procps 的宽度规则随实现/调用环境而变，
+    #   行为**不该依赖默认**。注释写明是预防性规则，**不是修了一个活 bug**
+    #   —— 免得后人以为这里发生过截断而去"验证"一个不存在的问题。
+    out = subprocess.run(["ps", "-ewwo", "pid,ppid,etime,args"],
                          capture_output=True, text=True).stdout
     rows = []
     for line in out.splitlines()[1:]:

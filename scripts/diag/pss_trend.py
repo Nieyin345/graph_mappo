@@ -82,7 +82,9 @@ def main():
     def snapshot():
         by_run = defaultdict(float)
         det = {}
-        out = subprocess.run(["ps", "-eo", "pid,ppid,args"],
+        # ★ `-ww`：预防性（见 reap.py 里的实测记录 —— 管道下当前不截断，
+        #   但宽度规则随实现/环境变，行为不该依赖默认）。
+        out = subprocess.run(["ps", "-ewwo", "pid,ppid,args"],
                              capture_output=True, text=True).stdout
         parents = {}
         rows = []
