@@ -88,6 +88,133 @@ def _upgrade_state_dict_for_model(
     return out, widened, dropped, missing, unexpected
 
 
+def _torch_names(module: torch.nn.Module, prefix: str = "") -> list[str]:
+    """返回 ``module`` 中**有 ``.data`` 的属性**的限定名（torch.optim 的收集口径）。
+
+    为什么不用 ``module.state_dict()``：本项目的 ``node_proj`` 是 ``nn.Sequential``，
+    字典里是 ``node_proj.0.weight``，而优化器收集的是 ``node_proj._modules['0'].weight``。
+    两者顺序**一致**，但字符串不同；这里要的是**与优化器 state 索引对齐**的那一份。
+    """
+    out = []
+    # 顺序必须与 `torch.nn.Module.named_parameters()` 一致：**先自身、再递归子模块**
+    # 的前序遍历（torch 的 `_named_members` 就是这么走的）。写反了会让名字与
+    # 优化器的 state 索引错位，打印出来的说明就是错的。
+    for name, param in module.__dict__.get("_parameters", {}).items():
+        if param is not None:
+            out.append(prefix + name)
+    for name, buf in module.__dict__.get("_buffers", {}).items():
+        if buf is not None:
+            out.append(prefix + name)
+    for name, child in module.__dict__.get("_modules", {}).items():
+        if child is not None:
+            out.extend(_torch_names(child, prefix + name + "."))
+    return out
+
+
+def _upgrade_optimizer_state_for_model(
+    model: torch.nn.Module, optimizer: torch.optim.Optimizer, opt_state: dict
+) -> list[str]:
+    """把 checkpoint 的**优化器**状态适配到当前结构上（就地修改 ``opt_state``）。
+
+    为什么必须有这个：``Optimizer.load_state_dict`` 只校验 **param_groups** 的
+    结构（组数、每组参数个数），**完全不校验每个 state 张量的形状**。于是
+    模型被 ``_upgrade_state_dict_for_model`` 加宽之后（如
+    ``encoder.node_proj.0.weight (128,17)→(128,81)``），Adam 的
+    ``exp_avg``/``exp_avg_sq`` 仍是 ``(128,17)``，**静默通过加载**，
+    直到**第一次 ``optimizer.step()``** 才抛
+    ``RuntimeError: The size of tensor a (17) must match the size of tensor b (81)``。
+
+    实测（2026-09-20）：这个 bug 在 ``seq_len: 240`` 时**被 OOM 掩盖**——
+    第一个 update 之前进程就被杀了，从没走到 ``step()``；把 ``seq_len`` 降到 32
+    跑得够快，才第一次走到那里并暴露出来。
+
+    加宽规则与模型侧完全一致：**新增的列置零**。这既是数学上正确的
+    （新输入的梯度贡献初始为 0 ⟹ 一阶矩本就该是 0），也顺带让
+    ``exp_avg`` 与加宽后的权重对齐。**无动量近似**：优化器状态是按
+    ``param_groups`` 的**全局顺序**存的扁平列表，形状变了没有可靠的对应关系，
+    所以放不进去的一律丢弃并打印。
+
+    返回人类可读的处理说明（调用方必须打印）。**绝不允许静默跳过。**
+    """
+    msgs: list[str] = []
+    if not opt_state or "state" not in opt_state or "param_groups" not in opt_state:
+        return msgs
+    target = [tuple(p.shape) for g in optimizer.param_groups for p in g["params"]]
+    groups = opt_state["param_groups"]
+    try:
+        flat = [p for g in groups for p in g["params"]]
+    except (TypeError, KeyError):
+        return ["!! 优化器状态结构无法解析（param_groups 里没有 params），整体丢弃"]
+
+    # 检查：索引必须连续覆盖 [0, len(target))
+    if sorted(flat) != list(range(len(target))):
+        return ["!! 优化器状态索引不是 0..%d 的排列 ⟹ 无法可靠映射，整体丢弃"
+                % (len(target) - 1)]
+
+    # 名字表只为打印用；顺序与 target 一致（见 _torch_names 的说明）。
+    names: list[str] = []
+    for g in optimizer.param_groups:
+        if not g["params"]:
+            continue
+        root = g["params"][0]
+        # 优化器的三组依次绑在 encoder / actor / critic 上（见 __init__）
+        for attr in ("encoder", "actor", "critic"):
+            sub = getattr(model, attr, None)
+            if sub is not None and next(sub.parameters(), None) is root:
+                names.extend(_torch_names(sub, attr + "."))
+                break
+    if len(names) != len(target):
+        # 名字对不齐 ⟹ 打印出来的「哪个参数被加宽」会是错的。而这条日志正是
+        # 事后核查的依据，宁可不打印也不能打印错的。
+        names = ["<参数 %d>" % i for i in range(len(target))]
+
+    # Adam 的 state 是混合的：`step` 是**标量计数器**（优化器超参数，不属于参数形状），
+    # `exp_avg` / `exp_avg_sq` 才与参数同形。把前者当参数张量去比形状，
+    # 会把**每一个**参数都判成「无法适配」并整槽丢弃 —— 那就等于静默清空 Adam。
+    # 实测（2026-09-20）第一版就是这个错：打印出「形状相同 3 / 丢弃 90」。
+    _HPARAMS = ("step",)
+
+    n_ok = n_widen = n_drop = 0
+    for idx, st in list(opt_state["state"].items()):
+        idx = int(idx)
+        if idx >= len(target):
+            del opt_state["state"][idx]
+            n_drop += 1
+            msgs.append("    - 优化器槽位 %d 越界（模型只有 %d 个参数）" % (idx, len(target)))
+            continue
+        cur_shape = target[idx]
+        name = names[idx]
+        fixed = {}
+        bad = None
+        for k, t in st.items():
+            if k in _HPARAMS or not torch.is_tensor(t) or t.dim() == 0:
+                fixed[k] = t          # 超参数/标量：与参数形状无关，原样保留
+            elif tuple(t.shape) == cur_shape:
+                fixed[k] = t
+                n_ok += 1
+            elif (t.dim() >= 1 and t.shape[:-1] == cur_shape[:-1]
+                  and t.size(-1) < cur_shape[-1]):
+                fixed[k] = _expand_last_dim(t, cur_shape[-1])
+                n_widen += 1
+                msgs.append("    + 优化器 %s.%s %s→%s（新增列置零 ⟹ 无动量近似）"
+                            % (name, k, tuple(t.shape), cur_shape))
+            else:
+                bad = "    - 优化器 %s.%s %s 无法适配 %s ⟹ 丢弃该槽位" % (
+                    name, k, tuple(t.shape), cur_shape)
+                break
+        if bad is not None:
+            n_drop += 1
+            msgs.append(bad)
+            del opt_state["state"][idx]
+        else:
+            opt_state["state"][idx] = fixed
+
+    # 新参数（如 history_encoder.*）本来就没有优化器状态：Adam 会补齐，无需处理。
+    msgs.insert(0, "优化器状态适配：形状相同 %d / 加宽 %d / 丢弃 %d"
+                % (n_ok, n_widen, n_drop))
+    return msgs
+
+
 def _mean_ratio(numerators, denominators) -> float:
     """Sum(numerators) / Sum(denominators)，而不是逐项比值再平均。
 
@@ -1315,6 +1442,18 @@ class MAPPOTrainer:
             print("reward config differs from checkpoint: re-initialized critic value head")
         if data.optimizer_state is not None:
             try:
+                # ★★ 必须先把**优化器状态**也升级到当前结构，否则模型加宽之后
+                #   Adam 的 exp_avg/exp_avg_sq 仍是旧宽度，而
+                #   `Optimizer.load_state_dict` **只校验 param_groups 的结构、
+                #   不校验 state 张量的形状** ⟹ 静默通过，直到第一次
+                #   `optimizer.step()` 才抛 RuntimeError（实测 (17) vs (81)）。
+                #   这不是可选的：对照臂是**带 Adam 矩**热启动的，若这里丢掉
+                #   优化器状态，臂与对照就差**两**个变量（历史输入 + Adam 动量），
+                #   配对不再干净。
+                for msg in _upgrade_optimizer_state_for_model(
+                    self.model, self.optimizer, data.optimizer_state
+                ):
+                    print("checkpoint " + msg if msg.startswith("优化器") else msg)
                 self.optimizer.load_state_dict(data.optimizer_state)
                 # load_state_dict 恢复的是**整组** param_groups，学习率也在里面。
                 # 不写回的话，checkpoint 里存的那个 lr 会盖掉配置值，而这一点
@@ -1325,12 +1464,18 @@ class MAPPOTrainer:
                 # Adam 的一二阶矩（恢复时真正需要的部分）保持不动。
                 for group, lr in zip(self.optimizer.param_groups, self._configured_lrs):
                     group["lr"] = lr
-            except ValueError as exc:
+            except (ValueError, RuntimeError) as exc:
                 # Pretraining checkpoints may use a single-parameter optimizer
                 # while the trainer uses encoder/actor/critic groups. The
                 # model weights are what matter for warm-starting; keep a
                 # freshly initialized optimizer in that case.
-                print(f"optimizer state incompatible ({exc}); starting optimizer fresh")
+                # ⚠ RuntimeError 也要抓：形状不匹配抛的是它，早先只抓 ValueError
+                #   会让训练**在第一个 optimizer.step() 处**才炸（远离根因）。
+                # ⚠ 这里一旦触发，臂与对照就差**两**个变量（结构 + Adam 动量），
+                #   实验结果必须按「丢了优化器状态」来读，不能当干净配对。
+                print(f"optimizer state incompatible ({type(exc).__name__}: {exc}); "
+                      f"starting optimizer fresh —— ⚠ 本 run 与对照的差异不止一处，"
+                      f"判读时要写明")
         self.update_count = data.update
         if data.config is not None:
             # Keep the CURRENT training config (env scenario, train schedule,
