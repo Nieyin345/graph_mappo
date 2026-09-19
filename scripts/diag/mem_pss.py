@@ -14,7 +14,7 @@
 
 1. 按 run-name 分组的 PSS 合计（父进程 + 它的 worker）
 2. 系统总体：已用 / 可用 / 缓存
-3. **外推**：按 +0.21 GB/轮 的实测增长率，算到目标轮数的需求
+3. **外推**：按 +0.21 GiB/轮 的实测增长率，算到目标轮数的需求
 
 用法（服务器上）：sudo 不需要，同用户进程都能读 smaps_rollup
     /opt/qkd/venv/bin/python /tmp/mem_pss.py [--to-update 30]
@@ -28,7 +28,7 @@ from collections import defaultdict
 from pathlib import Path
 
 KB = 1024.0
-GROWTH_PER_UPDATE = 0.21      # GB/轮，实测多点线性拟合均值
+GROWTH_PER_UPDATE = 0.21      # GiB/轮，实测多点线性拟合均值
 UPD_RE = re.compile(r"checkpoint_update_(\d+)\.pt$")
 
 
@@ -38,7 +38,7 @@ def meminfo() -> dict[str, float]:
         k, _, rest = line.partition(":")
         v = rest.strip().split()
         if v and v[0].isdigit():
-            out[k] = float(v[0]) / KB / KB      # kB -> GB
+            out[k] = float(v[0]) / KB / KB      # kB -> GiB
     return out
 
 
@@ -66,7 +66,7 @@ def ppid_of(pid: int) -> int:
 
 
 def pss_of(pid: int) -> float:
-    """PSS，GB。读不到（进程已退出/无权限）返回 0。"""
+    """PSS，GiB。读不到（进程已退出/无权限）返回 0。"""
     try:
         for line in Path(f"/proc/{pid}/smaps_rollup").read_text().splitlines():
             if line.startswith("Pss:"):
@@ -150,27 +150,27 @@ def main(argv: list[str]) -> int:
         remain = max(0, a.to_update - u)
         proj = cur + GROWTH_PER_UPDATE * remain
         extrap_need += proj
-        print(f"  {g:<22} {cur:6.1f} GB  ({counts[g]:>2} 进程)  u={u:<3}"
-              f" 外推 u{a.to_update} → {proj:5.1f} GB")
-    print(f"  {'合计':<22} {sum(groups.values()):6.1f} GB")
+        print(f"  {g:<22} {cur:6.1f} GiB  ({counts[g]:>2} 进程)  u={u:<3}"
+              f" 外推 u{a.to_update} → {proj:5.1f} GiB")
+    print(f"  {'合计':<22} {sum(groups.values()):6.1f} GiB")
 
     if orphans:
         print()
         print("  ⚠ 孤儿 worker（PPid==1，OOM 的**结果**；只清孤儿不解决复发）：")
         for g, v in orphans.items():
-            print(f"      {g:<20} {v:5.1f} GB")
+            print(f"      {g:<20} {v:5.1f} GiB")
 
     print()
     print("=" * 74)
     print("系统")
     print("=" * 74)
-    print(f"  MemTotal     {mi.get('MemTotal', 0):8.1f} GB")
-    print(f"  MemFree      {mi.get('MemFree', 0):8.1f} GB")
-    print(f"  MemAvailable {mi.get('MemAvailable', 0):8.1f} GB   ← 含可回收缓存")
-    print(f"  训练 PSS 合计 {total_pss:8.1f} GB")
+    print(f"  MemTotal     {mi.get('MemTotal', 0):8.1f} GiB")
+    print(f"  MemFree      {mi.get('MemFree', 0):8.1f} GiB")
+    print(f"  MemAvailable {mi.get('MemAvailable', 0):8.1f} GiB   ← 含可回收缓存")
+    print(f"  训练 PSS 合计 {total_pss:8.1f} GiB")
     if mi.get("MemTotal"):
         other = mi["MemTotal"] - mi.get("MemFree", 0) - total_pss
-        print(f"  其它占用      {other:8.1f} GB   ← 缓存/系统/非训练进程")
+        print(f"  其它占用      {other:8.1f} GiB   ← 缓存/系统/非训练进程")
 
     print()
     print("=" * 74)
@@ -178,11 +178,11 @@ def main(argv: list[str]) -> int:
     print("=" * 74)
     # ★ 两个视角，缺一不可（[[respawn-guard-two-views]]）：
     #     视角 A（增量）：当前 MemFree 装得下**还要长出来的那部分**吗？
-    #     视角 B（绝对）：长到目标轮数后，系统还剩多少？必须 >= 17 GB。
+    #     视角 B（绝对）：长到目标轮数后，系统还剩多少？必须 >= 17 GiB。
     #
     #   **第一版把这两个搞混了**：拿 MemFree(135.7) 去比外推**总量**(141.4)，
-    #   报「已超 5.7 GB」。但总量里 108.8 是**已经在用**的，真正新增只有
-    #   32.6 GB —— 真实余量 103 GB，结论完全相反。
+    #   报「已超 5.7 GiB」。但总量里 108.8 是**已经在用**的，真正新增只有
+    #   32.6 GiB —— 真实余量 103 GiB，结论完全相反。
     #   与 [[respawn-guard-two-views]] 记的是同一个坑的**镜像**：那次是只算增量
     #   太宽松，这次是拿绝对量当增量、**把够用报成不够用**。
     #   判据落在错误位置，方向不管是松还是紧，都是错的。
@@ -193,21 +193,21 @@ def main(argv: list[str]) -> int:
     after = mi.get("MemTotal", 0) - other - extrap_need
     MIN_MARGIN = 17.0
 
-    print(f"  在跑 {len(groups)} 个 run：现在 {cur_total:.1f} GB → u{a.to_update} "
-          f"{extrap_need:.1f} GB（**还要长 {incremental:+.1f} GB**）")
+    print(f"  在跑 {len(groups)} 个 run：现在 {cur_total:.1f} GiB → u{a.to_update} "
+          f"{extrap_need:.1f} GiB（**还要长 {incremental:+.1f} GiB**）")
     print()
-    print(f"  视角 A · 增量：MemFree {free_now:.1f} GB ≥ 新增 {incremental:.1f} GB ?  "
+    print(f"  视角 A · 增量：MemFree {free_now:.1f} GiB ≥ 新增 {incremental:.1f} GiB ?  "
           f"{'✓' if free_now >= incremental else '✗'}")
-    print(f"           长完还剩 {free_now - incremental:.1f} GB")
-    print(f"  视角 B · 绝对：到 u{a.to_update} 时系统余量 {after:.1f} GB ≥ {MIN_MARGIN} GB ?  "
+    print(f"           长完还剩 {free_now - incremental:.1f} GiB")
+    print(f"  视角 B · 绝对：到 u{a.to_update} 时系统余量 {after:.1f} GiB ≥ {MIN_MARGIN} GiB ?  "
           f"{'✓' if after >= MIN_MARGIN else '✗'}")
-    print(f"           （其它占用按当前 {other:.1f} GB 估；MemAvailable "
-          f"{mi.get('MemAvailable', 0):.1f} GB 含可回收缓存，是乐观上界）")
+    print(f"           （其它占用按当前 {other:.1f} GiB 估；MemAvailable "
+          f"{mi.get('MemAvailable', 0):.1f} GiB 含可回收缓存，是乐观上界）")
     print()
     if free_now >= incremental and after >= MIN_MARGIN:
         print(f"  ⟹ **两个视角都过**：现有 {len(groups)} 个 run 可以安全跑完。")
         spare = after - MIN_MARGIN
-        print(f"     富余 {spare:.1f} GB（= {spare / 24:.1f} 个 24G 的 run）")
+        print(f"     富余 {spare:.1f} GiB（= {spare / 24:.1f} 个 24GiB 的 run）")
     else:
         print("  ⟹ ✗ **至少一个视角不过** —— 该减臂或降轮数，不要再加。")
     print("=" * 74)
