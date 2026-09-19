@@ -61,6 +61,7 @@ wave263 的 driver 是**一条一条**放的：每放一条就 `break` 回去**�
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -206,6 +207,18 @@ def kind_of(name: str) -> str:
     return "hist" if "hist" in name else "base"
 
 
+def _u_str(u: int) -> str:
+    """轮号的显示口径 —— `-1` 是"读不出"，**不许显示成数字**。
+
+    记忆 `gate-must-print-its-inputs` 的同族：读数读不出时必须**看得出来**。
+    若把 −1 直接 `%d` 打出去，现场看到的是 `u=-1`，与"跑到第 −1 轮"一样费解；
+    而若退化成 0，就与"还没起"同形 —— 那是**静默偏松**，会掩盖故障。
+    """
+    if u < 0:
+        return "u=??（metrics.jsonl 读不出）"
+    return "u=%d" % u
+
+
 def avail_gib() -> float:
     try:
         for ln in open("/proc/meminfo"):
@@ -217,15 +230,43 @@ def avail_gib() -> float:
 
 
 def updates_done(name: str) -> int:
-    """已完成的 update 数 —— metrics.jsonl 每轮一行。
-    ⚠ 续跑臂的 outputs 是**新目录**（`_u30to50`），行数从 0 起，所以这里量的
-    是"本段跑了多少轮"，用于待涨量估计是安全的（前 15 轮一律按未到稳态算）。"""
+    """已完成的 update 数 —— 数 `metrics.jsonl` 里带 `"update"` 键的**行数**。
+
+    ★ 为什么不能直接 `sum(1 for _ in f)`（旧写法，2026-09-21 改）：
+    这个文件里**每轮不止一行** —— `eval_validation` 行也占一行，而它
+    **没有 `update` 键**（`metrics.jsonl` 实测：30 轮 + `eval_interval=5`
+    ⟹ 36 行）。旧写法把 eval 行也算成了"跑过一轮" ⟹ **系统性多算**
+    `轮数 // eval_interval` 轮。实测：`gae90_s42` 真实 u20、被报成 u22；
+    `ent01_rerun_s43` 真实 u30、被报成 u34；`hist32_s43` 真实 u15、被报成 u18。
+
+    ⚠ 这个读数**只进日志**（下面 500 行附近的现场行），**不喂内存门** ——
+    `pending_growth()` 用的是**实测 PSS**（`live_runs()`），不是轮数。
+    所以它偏了**不危险，但会骗人**：`u=` 是盯现场时唯一的进度眼睛，
+    显示 22 而实际 20，会让人以为跑得比实际快（也会掩盖"冻结"这类故障
+    ——那种情况下行数会停住，但停在哪一轮是错的）。
+
+    正确口径 = **最后一个出现的 `"update": N`**，与探针脚本
+    `.tmp/status_now.py` / `scripts/diag/hist32_chain.py` 对齐。
+    解析失败一律返回 **−1**（"读不出"），**不许退化成 0** ——
+    0 与"还没跑"同形，是静默偏松（记忆 `silent-lenient-fallback-in-thresholds`）。
+    """
     p = os.path.join(ROOT, "outputs", name, "metrics.jsonl")
+    if not os.path.exists(p):
+        return 0                      # 文件不存在 ⟹ 确实一轮没跑，0 是真的
+    last, n = -1, 0
     try:
-        with open(p, "rb") as f:
-            return sum(1 for _ in f)
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if '"update"' not in line:
+                    continue
+                try:
+                    last = int(json.loads(line)["update"])
+                except (ValueError, KeyError, TypeError):
+                    continue          # 半行/坏行：跳过，不猜
+                n += 1
     except OSError:
-        return 0
+        return -1
+    return last if last >= 0 else (0 if n == 0 else -1)
 
 
 def steady_of(kind: str) -> float:
@@ -587,7 +628,7 @@ def main(argv: list[str]) -> int:
 
             log("-" * 70)
             log("在跑 %d 条：%s" % (len(runs),
-                "、".join("%s(%.1fG,u=%d)" % (n, p, updates_done(n))
+                "、".join("%s(%.1fG,%s)" % (n, p, _u_str(updates_done(n)))
                           for n, _k, p in runs) or "无"))
             log("  MemTotal %.1f ｜ MemFree %.1f ｜ MemAvailable %.1f ｜ 其它占用 %.1f"
                 "   （单位一律 **GiB**）"

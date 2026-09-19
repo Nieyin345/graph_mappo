@@ -4,7 +4,7 @@
 这是记忆里反复出现的形状：门的公式被改坏时**不报错**，只会在 OOM 时现形。
 所以这里把每个场景的期望值写死，跑出别的值就失败。
 """
-import importlib.util, sys, io, os
+import importlib.util, json, sys, io, os
 # ★ Windows 控制台是 GBK：不 reconfigure 的话第一句就 UnicodeEncodeError
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -179,6 +179,72 @@ try:
 except RuntimeError as _e:
     print("  ✓ 静态表外的臂响亮报错（不当成 0）")
 _os.remove(_drv)
+
+# ============================================================================
+# 场景 6：★ `updates_done()` 必须**按轮号**读，不能**数行数**
+#
+#   2026-09-21 实测：`metrics.jsonl` 每轮不止一行 —— `eval_validation` 行也
+#   占一行，而它**没有 `update` 键**。旧写法 `sum(1 for _ in f)` 把 eval 行
+#   也算成"跑过一轮" ⟹ **系统性多算** `轮数 // eval_interval` 轮。
+#
+#   现场（`ent01_rerun_s43` u30 / `eval_interval=5`）：
+#     旧写法报 u=34、真实 u=30；`gae90_s42` 报 22 / 真实 20；
+#     `hist32_s43` 报 18 / 真实 15 —— 全都偏**快**。
+#   这会掩盖"冻结"类故障（行数停住，但停在哪一轮是错的）。
+#
+#   判据用**真实的文件格式**：30 条训练行 + 6 条 eval 行 = 36 行。
+#   期望 30（不是 36）。
+# ============================================================================
+print()
+print("场景 6：updates_done 按轮号读（不数行数）")
+
+_fake = _os.path.join(_tf.gettempdir(), "test_updates_done_root")
+_out = _os.path.join(_fake, "outputs", "armx")
+_os.makedirs(_out, exist_ok=True)
+with open(_os.path.join(_out, "metrics.jsonl"), "w", encoding="utf-8") as _f:
+    for _i in range(1, 31):                      # 30 条训练行
+        _f.write(json.dumps({"update": _i, "mean_success_rate": 0.5}) + "\n")
+        if _i % 5 == 0:                          # eval_interval=5 ⟹ 6 条 eval 行
+            _f.write(json.dumps({"eval_validation": {"mean_success_rate": 0.6}}) + "\n")
+
+_real_root = m.ROOT
+m.ROOT = _fake
+try:
+    _got = m.updates_done("armx")
+    _lines = 36
+    if _got == 30:
+        print("  ✓ 36 行（30 训练 + 6 eval）⟹ 读到 u=30（不是 %d）" % _lines)
+    else:
+        print("  ✗ 期望 u=30，得到 %s —— eval 行被算成轮数了？" % _got)
+        bad += 1
+
+    # 不存在的臂：确实一轮没跑 ⟹ 0 是真的，不能是 −1
+    if m.updates_done("no_such_arm") == 0:
+        print("  ✓ 目录不存在 ⟹ 0（「确实没跑」，与「读不出」区分开）")
+    else:
+        print("  ✗ 目录不存在的返回值不是 0")
+        bad += 1
+
+    # ★ 读不出必须返回 −1，**不许退化成 0**（0 与「还没跑」同形 = 静默偏松）。
+    #   触发手段：把 `metrics.jsonl` **本身**做成目录 ⟹ `os.path.exists()` 为真
+    #   （所以不会走 `not exists` 那条早返回），而 `open()` 必抛 OSError。
+    #   ⚠ 第一版我写的是「把 outputs/<name> 做成目录」—— 那样 `metrics.jsonl`
+    #   并不存在，先命中了 `exists=False` 分支返回 0，**测的根本不是这条路径**。
+    #   这类"桩打歪了"的失败与真失败同样费时间，所以在这里记一笔。
+    os.makedirs(os.path.join(_fake, "outputs", "adir", "metrics.jsonl"), exist_ok=True)
+    if m.updates_done("adir") == -1:
+        print("  ✓ 打不开（metrics.jsonl 是目录）⟹ −1，且显示成 `u=??` 而不是数字")
+    else:
+        print("  ✗ 打不开时返回的不是 −1 —— 无法与「一轮没跑」区分")
+        bad += 1
+
+    if "-1" not in m._u_str(-1) and "??" in m._u_str(-1):
+        print("  ✓ `_u_str(-1)` = %r ⟹ 读不出在日志里看得出来" % m._u_str(-1))
+    else:
+        print("  ✗ `_u_str(-1)` = %r —— 读不出会被显示成数字" % m._u_str(-1))
+        bad += 1
+finally:
+    m.ROOT = _real_root
 
 print()
 print("结论：%s" % ("全部通过 ✓" if bad == 0 else "有 %d 处不符 ✗" % bad))
