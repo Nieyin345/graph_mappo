@@ -144,15 +144,21 @@ def main(argv: list[str]) -> int:
     print("按 PSS 分组（不重复计共享页）")
     print("=" * 74)
     extrap_need = 0.0
+    per_run = []                       # [(run, cur, proj, u, remain)]
     for g in sorted(groups, key=lambda k: -groups[k]):
         u = latest_update(g)
         cur = groups[g]
         remain = max(0, a.to_update - u)
         proj = cur + GROWTH_PER_UPDATE * remain
         extrap_need += proj
+        per_run.append((g, cur, proj, u, remain))
         print(f"  {g:<22} {cur:6.1f} GiB  ({counts[g]:>2} 进程)  u={u:<3}"
               f" 外推 u{a.to_update} → {proj:5.1f} GiB")
     print(f"  {'合计':<22} {sum(groups.values()):6.1f} GiB")
+    if per_run:
+        med = sorted(p for _, _, p, _, _ in per_run)[len(per_run) // 2]
+        print(f"  （单个 run 外推中位数 {med:.1f} GiB —— **别拿 25 当常数**："
+              f"`minibatch 512` ⟹ 29.5、`hist32` ⟹ 52~63，是按配置查表的量）")
 
     if orphans:
         print()
@@ -176,40 +182,82 @@ def main(argv: list[str]) -> int:
     print("=" * 74)
     print("外推判据")
     print("=" * 74)
-    # ★ 两个视角，缺一不可（[[respawn-guard-two-views]]）：
-    #     视角 A（增量）：当前 MemFree 装得下**还要长出来的那部分**吗？
-    #     视角 B（绝对）：长到目标轮数后，系统还剩多少？必须 >= 17 GiB。
+    # ★★ 两个视角必须**在代数上真的不同**（2026-09-21 修正）。
     #
-    #   **第一版把这两个搞混了**：拿 MemFree(135.7) 去比外推**总量**(141.4)，
-    #   报「已超 5.7 GiB」。但总量里 108.8 是**已经在用**的，真正新增只有
-    #   32.6 GiB —— 真实余量 103 GiB，结论完全相反。
-    #   与 [[respawn-guard-two-views]] 记的是同一个坑的**镜像**：那次是只算增量
-    #   太宽松，这次是拿绝对量当增量、**把够用报成不够用**。
-    #   判据落在错误位置，方向不管是松还是紧，都是错的。
+    #   旧实现的「视角 B」是：
+    #       other = MemTotal - MemFree - cur_total
+    #       after = MemTotal - other - extrap_need
+    #   把 other 代进去：
+    #       after = MemTotal - (MemTotal - MemFree - cur_total) - extrap_need
+    #             = MemFree + cur_total - extrap_need
+    #             = MemFree - incremental            ← ∵ incremental = extrap_need - cur_total
+    #   ⟹ **恒等于视角 A 的余量**。两个 ✓/✗ 由构造必然同号，
+    #      「缺一不可」的那段注释描述的独立性，代码里**不存在**。
+    #     （同族：`cross-check-must-compare-same-population` —— 交叉核对要同人口；
+    #       这里是反向的病：两个"独立"视角其实是同一个人。）
+    #
+    #   但 `MemAvailable` 本来就在手里，所以第二视角**可以**做成真独立：
+    #
+    #     视角 A · 硬口径：MemFree（不可回收）≥ 还要长的量。**MemFree 是硬约束**。
+    #     视角 B · 乐观口径：MemAvailable（含可回收缓存）≥ 还要长的量 + 安全垫。
+    #
+    #   两者的**差**就是"可回收缓存"这一项 —— 而它恰好是本工具文件头
+    #   第一条告诫说的东西（跑训练时忽高忽低，不能当判据）。
+    #   ⟹ 让乐观口径去承担"能不能再塞"的判断，硬口径守底线。
+    #   ⟹ **两者分歧本身就是信息**：分歧越大，说明缓存越不可靠，
+    #      越不该按乐观口径排并发。
     cur_total = sum(groups.values())
     incremental = extrap_need - cur_total
-    other = mi.get("MemTotal", 0) - mi.get("MemFree", 0) - cur_total
     free_now = mi.get("MemFree", 0)
-    after = mi.get("MemTotal", 0) - other - extrap_need
+    avail_now = mi.get("MemAvailable", 0)
     MIN_MARGIN = 17.0
+    tot = mi.get("MemTotal", 0)
+    # 视角 B 的落点：按乐观口径长完之后，绝对余量还剩多少
+    after_opt = avail_now - incremental
 
     print(f"  在跑 {len(groups)} 个 run：现在 {cur_total:.1f} GiB → u{a.to_update} "
           f"{extrap_need:.1f} GiB（**还要长 {incremental:+.1f} GiB**）")
     print()
-    print(f"  视角 A · 增量：MemFree {free_now:.1f} GiB ≥ 新增 {incremental:.1f} GiB ?  "
-          f"{'✓' if free_now >= incremental else '✗'}")
+    if not groups:
+        # ★ 空集不许说「0 个 run 可以安全跑完」—— 与 `watch_liveness`
+        #   同一族（`config-enabled-but-term-dead` 的近亲）：**没在算的东西
+        #   谈不上"安全"**。空集是第三态：能起，但"能起几个"要按配置算，
+        #   不是"现有的能跑完"。
+        # ★ 这个分支必须**在打印两视角之前** —— 否则会先输出一行
+        #   「还要长 +0.0 GiB」的两视角对比（增量恒 0，两视角必然都 ✓），
+        #   再输出「无从外推」，前后自相矛盾：**恒 ✓ 的判据不是判据**。
+        print("  ⟹ **没有在跑的 run，无从外推**（第三态：既非通过也非不通过）。")
+        print(f"     能起几个 = (MemFree {free_now:.0f} − 垫 {MIN_MARGIN:.0f}) "
+              f"÷ 该配置的稳态 PSS。**按配置查表，不是 25**：")
+        print("       minibatch 256 → 25｜512 → 29.5｜hist32 → 52~63")
+        n_max = max(0, int((free_now - MIN_MARGIN) / 25))
+        print(f"     ⟹ 本机此刻按 256 粗算上限 ≈ {n_max} 个。")
+        print("     ⚠ 这是**上限**不是建议；起之前先与其它行为者对齐时间点。")
+        print("=" * 74)
+        return 0
+    print(f"  视角 A · 硬（MemFree，不可回收）：{free_now:.1f} GiB ≥ 新增 "
+          f"{incremental:.1f} GiB ?  {'✓' if free_now >= incremental else '✗'}")
     print(f"           长完还剩 {free_now - incremental:.1f} GiB")
-    print(f"  视角 B · 绝对：到 u{a.to_update} 时系统余量 {after:.1f} GiB ≥ {MIN_MARGIN} GiB ?  "
-          f"{'✓' if after >= MIN_MARGIN else '✗'}")
-    print(f"           （其它占用按当前 {other:.1f} GiB 估；MemAvailable "
-          f"{mi.get('MemAvailable', 0):.1f} GiB 含可回收缓存，是乐观上界）")
+    print(f"  视角 B · 乐观（MemAvailable，含可回收缓存）：{avail_now:.1f} GiB ≥ 新增 "
+          f"{incremental:.1f} GiB + 垫 {MIN_MARGIN:.0f} ?  "
+          f"{'✓' if after_opt >= MIN_MARGIN else '✗'}")
+    print(f"           长完还剩 {after_opt:.1f} GiB")
+    print(f"           ── 两口径的差 = 可回收缓存 {avail_now - free_now:.1f} GiB"
+          f"（占 MemTotal 的 {100 * (avail_now - free_now) / tot if tot else 0:.1f}%）")
     print()
-    if free_now >= incremental and after >= MIN_MARGIN:
-        print(f"  ⟹ **两个视角都过**：现有 {len(groups)} 个 run 可以安全跑完。")
-        spare = after - MIN_MARGIN
-        print(f"     富余 {spare:.1f} GiB（= {spare / 24:.1f} 个 24GiB 的 run）")
+    if free_now < incremental:
+        print("  ⟹ ✗ **硬口径不过**：MemFree 装不下还要长出来的量。"
+              "靠回收缓存可能侥幸撑住，但那是赌 —— 该减臂或降轮数。")
+    elif after_opt < MIN_MARGIN:
+        print(f"  ⟹ ⚠ 硬口径过、**乐观口径不过**：绝对余量 < {MIN_MARGIN:.0f} GiB。"
+              "按 [[respawn-guard-two-views]]：绝对余量才是该拒绝的那一票。")
     else:
-        print("  ⟹ ✗ **至少一个视角不过** —— 该减臂或降轮数，不要再加。")
+        spare = after_opt - MIN_MARGIN
+        print(f"  ⟹ **两个口径都过**：现有 {len(groups)} 个 run 可以安全跑完。")
+        print(f"     乐观口径富余 {spare:.1f} GiB；硬口径富余 "
+              f"{free_now - incremental - MIN_MARGIN:.1f} GiB。")
+        print(f"     ⚠ 想再塞一个，按**硬口径的富余**算 —— 且单个 run 的稳态"
+              f"要**按配置查表**，不是 25。")
     print("=" * 74)
     return 0
 
