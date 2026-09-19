@@ -34,6 +34,26 @@ class PolicyStep:
     matched_edges: list[tuple[str, str]] | None = None
 
 
+#: Resolver modes whose executed matching is a **deterministic function of the
+#: edge scores**, not the policy's sampled sequence. For these the rollout must
+#: (a) skip the ``expected_matched_edges`` consistency check in ``QKDEnv.step``
+#: — the sampled sequence legitimately differs — and (b) recompute the PPO
+#: log-prob from ``env.last_matched_arcs`` via
+#: :meth:`MAPPOPolicy.log_prob_entropy_for_matching`, because optimising the
+#: *sampled* sequence's log-prob would be a different (wrong) objective.
+#:
+#: ★ Single source of truth on purpose. Both the ``expected_matched_edges``
+#:   argument and the downstream log-prob source key off this set; keeping them
+#:   as two separate literal tuples is how they silently drift apart — the
+#:   argument says "don't check" while the log-prob still comes from the
+#:   sampled sequence, and nothing errors.
+#:
+#: ``mutual_choice`` is deliberately absent: the resolver *executes the sampled
+#: sequence as-is*, so sampling and execution are identical by construction and
+#: the check is a meaningful invariant.
+DETERMINISTIC_RESOLVER_MODES = ("max_weight_matching", "priority_matching")
+
+
 class MAPPOPolicy:
     def __init__(self, model: GraphMAPPOActorCritic, device: torch.device | str = "cpu"):
         self.model = model

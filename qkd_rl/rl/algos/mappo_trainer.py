@@ -12,7 +12,7 @@ from pathlib import Path
 import torch
 
 from qkd_rl.rl.algos.checkpoint import load_checkpoint, save_checkpoint
-from qkd_rl.rl.algos.policy import MAPPOPolicy
+from qkd_rl.rl.algos.policy import DETERMINISTIC_RESOLVER_MODES, MAPPOPolicy
 from qkd_rl.rl.algos.rollout_buffer import (
     RolloutBuffer,
     RolloutStep,
@@ -606,14 +606,15 @@ class MAPPOTrainer:
                     edge_scores=step.edge_scores,
                     expected_matched_edges=(
                         None
-                        if self.resolver_mode == "max_weight_matching"
+                        if self.resolver_mode in DETERMINISTIC_RESOLVER_MODES
                         else list(step.matched_edges or [])
                     ),
                 )
                 self._update_rollout_debug(info, len(self.env.last_activated_edges))
-                if self.resolver_mode == "max_weight_matching":
-                    # max-weight is a deterministic resolver action, so the PPO
-                    # target follows the matching the environment executed.
+                if self.resolver_mode in DETERMINISTIC_RESOLVER_MODES:
+                    # The resolver picked the matching from the edge scores, so
+                    # the PPO target follows what the environment **executed**,
+                    # not the sequence the policy happened to sample.
                     matched_edges = list(self.env.last_matched_arcs)
                     mean_lp, mean_entropy = self.policy.log_prob_entropy_for_matching(
                         step.edge_scores, matched_edges
@@ -757,13 +758,22 @@ class MAPPOTrainer:
                     edge_scores=step.edge_scores,
                     expected_matched_edges=(
                         None
-                        if self.resolver_mode == "max_weight_matching"
+                        if self.resolver_mode in DETERMINISTIC_RESOLVER_MODES
                         else list(step.matched_edges or [])
                     ),
                 )
                 self._update_rollout_debug(info, len(env.last_activated_edges))
-                if self.resolver_mode == "max_weight_matching":
-                    matched_edges = list(env.last_activated_edges)
+                if self.resolver_mode in DETERMINISTIC_RESOLVER_MODES:
+                    # ★ MUST be last_matched_arcs (directed arcs), NOT
+                    #   last_activated_edges (undirected edge-id strings).
+                    #   log_prob_entropy_for_matching replays the matching
+                    #   **in order**, unpacking each entry as ``src, dst`` and
+                    #   comparing against directed arc keys — feeding it edge-id
+                    #   strings unpacks them character-wise and never matches,
+                    #   raising "Stored matching arc ... is not available".
+                    #   This branch is only reachable with n_rollout_workers<=1
+                    #   + episodes_per_update>1, which is why it went unnoticed.
+                    matched_edges = list(env.last_matched_arcs)
                     mean_lp, mean_entropy = self.policy.log_prob_entropy_for_matching(
                         step.edge_scores, matched_edges
                     )
@@ -1116,7 +1126,7 @@ class MAPPOTrainer:
                             edge_scores=outs[i].edge_scores,
                             expected_matched_edges=(
                                 None
-                                if self.resolver_mode == "max_weight_matching"
+                                if self.resolver_mode in DETERMINISTIC_RESOLVER_MODES
                                 else list(outs[i].matched_edges or [])
                             ),
                         )
@@ -1148,7 +1158,7 @@ class MAPPOTrainer:
                             edge_scores=step.edge_scores,
                             expected_matched_edges=(
                                 None
-                                if self.resolver_mode == "max_weight_matching"
+                                if self.resolver_mode in DETERMINISTIC_RESOLVER_MODES
                                 else list(step.matched_edges or [])
                             ),
                         )
@@ -1248,7 +1258,7 @@ class MAPPOTrainer:
                         edge_scores=outs[i].edge_scores,
                         expected_matched_edges=(
                             None
-                            if self.resolver_mode == "max_weight_matching"
+                            if self.resolver_mode in DETERMINISTIC_RESOLVER_MODES
                             else list(outs[i].matched_edges or [])
                         ),
                     )

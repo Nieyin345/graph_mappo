@@ -22,7 +22,7 @@ from pathlib import Path
 
 import torch
 
-from qkd_rl.rl.algos.policy import MAPPOPolicy
+from qkd_rl.rl.algos.policy import DETERMINISTIC_RESOLVER_MODES, MAPPOPolicy
 from qkd_rl.rl.algos.rollout_buffer import (
     RolloutBuffer,
     RolloutStep,
@@ -72,12 +72,14 @@ def _run_episode(
             edge_scores=step.edge_scores,
             expected_matched_edges=(
                 None
-                if resolver_mode == "max_weight_matching"
+                if resolver_mode in DETERMINISTIC_RESOLVER_MODES
                 else list(step.matched_edges or [])
             ),
         )
         accumulate_rollout_debug(rollout_debug, info, len(env.last_activated_edges))
-        if resolver_mode == "max_weight_matching":
+        if resolver_mode in DETERMINISTIC_RESOLVER_MODES:
+            # Deterministic resolver action: the PPO target follows the matching
+            # the environment executed, not the policy's sampled sequence.
             matched_edges = list(env.last_matched_arcs)
             mean_lp, mean_entropy = policy.log_prob_entropy_for_matching(
                 step.edge_scores, matched_edges
