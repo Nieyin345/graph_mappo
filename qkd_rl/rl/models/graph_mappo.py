@@ -836,11 +836,11 @@ class GraphMAPPOActorCritic(nn.Module):
                                 (n_demand_directed, self.history_dim)
                             )
                         )
+                # edge_h 只在 h_rows 非空时拼接（见下方第二个调用点的说明）。
                 if h_rows:
-                    edge_h = torch.cat(h_rows, dim=0)
-                else:
-                    edge_h = torch.zeros((0, self.history_dim), dtype=torch.float32, device=device)
-                edge_features_directed = torch.cat([edge_features_directed, edge_h], dim=-1)
+                    edge_features_directed = torch.cat(
+                        [edge_features_directed, torch.cat(h_rows, dim=0)], dim=-1
+                    )
             tensors = GraphTensors(
                 node_features=node_features,
                 edge_index=tensors.edge_index,
@@ -927,11 +927,15 @@ class GraphMAPPOActorCritic(nn.Module):
                                 (n_demand_directed, self.history_dim)
                             )
                         )
+                # ⚠ history_dim == 0 时**绝不能拼**：h_rows 为空 ⟹ edge_h 是 0 行
+                # 空张量，而 `torch.cat` 要求除 dim=1 外尺寸一致 ⟹ RuntimeError。
+                # 这个组合（只开节点历史、不开边历史）此前**从未被跑过**，是潜伏 bug：
+                # features.yaml 里 demand_edge 显式 true 且 node 全 false，
+                # 所以以前打开 enabled 总是顺带把 history_dim 抬到 64，永远走不到这里。
                 if h_rows:
-                    edge_h = torch.cat(h_rows, dim=0)
-                else:
-                    edge_h = torch.zeros((0, self.history_dim), dtype=torch.float32, device=device)
-                edge_features_directed = torch.cat([edge_features_directed, edge_h], dim=-1)
+                    edge_features_directed = torch.cat(
+                        [edge_features_directed, torch.cat(h_rows, dim=0)], dim=-1
+                    )
                 tensors = GraphTensors(
                     node_features=node_features,
                     edge_index=tensors.edge_index,

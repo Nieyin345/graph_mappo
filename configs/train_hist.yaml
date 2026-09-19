@@ -1,0 +1,126 @@
+# ============================================================================
+# 定案实验 hist：打开 `features.history_encoder`（时序编码器）
+# ============================================================================
+#
+# ## 为什么这是当前最有价值的结构改动
+#
+# `docs/当前状态与优化方向.md` §1.3 第 11 条：**时序编码器整块没开**。
+# `configs/features.yaml:83` `history_encoder.enabled: false`
+# ⟹ `history_dim_resolved = 0`、节点特征只有 **17 维**、边 **44 维**。
+# 在 **1440 步**的回合里，模型对"过去发生过什么"**完全盲**，每个槽只看当前快照。
+# 而调度问题的核心恰恰是时序的（"什么时候占用哪条链路"）。
+#
+# **对比**：边特征里已经有 `prediction_horizon: 6` 的**未来**窗口
+# （`include_rate_future_window` + `include_available_future_window` = 12 维）
+# ⟹ 模型有 6 步**预视**，却对**过去**全盲。这个不对称很可疑。
+#
+# **基础设施已齐备，这只是个开关**：
+#   · `qkd_rl/env/history_buffer.py`  `HistoryBuffer` 已在跟踪 4 个节点通道
+#     （arrived / served / failed / qkp_total）+ 物理边通道
+#   · `GraphBuilder` 已把窗口组装进 `GraphObservation`
+#   · `graph_mappo.py:756-761` 已把 `node_history_dim` 拼进 encoder 输入
+# 从未被打开过 ⟹ **这是一个"从没测过的方向"**，不是"调参"。
+#
+# ## 关键设计：**只开节点通道，不开边通道**
+#
+# `config.py:134` 的判据是 `history_dim = max(physical_history_dim, demand_history_dim)`
+# ——**边维度由这两者的最大值决定，与节点通道无关**。
+# `features.yaml:82-98` 的**实测现值**（别照记忆猜）：
+#   · `node.*` 四个通道 **全部显式 `false`** ⟹ 不写就不会开
+#   · `physical_edge.*` 两个 `false` + `activated: false` ⟹ 全关
+#   · `demand_edge.include_pending_wait_buckets` **显式 `true`** ⟹ 一开 enabled 就生效
+#
+# 所以不显式配置的话，打开 `enabled` 会打开的是**需求边**通道（`demand_history_dim=64`）
+# ⟹ `history_dim = 64` ⟹ **两条边投影都变成 44+64=108 维**，其中物理边拿到的是
+# 64 维全零块（物理边不走 demand 历史）⟹ 纯浪费参数与算力，还多破坏一个权重形状。
+#
+# 本文件把它**反过来**：node 四通道显式 `true`、demand 显式 `false`
+# ⟹ `node_history_dim = 64`、`history_dim = 0` ⟹ **边维度仍是 44**、
+# 节点 17 → 81（`node_dim = node_dim_resolved + node_history_dim`）。
+# **改动面最小**，而节点历史正是"这个节点过去被用了多少"这种最直接的状态信息。
+#
+# ## ★★ 实测：这个组合此前会**崩**，本文件是第一个走到它的配置
+#
+# `graph_mappo.py` 两个调用点原先无条件拼 `edge_h`：
+#   `if h_rows: edge_h = cat(h_rows) else: edge_h = zeros((0, history_dim))`
+#   `edge_features_directed = cat([..., edge_h], dim=-1)`
+# `history_dim == 0` 时 `h_rows` 恒为空 ⟹ `edge_h` 是 0 行张量 ⟹
+#   `RuntimeError: Sizes of tensors must match except in dimension 1.
+#    Expected size 376 but got size 0 for tensor number 1 in the list.`
+# 配对实验（`/tmp/hist_bugproof.py`，用源码字符串替换造出原版对照）：
+#   本组合      原代码 ✗ 崩 / 修复后 ✓
+#   历史全关    原代码 ✓ / 修复后 ✓   ⟹ 修复对**在跑的臂惰性**（该块整体不进）
+# 之所以是潜伏 bug：以前打开 `enabled` 总被 `demand_edge` 顺带把 `history_dim`
+# 抬到 64，**从来走不到 h_rows 为空的路径**。
+#
+# ## ★★★ 实测（2026-09-20，脚本 `/tmp/hist_smoke5.py` + `/tmp/hist_bugproof.py`）
+#
+# 真实启动方式（`--configs` 里直接带本文件，dims 在 `build_config` 内部解析）：
+#
+#   | 量 | 基线 ent01 | 本文件 |
+#   |---|---|---|
+#   | `node_dim_resolved` | 17 | 17 |
+#   | `node_history_dim_resolved` | 0 | **64** |
+#   | `history_dim_resolved` | 0 | **0**（边不变） |
+#   | `encoder.node_proj.0.weight` | (128, 17) | **(128, 81)** |
+#   | 模型参数 | 1,053,188 | **1,099,140（+45,952，+4.4%）** |
+#   | `obs.node_history` | 空 | **90 实体 (240, 4)** |
+#
+#   ⟹ **只有 `node_proj` 一个权重形状变了**，比"边也开"少破坏一倍。
+#   ⟹ 代价确实很小：+4.4% 参数。
+#
+#   ⚠ **测试夹陷阱（我自己踩了）**：若在 `build_config` **之后**才改
+#   `c["features"]["history_encoder"]`，`dims` 不会被重算，模型仍按 17 建投影
+#   而 obs 已给 81 列 ⟹ `mat1 and mat2 shapes cannot be multiplied (90x81 and 17x128)`。
+#   **这是测试夹制造出来的假崩溃**，与真实启动路径无关。必须把 yaml 放进 `--configs`。
+#
+# ## ★★ 成本与代价（必须一起看）
+#
+#   1. **必然破坏 BC 暖启动**：`node_dim = node_dim_resolved + node_history_dim`
+#      ⟹ `encoder.node_proj` 输入维度变了 ⟹ `mappo_trainer.py:1226` 的
+#      `load_state_dict`（**strict 默认 True**）会直接报形状错。
+#      即使 `strict=False`，PyTorch 对 size mismatch **仍然报错**，必须手工过滤键。
+#      ⟹ **从零训，或手工过滤 + 丢掉 encoder 那一侧。**
+#   2. **速度**：LSTM 每步对 90 节点跑一次，seq_len 240。实测 LSTM 在本机不快。
+#      预计一轮显著变慢 ⟹ 并发数要下调 ⟹ **总吞吐下降**。
+#      这不是"免费的容量"。
+#   3. **30 轮够不够**：「30 轮够」这个结论是在**有 BC 起点**的前提下测的
+#      （记忆 `bc-checkpoint-training-plateau`）。从零训 **不能外推**。
+#
+# ## 判据（跑之前写死）
+#
+#   对照 = `ent01_rerun_s{42,43,44}`（本节点、8 线程、有 BC 起点）
+#   臂   = `hist_s{42,43,44}`
+#
+#   ⚠ **这不是干净的单变量配对**：臂没有 BC 起点，对照有。所以
+#      「臂 vs 对照」的差里**混着"丢掉暖启动"的代价**。
+#      这正是我们要量的东西的一个下界——**若连这样都能不输，方向就值得继续**。
+#
+#   · Δ ≥ −0.035（不显著变差）⟹ **方向值得继续**，下一步做手工过滤加载器
+#   · Δ < −0.035 ⟹ 要么时序信息无用，要么被"丢暖启动"埋掉了 ⟹
+#     **必须做过滤加载器才能分辨**，本实验不能定案
+#
+#   所以本实验的正确读法是"**值不值得继续投入**"，不是"时序特征有没有用"。
+# ============================================================================
+
+features:
+  history_encoder:
+    enabled: true
+    # ★★ 必须显式打开节点通道。`config.py` 用的是 `dict.get(key, True)` ——
+    #    默认值只在**键缺失**时生效，而 features.yaml 里这四个键是**显式 false**，
+    #    所以不写就等于不开。（这一条是实测踩出来的，见下方"实测"节。）
+    node:
+      include_arrived: true
+      include_served: true
+      include_failed: true
+      include_qkp_total: true
+    # ★★ 必须显式关掉需求边通道。features.yaml 里它是**显式 true**，
+    #    而 `enabled: true` 会让它生效：`demand_history_dim = 64`
+    #    ⟹ `history_dim = 64` ⟹ **两条边投影都变成 44+64=108 维**，
+    #    其中**物理边拿到的是 64 维全零块**（物理边不走 demand 历史）
+    #    ⟹ 纯浪费参数与算力，还会多破坏一个权重形状。
+    #    关掉它，`history_dim = max(phys, demand) = 0` ⟹ **边维度不变**。
+    demand_edge:
+      include_pending_wait_buckets: false
+    # 物理边通道本来就是 false，保持不写（改它会把 history_dim 抬起来）。
+
