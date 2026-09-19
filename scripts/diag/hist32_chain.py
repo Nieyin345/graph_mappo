@@ -37,6 +37,17 @@ THREADS = "8"
 PSS_HIST = 52.5          # 实测
 FLOOR = 17.0
 MAX_RUNS = 9
+# ★★ hist 的实时 PSS 会**超过**稳态 52.5（实测爬到 60），所以三条 hist 并发时
+#    7 run 就能到 252 GB ⟹ 必 OOM。实测（2026-09-20T18:0x）：
+#    hist32v3_s42=52.3 / hist32_s43=41.2(还在爬) / hist32_s44=31.6(还在爬)
+#    + mini512_s44=27.8 + ent001×3=70.7 ⟹ 223.5 GB、只剩 29.7 GB，
+#    而两条 hist 还要涨 +32 GB ⟹ 会到 255.7 > 233。
+#    ⟹ **hist 系同时最多 2 条**（2×高估的 61 + 其余），其余并行额留给基线臂。
+MAX_HIST = 2
+
+
+def n_hist_live(runs):
+    return sum(1 for nm, _, _ in runs if "hist" in nm)
 
 ARM_RUNS = ["hist32v3_s42", "hist32_s43", "hist32_s44"]   # s42 已在跑
 TODO = [("hist32", 43), ("hist32", 44)]
@@ -366,7 +377,7 @@ def main():
         a = avail()
         grow = sum(max(0.0, steady_of(nm, mb) - cur) for nm, mb, cur in runs)
         margin = a - grow - PSS_HIST
-        if n < MAX_RUNS and margin >= FLOOR:
+        if n < MAX_RUNS and n_hist_live(runs) < MAX_HIST and margin >= FLOOR:
             for _, seed in TODO:
                 if seed in launched:
                     continue
@@ -376,7 +387,8 @@ def main():
                 break
         else:
             if int(time.time() - t0) % 600 < 140:
-                log("  门未过：可用 %.0f 待涨 %.1f 余量 %.1f（在跑 %d）" % (a, grow, margin, n))
+                log("  门未过：可用 %.0f 待涨 %.1f 余量 %.1f（在跑 %d，其中 hist %d/%d）"
+                    % (a, grow, margin, n, n_hist_live(runs), MAX_HIST))
         time.sleep(60)
     log("已起 %d/%d" % (len(launched), len(TODO)))
 
