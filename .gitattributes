@@ -1,0 +1,13 @@
+# 让 .sh / .py / .yaml 永远以 LF 检出。
+#
+# 理由：Windows 上 core.autocrlf=true 会把工作区文件改成 CRLF。走 git 通道
+# 的文件没事（blob 一直是 LF），但**直接 scp 到 Linux 的文件会带着 CRLF 落地** ——
+# 2026-09-19 在 clnode316 上实测：setup.sh 的 `set -euo pipefail` 报
+# "set: pipefail: invalid option name"，因为 bash 把选项名读成了 "pipefail\r"。
+#
+# ★ 保住"工作区也是 LF"，是为了和 scp 路径的假设一致 —— bootstrap.sh 直传
+#   工作区文件给 Linux，它必须就是 LF。
+*.sh   text eol=lf
+*.py   text eol=lf
+*.yaml text eol=lf
+*.yml  text eol=lf

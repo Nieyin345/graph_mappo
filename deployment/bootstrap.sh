@@ -116,6 +116,11 @@ if SSH "$TARGET" "[ -x $VENV_PY ] && $VENV_PY -c 'import torch, h5py, yaml, scip
     echo "  /opt/qkd/venv 已可用，跳过。"
 else
     echo "  传输并运行 deployment/setup.sh —— torch 轮子较大，约 3-6 分钟。"
+    # scp 不会建中间目录，而全新节点上没有 ~/deployment/，直接 scp 会报
+    # "No such file or directory"（2026-09-19 在 clnode316 上实测踩到）。
+    # 脚本其余两处 scp 目标都自带 mkdir（upload_data.sh 有 sudo -n mkdir -p、
+    # sync.sh 有 mkdir -p "$REMOTE_DIR"），只有这一处漏了。
+    SSH "$TARGET" 'mkdir -p ~/deployment'
     "$SCP_BIN" -q deployment/setup.sh "$TARGET:~/deployment/setup.sh"
     SSH "$TARGET" 'bash ~/deployment/setup.sh'
 fi
