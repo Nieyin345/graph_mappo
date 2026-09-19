@@ -108,7 +108,7 @@ def log(m):
 def avail():
     for ln in open("/proc/meminfo"):
         if ln.startswith("MemAvailable:"):
-            return int(ln.split()[1]) / 1e6
+            return int(ln.split()[1]) * 1024.0 / (1024.0 ** 3)
     return 0.0
 
 
@@ -116,7 +116,7 @@ def pss(pid):
     try:
         for ln in open("/proc/%d/smaps_rollup" % pid):
             if ln.startswith("Pss:"):
-                return int(ln.split()[1]) / 1e6
+                return int(ln.split()[1]) * 1024.0 / (1024.0 ** 3)
     except Exception:
         pass
     return 0.0
@@ -203,9 +203,32 @@ def live_run_names():
       **自己的状态 ≠ 世界的状态**）。
     """
     names = set()
-    for d in glob.glob("/proc/[0-9]*"):
+    # ★★ 没有 /proc 时**必须响亮报错**，不能安静返回空集。
+    #    空集在调用方读作「没有 run 在跑」⟹ `launch()` 会把**已经在跑**的臂
+    #    再起一遍，两份进程写同一个 `outputs/` ⟹ **该臂读数作废**
+    #    （本项目实测过：`hist32_s43` 双开、`metrics.jsonl` 被交错追加）。
+    #    这与 `updates_done()` 区分 `-1`（读不出）/ `0`（真的没跑）是**同一条原则**：
+    #    **「读不出」不许长得像「没有」**。
+    #    （旧写法用 `glob.glob("/proc/[0-9]*")`，在无 /proc 的平台上**安静返回空**，
+    #      恰好是最危险的那种失败。）
+    if not os.path.isdir("/proc"):
+        raise RuntimeError(
+            "没有 /proc ⟹ 无法判断哪些 run 在跑。**不能返回空集**："
+            "调用方会把「空集」读成「没有 run 在跑」而重复起臂。"
+            "本函数只在 Linux 训练节点上有意义。")
+    # ★★ 2026-09-21：这行原本写 `glob.glob("/proc/[0-9]*")`，而本文件**从未
+    #    `import glob`** ⟹ 一调用就 `NameError`。它没被发现，是因为本文件的
+    #    `TODO = []`（已被 `.tmp/launch_wave263.py` 接管）⟹ 阶段 1 的循环
+    #    `while len(launched) < len(TODO)` **一次都不进** ⟹ `launch()` 从不执行
+    #    ⟹ `live_run_names()` **是一条从未跑过的代码路径**
+    #    （记忆 `never-run-code-path-hides-bugs`）。
+    #    改成 `os.listdir("/proc")` 走**同一数据源**，与上面的 `live_runs()`
+    #    逐字一致 —— 两个函数读世界的方式不同，本身就是分叉点。
+    for d in os.listdir("/proc"):
+        if not d.isdigit():
+            continue
         try:
-            with open(d + "/cmdline", "rb") as f:
+            with open("/proc/%s/cmdline" % d, "rb") as f:
                 c = f.read().decode("utf-8", "replace").replace("\x00", " ")
         except OSError:
             continue
@@ -235,22 +258,45 @@ def launch(seed):
 
 
 def last_update(run):
-    p = os.path.join(ROOT, "outputs", run, "metrics.jsonl")
-    n = -1
+    """该臂**已完成到第几轮** —— 按最后一个 `"update": N` 读，**不是数行数**。
+
+    ★★ 2026-09-21 修：原实现是 `if json.loads(ln).get("update"): n += 1`，
+    即**数带 update 键的行数**。这在两种情形下都错：
+
+      (a) **续跑臂**：`update` 计数器**续着编**，不归零
+          （`mappo_trainer.py` 的 `target_updates = self.update_count + num_updates`）。
+          从 u5 崩、续跑 20 轮 ⟹ 文件里是 `6..25`，行数 **20**，
+          而真实进度是 **25** ⟹ 少算 5 轮。
+      (b) **中途缺 eval**：行数只数训练行，这一项恰好不受影响；
+          但一旦将来把 eval 行也计进来就会多算（`launch_g2.updates_done()`
+          就踩了这个，见下）。
+
+    正确口径 = **最后一个 `"update": N` 的值**，与 `read()`（本文件）、
+    `launch_g2.updates_done()`、`.tmp/status_now.py` 四处**统一**。
+    记忆 `eval-update-number-not-from-position`：本项目在这上面已经错了三次
+    （按行号 / 按累计行数 / 按行数），每次都在**新地方重新推导**而不是照抄已有的。
+
+    本函数被阶段 2 的"等三臂到 u30"用（本节点三臂都是**从头跑**，
+    所以按行数与按轮号在本例恰好相同 —— 这就是它一直没暴露的原因：
+    **只有续跑或 eval 计数变化时才分叉**）。返回 −1 = 读不出。
+    """
+    p = _metrics_path(run)
+    if not os.path.exists(p):
+        return -1
+    last = -1
     try:
-        n = 0
-        for ln in open(p, encoding="utf-8"):
-            ln = ln.strip()
-            if not ln:
-                continue
-            try:
-                if json.loads(ln).get("update"):
-                    n += 1
-            except ValueError:
-                pass
+        with open(p, encoding="utf-8", errors="replace") as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln or '"update"' not in ln:
+                    continue
+                try:
+                    last = int(json.loads(ln)["update"])
+                except (ValueError, KeyError, TypeError):
+                    continue          # 半行/坏行：跳过，不猜
     except OSError:
         return -1
-    return n
+    return last
 
 
 # ============================ 判读 ============================
@@ -282,11 +328,14 @@ def read(run):
     if not os.path.exists(p):
         return out
     last = None
-    for ln in open(p, encoding="utf-8"):
+    for ln in open(p, encoding="utf-8", errors="replace"):
         ln = ln.strip()
         if not ln:
             continue
-        o = json.loads(ln)
+        try:
+            o = json.loads(ln)
+        except ValueError:
+            continue          # 半行（进程正写到一半）/ 坏行：跳过，不猜
         if "update" in o:
             last = o["update"]
         ev = o.get("eval_validation")
@@ -306,10 +355,13 @@ def plat_ps(rows):
 def u1_of(run):
     p = _metrics_path(run)
     try:
-        for ln in open(p, encoding="utf-8"):
+        for ln in open(p, encoding="utf-8", errors="replace"):
             ln = ln.strip()
             if ln:
-                return json.loads(ln).get("mean_success_rate")
+                try:
+                    return json.loads(ln).get("mean_success_rate")
+                except ValueError:
+                    continue      # 半行：继续找第一条能解析的
     except OSError:
         pass
     return None
@@ -349,8 +401,17 @@ def verdict():
         if read(arm_run(s)) and read(ctrl_run(s)):
             avail_s.append(s)
     A("   可用训练种子：%s" % avail_s)
+    if not avail_s:
+        A("   !! **一个训练种子都没有** —— 两侧数据都没命中 u25/u30 平台窗口。")
+        A("      （不是「测不出」，是「没测到」：三臂需至少一条 hist 到 u30。）")
+        return "\n".join(L)
+    # ★★ 2026-09-21：`< 2` 太宽 —— n=1 时 df=0，`t_crit(0)` 抛 KeyError
+    #    先于下面那句 n=1 的诚实话术，于是脚本**崩在解释"为什么不能判读"的路上**。
+    #    改成拒绝 n<2，把 n=1 的说明真正送出去。
     if len(avail_s) < 2:
-        A("   !! 数据不足，无法判读")
+        A("   ⚠ **只有 1 个训练种子（df=0）—— 本框架下没有合法判据**（t 无定义，"
+          "且 n=1 的分辨率约 0.035，与效应量同量级）。")
+        A("      正确做法是补训练种子，不是拿它下结论。")
         return "\n".join(L)
 
     per_seed, nc = [], None
