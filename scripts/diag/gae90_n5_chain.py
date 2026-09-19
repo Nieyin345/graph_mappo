@@ -46,6 +46,9 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from stats_crit import t_crit  # noqa: E402
+
 ROOT = "/opt/qkd/graph_mappo"
 PY = "/opt/qkd/venv/bin/python"
 CKPT = "outputs/supervised_pg_phased/supervised_pg_phased_latest.pt"
@@ -82,7 +85,7 @@ CTRL_RUNS = {42: "ent01_rerun_s42", 43: "ent01_rerun_s43", 44: "ent01_rerun_s44"
 ARM_RUNS = {42: "gae90_s42", 43: "gae90_s43", 44: "gae90_s44",
             45: "gae90_n5_s45", 46: "gae90_n5_s46"}
 SEEDS = (42, 43, 44, 45, 46)
-CRIT5 = 2.776      # df=4
+CRIT5 = t_crit(4)      # df=4 —— 从唯一来源取，不手抄 2.776
 
 START = time.time()
 
@@ -346,7 +349,14 @@ def verdict():
     se = sd / math.sqrt(len(ds))
     t = m / se if se else 0.0
     df = len(ds) - 1
-    crit = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571}.get(df, 2.0)
+    # ★ 临界值一律从**唯一来源**取（同目录 stats_crit.py）。
+    #   原写法 `{1:12.706,...,5:2.571}.get(df, 2.0)`：
+    #   表内 df 1–5 是**对的**，但 **df≥6 静默回退到 2.0** —— 那不仅更宽松
+    #   （df=6 应 2.447），而且 2.0 < 正态的 1.96 之上、看似"接近 2 就是对的"，
+    #   于是最容易被放过。本波 n=5 ⟹ df=4，走表内路径**不会**触发它；
+    #   但"不会触发"是当下的巧合，不是设计（记忆 `silent-lenient-fallback-in-thresholds`）。
+    #   换成唯一来源后，未知 df **抛 KeyError**。
+    crit = t_crit(df)
     A("   用了 %d 个训练种子 %s（df=%d，临界值 %.3f）" % (len(ds), used, df, crit))
     A("   Δ=%+.4f   SD=%.4f   SE=%.4f   t=%+.2f   %s"
       % (m, sd, se, t, "**过线**" if abs(t) >= crit else "未过线"))
