@@ -261,11 +261,19 @@ def main() -> int:
         else:
             print(f"  A ⟹ STOP **真的在用**（{n_real_ne_neg}/{n} 步不同）"
                   f"⟹ 「STOP 是死出口」**不成立**。")
-            print("      ★ 但注意差异**落在哪**：把 stop_score 压到 −1e9 时每图命中")
-            print(f"        只剩 {mean_arcs['neg']:.1f} 条（真实 {mean_arcs['real']:.1f}），"
-                  f"说明 STOP 就是那个")
-            print("        「继续匹配 vs 收手」的总闸。真实值下的差异是**换了一批**")
-            print("        匹配（谁占哪条边），不是「用不用 STOP」—— 见口径 B。")
+            print("     ★ 但要看**余量**，不是只看「变没变」：")
+            print(f"       抬到 +1e9 ⟹ 每图命中 {mean_arcs['pos']:.2f}（一步都不匹配）")
+            print(f"       压到 −1e9 ⟹ 每图命中 {mean_arcs['neg']:.2f}（几乎不截断）")
+            print(f"       真实值   ⟹ 每图命中 {mean_arcs['real']:.2f}")
+            gap = mean_arcs['neg'] - mean_arcs['real']
+            rel = 100.0 * gap / max(mean_arcs['real'], 1e-9)
+            print(f"     ⟹ 从「不截断」挪到真实值只少 **{gap:.2f} 条 = {rel:.1f}%**")
+            if rel < 5.0:
+                print("     ⟹ 这道闸在**运行点上基本是开着的** ⟹ 任何 STOP 侧的改动")
+                print("        （含状态化 STOP）能改善的上限就是这个百分比。")
+            else:
+                print("     ⟹ 这道闸在运行点上**确实在截断** ⟹ STOP 侧有改善空间，")
+                print("        「状态化 STOP」值得排一臂。")
         print()
         frac = nz / max(1, len(left))
         if frac > 0.9:
