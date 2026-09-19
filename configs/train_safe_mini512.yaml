@@ -14,8 +14,20 @@
 # epochs 也乘在上面。所以本臂与基线**不是"同一算法的不同实现"**，
 # 而是**同预算下梯度噪声更大的版本**——若它更好，是"噪声更小"，不是"算得更准"。
 #
-# 用法（排在 train_full_rl.yaml 之后）：
-#   --configs rl_algorithm.yaml train_full_rl.yaml train_safe_mini512.yaml
+# 用法（★ 必须排在 train_ent01.yaml **之后**）：
+#
+#   ★★ 2026-09-19 修：本行原先写的是
+#      `--configs rl_algorithm.yaml train_full_rl.yaml train_safe_mini512.yaml`
+#      —— **漏了 train_ent01.yaml**，得到的操作点是 `entropy_coef: 0.001`，
+#      本项目已判定为错误值的那一档。同一个错在 train_safe_ep2 / vcoef1 里
+#      一模一样。用 `/tmp/check_cfg_usage.py` 扫出来的（按注释建链再 diff）。
+#
+#   OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 /opt/qkd/venv/bin/python -u \
+#       scripts/train/train_graph_mappo.py \
+#       --configs rl_algorithm.yaml train_full_rl.yaml train_ent01.yaml \
+#                 train_safe_mini512.yaml \
+#       --checkpoint outputs/supervised_pg_phased/supervised_pg_phased_latest.pt \
+#       --seed 42 --num-updates 30 --run-name mini512_s42
 train:
   ppo:
     minibatch_size: 512

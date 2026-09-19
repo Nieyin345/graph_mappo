@@ -12,8 +12,26 @@
 # 风险：value_coef 过大可能让 critic 主导梯度。r4 的 value_return_corr 未记录，
 # 本轮要在 metrics 里看 value_return_corr 有没有塌。
 #
-# 用法（排在 train_full_rl.yaml 之后）：
-#   --configs rl_algorithm.yaml train_full_rl.yaml train_safe_vcoef1.yaml
+# 用法（★ 必须排在 train_ent01.yaml **之后**）：
+#
+#   ★★ 2026-09-19 修：本行原先写的是
+#      `--configs rl_algorithm.yaml train_full_rl.yaml train_safe_vcoef1.yaml`
+#      —— **漏了 train_ent01.yaml**，得到的操作点是 `entropy_coef: 0.001`，
+#      本项目已判定为错误值的那一档。同一个错在 train_safe_ep2 / mini512 里
+#      一模一样。用 `/tmp/check_cfg_usage.py` 扫出来的（按注释建链再 diff）。
+#
+#   OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 /opt/qkd/venv/bin/python -u \
+#       scripts/train/train_graph_mappo.py \
+#       --configs rl_algorithm.yaml train_full_rl.yaml train_ent01.yaml \
+#                 train_safe_vcoef1.yaml \
+#       --checkpoint outputs/supervised_pg_phased/supervised_pg_phased_latest.pt \
+#       --seed 42 --num-updates 30 --run-name vcoef1_s42
+#
+# ### 判据（跑之前写死）
+#
+# 对照 `ent01_t8_s{42,43,44}`，8 线程，n=3（df=2，临界 4.303）。
+# 起臂后先跑 `scripts/diag/audit_arm_vs_control.py`，**唯一差异必须是
+# `train.ppo.value_coef`** —— 若看见 `entropy_coef` 也在差异里，说明用法行又漏了。
 train:
   ppo:
     value_coef: 1.0
