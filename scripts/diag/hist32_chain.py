@@ -61,7 +61,22 @@ ARM_RUNS = ["hist32_s42", "hist32_s43", "hist32_s44"]
 TODO = []
 CTRL = "ent01_rerun"
 SEEDS = (42, 43, 44)
-CRIT3 = 4.303
+# ★★ 临界值一律从**唯一来源**取（同目录 stats_crit.py），不在这里手写常数。
+#
+#   2026-09-20 修复。原写法是：
+#       crit = CRIT3 if df == 2 else (2.776 if df == 4 else 2.145)
+#   它只覆盖 df=2 与 df=4，**其余一律落到 2.145**——那是 **df=14** 的值。
+#
+#   对本脚本这不是假想路径，而是**主路径**：SEEDS=(42,43,44)，而 s44 长期被
+#   MAX_HIST=2 挡着（两条 hist 并发就够把 7 run 推到 252 GB）⟹ 判读时最常见的
+#   就是 **n=2（df=1）**，其正确临界值是 **12.706**。回退给的 2.145 **宽了 6 倍**
+#   ⟹ |t| 落在 2.145~12.706 之间就会**假显著**。
+#   详见记忆 `silent-lenient-fallback-in-thresholds`（ent001_verdict 同款，
+#   那次 t=−0.69 恰好离两条线都远，是运气不是设计）。
+#
+#   stats_crit.t_crit 对未知 df **抛 KeyError，绝不回退**。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from stats_crit import t_crit  # noqa: E402
 EXPERT = 0.6979220689
 T_LO, T_HI = -0.035, 0.035
 
@@ -316,7 +331,8 @@ def verdict():
     se = sd / math.sqrt(len(per_seed)) if len(per_seed) > 1 else float("nan")
     t = m / se if se and se == se and se != 0 else float("nan")
     df = len(per_seed) - 1
-    crit = CRIT3 if df == 2 else (2.776 if df == 4 else 2.145)
+    # 未知 df 由 t_crit 抛 KeyError —— 宁可炸，不要静默换成宽松值。
+    crit = t_crit(df)
     A("   n=%d 训练种子 × %d 请求种子   df=%d  临界值=%.3f" % (len(per_seed), nc, df, crit))
     A("   Δ = %+.4f   SD(训练种子) = %.4f   SE = %.4f   t = %+.2f  %s"
       % (m, sd, se, t, "★ 过线" if abs(t) > crit else "未过线"))
