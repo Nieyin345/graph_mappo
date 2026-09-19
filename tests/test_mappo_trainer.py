@@ -277,7 +277,8 @@ def test_target_kl_stops_update_after_the_guard_floor(tmp_path):
 
     def high_kl_loss(*_args, **_kwargs):
         zero = parameter.sum() * 0.0
-        return zero, zero, zero, torch.tensor(1.0), zero
+        # 6 元组：末尾的 `clip_frac` 是**非损失**的诊断返回值（见 UpdateStats）。
+        return zero, zero, zero, torch.tensor(1.0), zero, zero
 
     trainer._loss_for_batch = high_kl_loss
     stats = trainer.update(buffer)
@@ -405,3 +406,43 @@ def test_episode_steps_fixed_honors_configured_length(tmp_path):
     trainer.episodes_per_update = 1
     buffer = trainer.collect_rollout()
     assert 1 <= len(buffer.steps) <= 240
+
+
+def test_update_stats_fields_are_all_populated(tmp_path):
+    """`UpdateStats` 的每个数值字段都必须被填 —— 不存在"加了字段没人填"的空槽。
+
+    ★ 为什么专门写这一条：metrics.jsonl 是 `asdict(stats)` 生成的
+    （`mappo_trainer.py:1546`），所以**新加的字段会自动出现在日志里**，
+    哪怕没有任何人给它赋过值 —— 它会以默认值 0 一直躺在每一行里，
+    看起来像"测出来是 0"，而不是"根本没测"。
+
+    本项目真有过这种空槽：`checkpoint.py` 的 `trainer_state` 字段全仓库
+    只有 4 处引用、**没有任何调用方填过它**（子代理审计发现）。
+
+    判据：跑一轮真实的 `update()`，然后检查每个数值字段**不是 NaN**。
+    之所以不用"不等于 0"：确实有些量可以合法为 0，用 0 当哨兵会误报。
+    NaN 是"没算"的可靠标记。
+    """
+    import math
+    from dataclasses import asdict, fields
+
+    config = _tiny_config(tmp_path)
+    env = build_env_from_config(config)
+    trainer = MAPPOTrainer(
+        env,
+        MAPPOPolicy(GraphMAPPOActorCritic(env.action_resolver.action_space, config), config),
+        config,
+        tmp_path,
+    )
+    trainer.episodes_per_update = 1
+    buffer = trainer.collect_rollout()
+    stats = trainer.update(buffer)
+
+    bad = [f.name for f in fields(stats)
+           if isinstance(getattr(stats, f.name), float) and math.isnan(getattr(stats, f.name))]
+    assert not bad, "这些 UpdateStats 字段是 NaN ⟹ 没有生产者：%s" % bad
+
+    # clip_frac 是比例，必须落在 [0, 1]
+    assert 0.0 <= stats.clip_frac <= 1.0, stats.clip_frac
+    # 落盘记录里必须有它（asdict 自动带上）
+    assert "clip_frac" in asdict(stats)

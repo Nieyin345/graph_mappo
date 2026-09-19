@@ -249,6 +249,20 @@ class UpdateStats:
     update_s: float
     elapsed_s: float
     mean_ratio: float = 0.0
+    # ★★ PPO 的**近端约束到底有没有生效**，看这一个数。`mean_ratio` 只给均值，
+    #    而 clip 作用在**尾部**：`kl≈0.001 且 clip 从未激活` 与
+    #    `kl 很小但每 50 个 batch 有一个 ratio 冲到 1.5` 在 mean_ratio 上
+    #    **几乎看不出区别**，但对策略梯度是两回事。
+    #
+    #    定义（照抄 cleanrl `ppo.py:257` / SB3 `ppo.py:292` 的 clip_fraction）：
+    #        clip_frac = mean(|ratio − 1| > clip_eps)
+    #    = **有多大比例的 per-decision 决策真的被 clip 截断了**。
+    #    恒 0 ⟹ 近端约束没起作用（本项目的 kl≈0.001 正指向这里）；
+    #    显著 >0 ⟹ 约束在起作用，越大说明每步走得越猛。
+    #
+    #    ⚠ **纯诊断**：不参与任何损失、不反馈进优化 ⟹ 加它**不改变任何数值行为**，
+    #    不需要重跑基线。（这是本项目少见的"零代价换一个读数"。）
+    clip_frac: float = 0.0
     actor_grad_norm: float = 0.0
     critic_grad_norm: float = 0.0
     # Critic-fit diagnostics. `advantage` collapsing onto `return` (i.e.
@@ -564,6 +578,7 @@ class MAPPOTrainer:
             "entropy": stats.entropy,
             "kl": stats.kl,
             "mean_ratio": stats.mean_ratio,
+            "clip_frac": stats.clip_frac,
             "actor_grad_norm": stats.actor_grad_norm,
             "mean_return": stats.mean_return,
             "mean_abs_advantage": stats.mean_abs_advantage,
@@ -864,6 +879,7 @@ class MAPPOTrainer:
         total_entropy = 0.0
         total_kl = 0.0
         total_ratio = 0.0
+        total_clipfrac = 0.0
         total_actor_grad = 0.0
         total_critic_grad = 0.0
         total_batches = 0
@@ -879,7 +895,8 @@ class MAPPOTrainer:
             else:
                 batch_iter = buffer.sample(minibatch_size, self.rng)
             for batch in batch_iter:
-                actor_loss, critic_loss, entropy_mean, kl_mean, ratio_mean = self._loss_for_batch(
+                (actor_loss, critic_loss, entropy_mean, kl_mean,
+                 ratio_mean, clip_frac) = self._loss_for_batch(
                     batch,
                     clip_eps=clip_eps,
                     entropy_coef=entropy_coef,
@@ -914,6 +931,7 @@ class MAPPOTrainer:
                 total_entropy += float(entropy_mean.detach().cpu())
                 total_kl += float(kl_mean.detach().cpu())
                 total_ratio += float(ratio_mean.detach().cpu())
+                total_clipfrac += float(clip_frac.detach().cpu())
                 total_actor_grad += float(grad_norm.detach().cpu())
                 total_critic_grad += float(critic_grad_norm.detach().cpu())
                 total_batches += 1
@@ -974,6 +992,7 @@ class MAPPOTrainer:
             update_s=0.0,
             elapsed_s=0.0,
             mean_ratio=total_ratio / n,
+            clip_frac=total_clipfrac / n,
             actor_grad_norm=total_actor_grad / n,
             critic_grad_norm=total_critic_grad / n,
             value_std=value_std,
@@ -991,7 +1010,14 @@ class MAPPOTrainer:
         entropy_coef: float,
         value_coef: float,
         normalize_adv: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+               torch.Tensor, torch.Tensor]:
+        """返回 (actor, critic, entropy, kl, ratio, clip_frac)。
+
+        ★ `clip_frac` 是**唯一非损失**的返回值：它不参与 `update()` 的任何组合，
+        只是把"近端约束有没有截断到东西"变成一个可读的数。把它放在这里是因为
+        ratio 正好在本地算出来，顺带统计是零成本的。
+        """
         if not batch:
             raise ValueError("Empty minibatch in PPO update.")
         advantages = [step.advantages.to(self.device) for step in batch]
@@ -1018,6 +1044,11 @@ class MAPPOTrainer:
         entropy_terms: list[torch.Tensor] = []
         kl_terms: list[torch.Tensor] = []
         ratio_terms: list[torch.Tensor] = []
+        # ★ 每步记的是 `(|ratio−1| > clip_eps)` 的**指示量**（0/1 张量），
+        #   最后取均值 ⟹ 比例。这比记 ratio 的分位数省内存：
+        #   每步一个标量张量，与 `kl_terms` 同量级，不像 `ratios` 那样带图。
+        #   `ratios` 本身要反传（surr1），而指示量在 `.detach()` 后不参与梯度。
+        clip_terms_frac: list[torch.Tensor] = []
         critic_terms: list[torch.Tensor] = []
         # Batched PPO evaluation: one block-diagonal forward over many minibatch
         # graphs (chunked to bound GPU memory) instead of one forward per step.
@@ -1065,6 +1096,11 @@ class MAPPOTrainer:
                     entropy_terms.append(entropies[node_ids[0]])
                     kl_terms.append(ratios - 1.0 - (new_lp - old_lp))
                     ratio_terms.append(ratios)
+                    # `(ratios - 1).abs() > clip_eps` 是布尔张量，`.float()` 转 0/1。
+                    # 用 `detach()` 断梯度：它不进损失，没有理由留在图里。
+                    clip_terms_frac.append(
+                        ((ratios - 1.0).abs() > clip_eps).float().detach().mean()
+                    )
                 returns_target = step.returns.to(self.device)
                 # Huber loss keeps the critic robust to high-reward outlier
                 # episodes; the beta scales with the current batch so the
@@ -1081,7 +1117,8 @@ class MAPPOTrainer:
         entropy_mean = torch.stack(entropy_terms).mean()
         kl_mean = torch.stack(kl_terms).mean()
         ratio_mean = torch.stack(ratio_terms).mean()
-        return (actor_loss, critic_loss, entropy_mean, kl_mean, ratio_mean)
+        clip_frac = torch.stack(clip_terms_frac).mean()
+        return (actor_loss, critic_loss, entropy_mean, kl_mean, ratio_mean, clip_frac)
 
     # ------------------------------------------------------------------ evaluate
     def evaluate(self, num_episodes: int | None = None) -> dict:
@@ -1515,7 +1552,8 @@ class MAPPOTrainer:
                 f"critic_loss={stats.critic_loss:.4f} entropy={stats.entropy:.4f} "
                 f"kl={stats.kl:.4f} reward={stats.mean_reward:.3f} "
                 f"success_rate={stats.mean_success_rate:.3f} served={stats.mean_served_keys:.1f} "
-                f"ratio={stats.mean_ratio:.4f} actor_grad={stats.actor_grad_norm:.4f} "
+                f"ratio={stats.mean_ratio:.4f} clip_frac={stats.clip_frac:.5f} "
+                f"actor_grad={stats.actor_grad_norm:.4f} "
                 f"critic_grad={stats.critic_grad_norm:.4f} "
                 f"V_std={stats.value_std:.3f} R_std={stats.return_std:.2f} "
                 f"corr(V,R)={stats.value_return_corr:.3f} "
