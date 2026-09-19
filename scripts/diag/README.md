@@ -34,7 +34,7 @@ ssh qkd 'cd /opt/qkd/graph_mappo && /opt/qkd/venv/bin/python scripts/diag/val_al
 | `reap_now.sh` | `reap.py` 的包装：自动识别并保护当前在跑的探针，然后执行 |
 | `fetch_all.sh` | 把服务器结果抓到本地（**排除权重 .pt**，只留 metrics/config/rollout_debug） |
 | `wake_poll.sh` | 唤醒链（本地跑）：轮询服务器，**仅在有新信息时**输出一行。指纹已排除易变数字，否则会每 2 分钟误唤醒 |
-| `wake_parse.py` | `wake_poll.sh` 调用的服务器端探针；顺带在内存余量够时补起被误杀的实验臂 |
+| `wake_parse.py` | `wake_poll.sh` 调用的服务器端探针；顺带在内存余量够时补起被误杀的实验臂。**PAIR/VERDICT 的配对差是「臂 − 基线」**（2026-09-19 从反向改回，见纪律 9），基线按臂写在 `ARM_BASE` 里（`vcoef1`→`r8_base`，`ep2e1`/`mini512e1`→`ent01`） |
 | `probe_loss_ab.py` | 严格 A/B 测 `_loss_for_batch` 新旧实现的 update 耗时（从 git HEAD 取旧模块并存对比） |
 | `verify_loss_refactor.py` | 验证 loss 重构数值/梯度等价 |
 
@@ -79,6 +79,18 @@ ssh qkd 'cd /opt/qkd/graph_mappo && /opt/qkd/venv/bin/python scripts/diag/val_al
    补的规矩：**关键常量引入时就断言**（`_selfcheck()` 拿 scipy 当 oracle，
    并断言 `t_crit(2)==4.303`），**判据里的数一律现算**再打印。
    转写错误不会报错，只会让结论悄悄反向——这比崩溃危险得多。
+9. **配对差的符号要与标注一致，且要对得上一个能心算的例子。**
+   `wake_parse.py` 原来算 `d = pb - pa`（基线 − 臂）却标注「臂 − 基线」，
+   于是 VERDICT 整体反向：实测印出
+   `PAIR vcoef1_s44 u=20 +0.0284 (臂 0.6889 − 基线 0.7173)`，而
+   `0.6889 − 0.7173 = −0.0284` —— **打印值跟它自己的标注对不上**，
+   一行就能发现，但没人算过。后果是把"比基线差 0.07"报成"有效"。
+   补的规矩：**每次改配对差的符号，先手算一个例子对一遍**，
+   例如 `0.6889 − 0.7173` 必须是负的。修完用独立脚本
+   （`.tmp/vcoef1_verdict.py`）复算，两者到小数第 4 位一致才算过。
+   同族：**基线也要显式写**。`vcoef1` 跑在 ent=0.001 上，基线该是
+   `r8_base`；一律拿 `ent01` 当基线会把两项效应加在一起，读数偏大。
+   现在 `ARM_BASE` 映射表里逐臂写明基线，并打进 VERDICT 行。
 
 ## 怎么送到节点
 

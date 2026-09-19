@@ -310,11 +310,34 @@ def main():
     # 旋钮臂 vs ent01 基线：**配对**差（同训练种子 → 同验证种子集）。
     # 这是本轮实验唯一要回答的问题，所以直接打出来，不必等我去手工配对：
     # 唤醒时看到的就是判决所需的那一行。
-    for arm in ("vcoef1", "ep2", "mini512", "runt"):
+    #
+    # ⚠ 2026-09-19 修：原来是 `d = pb[i] - pa[i]`（基线 − 臂），却标注成
+    # 「臂 − 基线」，**符号与标注相反**。后果是 VERDICT 判读整体反向：
+    # 实测 `PAIR vcoef1_s44 u=20 +0.0284 (臂 0.6889 − 基线 0.7173)` ——
+    # 0.6889 − 0.7173 = **−0.0284**，打印成 +0.0284；于是 `m>=+0.035`
+    # 这个「有效」判据实际命中的是**比基线差**的臂。已用算术复核。
+    # 现在改成与标注、与阈值语义一致的 `臂 − 基线`。
+    # ⚠ 每个臂的**基线是哪个，必须显式写**——不能一律拿 ent01 当基线。
+    #    `vcoef1` 跑在 entropy_coef=0.001 上（resolved_config 实测），它要测的
+    #    value_coef 0.5→1.0 只能和**同样 ent=0.001 的 r8_base** 比。
+    #    拿它去比 ent01 等于把 entropy_coef 那一项也算进「旋钮效应」，读数偏大。
+    #    （旧版就是这么比的：把 vcoef1 报成 +0.0717「有效」，而实际上它比自己的
+    #      基线还差 0.02。）
+    #    `ep2e1`/`mini512e1` 是本轮重做的、叠在 ent01 之上，所以基线是 ent01。
+    #    计划中但已作废的 `ep2`/`mini512`/`runt` 保留映射，便于对照旧读数。
+    ARM_BASE = {
+        "vcoef1":    "r8_base",
+        "ep2":       "ent01",      # 作废（跑在 ent=0.001 上）
+        "mini512":   "ent01",      # 作废
+        "runt":      "ent01",      # 作废（且注释与代码不符）
+        "ep2e1":     "ent01",      # 本轮重做
+        "mini512e1": "ent01",      # 本轮重做
+    }
+    for arm, base in ARM_BASE.items():
         tot = []
         for seed in ("42", "43", "44"):
             a = f"{arm}_s{seed}"
-            b = f"ent01_s{seed}"
+            b = f"{base}_s{seed}"
             sa, sb = series(OUT / a), series(OUT / b)
             if not sa or not sb:
                 continue
@@ -325,17 +348,17 @@ def main():
             pa, pb = sa[u][1], sb[u][1]
             if len(pa) != len(pb) or not pa:
                 continue
-            d = [pb[i] - pa[i] for i in range(len(pa))]
+            d = [pa[i] - pb[i] for i in range(len(pa))]     # 臂 − 基线
             md = sum(d) / len(d)
             tot.append(md)
             print(f"PAIR {arm}_s{seed} u={u} {md:+.4f} "
-                  f"(臂 {sa[u][0]:.4f} − 基线 {sb[u][0]:.4f})")
+                  f"(臂 {sa[u][0]:.4f} − 基线[{base}] {sb[u][0]:.4f})")
         if tot:
             m = sum(tot) / len(tot)
             tag = ("有效 >=+0.035" if m >= 0.035 else
                    "有害 <=-0.035" if m <= -0.035 else
                    "测不出（<0.035）")
-            print(f"VERDICT {arm} 三种子均值 Δ={m:+.4f} → {tag}")
+            print(f"VERDICT {arm} (基线 {base}) 三种子均值 Δ={m:+.4f} → {tag}")
 
 
 if __name__ == "__main__":
