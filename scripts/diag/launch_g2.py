@@ -104,6 +104,31 @@ MAX_HIST = 2                         # hist 系同时最多 2 条（实测约束
 DRIVER_RE = re.compile(r"launch_wave263\.py")
 
 
+# ★★ driver 的内存**预留**（phase A 用）。
+#
+#   问题：driver 与 g2 是**两个各自独立读内存、独立决策**的进程，对**同一个
+#   内存池**做判断。g2 的绝对视角 `memtotal − other − Σ稳态` **完全不知道
+#   driver 即将起的那一条**，会把机器填到它自己的上限；driver 那边同时判定
+#   "有余量" 就叠一条 63 GiB 的 hist ⟹ 超发。
+#   （两者都是"每起一条就 break 回去重读内存"，所以竞态窗口只有**同一个
+#     轮询周期**，超发上限约一条臂压在 FLOOR 上 —— 不是"必然 OOM"，但真的会过线。）
+#
+#   修法：把 driver **还没起的那些臂**当成"已经花掉了"计入 Σ稳态。
+#   这样两个决策者看到的是**同一个内存池**，超发在结构上不可能。
+#
+#   ⚠ **待办不能从"候选"反推** —— `候选` 行是**累积**的，会把已经起过的臂
+#     再数进来（那个坑本项目踩过：记忆 `launch-g2` 的前身把它叫
+#     `driver_pending()` 并因此撒过谎）。待办 = **静态表 − 日志里"已起"的**。
+#
+#   静态表是 driver 自己的 todo（可用 `launch_wave263.py --help` 及其实测
+#   回放核对）。**这是写死的清单**：若 driver 的臂表改了而这里没改，预留会
+#   失准 —— 所以下面的 `driver_reservation()` 把"未知臂"**响亮报错**，
+#   而不是当成 0（当成 0 就是静默偏松，等于没修）。
+DRIVER_TODO = ["ent01_rerun_s42", "ent01_rerun_s43", "ent01_rerun_s44",
+               "hist32_s42", "hist32_s43", "hist32_s44"]
+DRIVER_LAUNCHED_RE = re.compile(r"已起\s+(\S+?)（")
+
+
 def log(m: str) -> None:
     print("[%s] %s" % (time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()), m),
           flush=True)
@@ -244,22 +269,33 @@ def memfree_gib() -> float:
     return 0.0
 
 
-def two_views(runs, kind_new: str) -> tuple[float, float, float, float]:
+def two_views(runs, kind_new: str, phase: str = "") -> tuple[float, float, float, float]:
     """**两个视角，缺一不可**（记忆 `respawn-guard-two-views`）：
     只算增量会在稳态总和已经超过 `MemTotal` 时**放行**；只算绝对又会把
     「够用」报成「不够用」。返回 (增量余量, 绝对余量, 待涨量, 其它占用)。
 
-      · 视角 A（增量）：可用 − Σ待涨 − 本臂稳态 ≥ FLOOR
+      · 视角 A（增量）：可用 − Σ待涨 − 本臂稳态 − **driver 预留** ≥ FLOOR
         问的是"现在起得起吗"
-      · 视角 B（绝对）：MemTotal − 其它占用 − Σ**全部**稳态（含本臂）≥ FLOOR
+      · 视角 B（绝对）：MemTotal − 其它占用 − Σ**全部**稳态（含本臂与预留）≥ FLOOR
         问的是"涨到稳态后系统还剩多少" ⟸ **这道墙 `load average` 和
         `%CPU` 都看不见**，正是「照启动时的 23GB 排 5 个、涨到 u15 就顶格」的病根
+
+    ★ `phase` 只为一件事存在：phase A 与 wave263 的 driver **并行**，必须把
+      driver 还没起的那几条**预留**进来，否则两个决策者各按各的账本放行 ⟹ 超发。
+      phase B/C 时 driver 早已退出，预留自然为空（`driver_reserve` 返回 []）。
+
+      ⚠ 预留对**两个视角都减**：那些臂**一次都还没起**（不在 `runs` 里），
+        所以它们的"待涨量"就是它的**全额稳态** —— 对视角 A 而言减全额才是对的。
+        已经起过的臂由 `live_runs()` 看见、已在 `runs` 里，**不重复计**。
     """
+    reserve = driver_reserve(runs) if phase.upper() == "A" else []
+    rsv = sum(steady_of(k) for _n, k in reserve)
     avail = avail_gib()
     pend = pending_growth(runs)
-    inc = avail - pend - steady_of(kind_new)
+    inc = avail - pend - steady_of(kind_new) - rsv
     other = memtotal_gib() - memfree_gib() - sum(p for _n, _k, p in runs)
-    total_steady = sum(steady_of(k) for _n, k, _p in runs) + steady_of(kind_new)
+    total_steady = (sum(steady_of(k) for _n, k, _p in runs)
+                    + steady_of(kind_new) + rsv)
     absolute = memtotal_gib() - other - total_steady
     return inc, absolute, pend, other
 
@@ -387,6 +423,37 @@ def driver_arms() -> set[str] | None:
     return _DRIVER_STATIC | set(re.findall(r"候选\s+(\S+?)（", txt))
 
 
+def driver_reserve(runs) -> list[tuple[str, str]]:
+    """driver **还没起**的臂 → `[(名字, kind)]`。它们要占的内存必须**现在**就从
+    g2 的账本里减掉，否则两个决策者各按各的账本放行 ⟹ 超发（见 `two_views`）。
+
+    待办 = 静态表 `DRIVER_TODO` − 日志里 `已起` 的 − 已经在跑的。
+    **不是**从"候选"反推（那是**累积**的，会重复计入已起的臂）。
+
+    ★ 未知臂**响亮报错**，不当成 0。当成 0 是**静默偏松** —— 等于没修，
+      而且看起来像修好了（记忆 `silent-lenient-fallback-in-thresholds`）。
+    """
+    try:
+        with open(DRIVER_LOG, encoding="utf-8", errors="replace") as f:
+            txt = f.read()
+    except OSError:
+        raise RuntimeError(
+            "读不到 %s ⟹ 不知道 driver 还要起什么 ⟹ 无法安全计算预留量。"
+            "（不许当成 0：那正是静默偏松）" % DRIVER_LOG)
+
+    started = set(DRIVER_LAUNCHED_RE.findall(txt))
+    unknown = started - set(DRIVER_TODO)
+    if unknown:
+        raise RuntimeError(
+            "日志里出现了静态表 `DRIVER_TODO` 之外的臂 %s ⟹ driver 的臂表改了而"
+            "本文件的预留表没跟上 ⟹ 预留量算不准 ⟹ **不启动**。"
+            "请同步 DRIVER_TODO（源头见 launch_wave263.py）。" % sorted(unknown))
+
+    live = {n for n, _k, _p in runs}
+    return [(n, kind_of(n)) for n in DRIVER_TODO
+            if n not in started and n not in live]
+
+
 def driver_alive() -> list[int]:
     """⚠ 用**字符类**避开自匹配（`pkill -f` 在 `ssh host '...'` 里会杀掉自己的教训）。"""
     return [p for p in _pids() if DRIVER_RE.search(cmdline(p))]
@@ -512,7 +579,9 @@ def main(argv: list[str]) -> int:
         for i, (name, cfgs, kind, nupd, resume) in enumerate(list(todo)):
             avail = avail_gib()
             pend = pending_growth(runs)
-            inc, absolute, _p, other = two_views(runs, kind)
+            inc, absolute, _p, other = two_views(runs, kind, phase)
+            reserve = driver_reserve(runs) if phase == "A" else []
+            rsv = sum(steady_of(k) for _n, k in reserve)
             hist_ok = (kind != "hist") or (n_hist < MAX_HIST)
             ok = (inc >= FLOOR) and (absolute >= FLOOR) and hist_ok
 
@@ -524,11 +593,15 @@ def main(argv: list[str]) -> int:
                 "   （单位一律 **GiB**）"
                 % (memtotal_gib(), memfree_gib(), avail, other))
             log("  待涨量 %.1f GiB（在跑的还没涨到稳态的部分，**隐形**）" % pend)
+            if phase == "A":
+                log("  ★ driver 预留 %.1f GiB：%s"
+                    % (rsv, "、".join("%s(%s)" % (n, k) for n, k in reserve)
+                       or "（driver 已无待起臂 ⟹ 预留为空）"))
             log("  候选 %s（%s，%d 轮，稳态 %.0fGiB）：" % (name, kind, nupd, steady_of(kind)))
-            log("    视角A·增量：可用 %.1f − 待涨 %.1f − 本臂 %.0f = %.1f ≥ %.0f ? %s"
-                % (avail, pend, steady_of(kind), inc, FLOOR, inc >= FLOOR))
-            log("    视角B·绝对：MemTotal − 其它 − Σ**全部**稳态 = %.1f ≥ %.0f ? %s"
-                % (absolute, FLOOR, absolute >= FLOOR))
+            log("    视角A·增量：可用 %.1f − 待涨 %.1f − 本臂 %.0f − 预留 %.1f = %.1f ≥ %.0f ? %s"
+                % (avail, pend, steady_of(kind), rsv, inc, FLOOR, inc >= FLOOR))
+            log("    视角B·绝对：MemTotal − 其它 − Σ**全部**稳态（含预留 %.1f）= %.1f ≥ %.0f ? %s"
+                % (rsv, absolute, FLOOR, absolute >= FLOOR))
             log("    hist 门：%d < %d ? %s" % (n_hist, MAX_HIST, hist_ok))
             log("    ⟹ **%s**" % ("放行" if ok else "等"))
             if not ok:

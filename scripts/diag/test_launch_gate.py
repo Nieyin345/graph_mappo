@@ -59,9 +59,26 @@ case("空机",
 
 bad = 0
 for (desc, runs, kind, mt, mf, av, e_inc, e_abs, e_pend, e_other) in CASES:
-    m.memtotal_gb = lambda mt=mt: mt
-    m.memfree_gb   = lambda mf=mf: mf
-    m.avail_gb     = lambda av=av: av
+    # ★★ 桩按**名字**打，并且先断言这个名字真的存在。
+    #
+    #   教训：`a5d9fad`（内存单位修复）把 `avail_gb` 改名成 `avail_gib`，
+    #   **但没改这里的桩** ⟹ 三个桩全部打空 ⟹ `avail_gib()` 落回真实的
+    #   `/proc/meminfo`（Windows 上读不到 ⟹ 0.0）⟹ 每个场景都算出一堆垃圾数
+    #   ⟹ 本测试**从那一刻起就是假失败**，而不是"门坏了"。
+    #   失败信息("增量 算出 -25.0，期望 220.0")也完全指不到根因。
+    #
+    #   `hasattr` 守卫把那句难懂的话换成"桩名不存在" ⟹ 改名会**响亮报错**。
+    #   （同族：记忆 `test-harness-must-use-real-launch-path` —— 测试夹必须
+    #     走真实路径；这里是反面：桩必须真打上，否则测的是空气。）
+    for _fname, _val in (("memtotal_gib", mt), ("memfree_gib", mf),
+                         ("avail_gib", av)):
+        if not hasattr(m, _fname):
+            raise SystemExit(
+                "!! 桩名 `%s` 不在 launch_g2 里 ⟹ **桩是死的**，测的是空气。\n"
+                "   launch_g2 函数改名了？请同步本文件（别再让测试假失败）。"
+                % _fname)
+        setattr(m, _fname, lambda _v=_val: _v)
+
     inc, absolute, pend, other = m.two_views(runs, kind)
     checks = [("增量", inc, e_inc), ("绝对", absolute, e_abs),
               ("待涨", pend, e_pend), ("其它", other, e_other)]
@@ -78,6 +95,90 @@ for (desc, runs, kind, mt, mf, av, e_inc, e_abs, e_pend, e_other) in CASES:
             bad += 1
         else:
             print("      ✓ 场景 2 确认：A 放行、B 拒绝 —— 两个视角都必要")
+
+# ============================================================================
+# 场景 5：★ **driver 预留**（phase A 与 wave263 并行时才有）
+#
+#   两个启动器各自独立读内存、独立决策，对**同一个内存池**做判断。
+#   g2 的绝对视角原先**完全不知道 driver 即将起的那一条** ⟹ 会把机器填到
+#   自己的上限，driver 再叠一条 ⟹ 超发（竞态窗口只有一个轮询周期，超发上限
+#   约一条臂压在 FLOOR 上）。
+#
+#   现场构造：6 条已在稳态（3 base + 2 hist + 1 base = 225G），driver 还欠
+#   一条 hist32_s44（63G），候选是 gae90_s43（base 25G），MemAvailable 70G。
+#
+#     不预留：增量 = 70 − 0 − 25       = 45 ≥ 17  ⟹ **放行**（危险）
+#             绝对 = 251.2 + 43.8 − 250 = 45 ≥ 17  ⟹ 也放行
+#     有预留：增量 = 70 − 0 − 25 − 63  = −18      ⟹ **拒绝** ✓
+#             绝对 = 251.2 + 43.8 − 313 = −18     ⟹ 也拒绝 ✓
+#
+#   ⟹ 同一时刻、同一份内存读数，**预留与否给出相反的判决**。这就是修复的意义。
+# ============================================================================
+print()
+print("场景 5：driver 预留（phase A）")
+import os as _os, tempfile as _tf
+
+_runs5 = [("ent01_rerun_s42", "base", 25.0), ("ent01_rerun_s43", "base", 25.0),
+          ("ent01_rerun_s44", "base", 25.0), ("hist32_s42", "hist", 63.0),
+          ("hist32_s43", "hist", 63.0), ("gae90_s42", "base", 25.0)]
+_MT5, _MF5, _AV5 = 251.2, 70.0, 70.0
+_OTHER5 = _MT5 - _MF5 - sum(p for _n, _k, p in _runs5)     # = -43.8
+
+for _fname, _val in (("memtotal_gib", _MT5), ("memfree_gib", _MF5),
+                     ("avail_gib", _AV5)):
+    if not hasattr(m, _fname):
+        raise SystemExit("!! 桩名 `%s` 不在 launch_g2 里 ⟹ 桩是死的" % _fname)
+    setattr(m, _fname, lambda _v=_val: _v)
+
+# 写一份**真实的** driver 日志（用真实的措辞 "已起 <name>（"），
+# 让 driver_reserve 走它自己的解析路径 —— 不 stub 掉它，那才是测真的。
+_drv = _os.path.join(_tf.gettempdir(), "test_driver_reserve.log")
+with open(_drv, "w", encoding="utf-8") as _f:
+    for _nm in ("ent01_rerun_s42", "ent01_rerun_s43", "ent01_rerun_s44",
+                "hist32_s42", "hist32_s43"):
+        _f.write("[t]   已起 %s（base，稳态 25 GB）\n" % _nm)
+m.DRIVER_LOG = _drv
+
+_rsv = m.driver_reserve(_runs5)
+print("  driver 预留 = %s" % _rsv)
+if _rsv == [("hist32_s44", "hist")]:
+    print("  ✓ 待办正确推得：只剩 hist32_s44（已起的不重复计、在跑的不计）")
+else:
+    print("  ✗ 待办算错：期望 [('hist32_s44','hist')]，得到 %s" % _rsv)
+    bad += 1
+
+_inc_no, _abs_no, _, _ = m.two_views(_runs5, "base")            # 无预留
+_inc_rs, _abs_rs, _, _ = m.two_views(_runs5, "base", "A")       # 有预留
+print("  无预留：增量 %+.1f 绝对 %+.1f  ⟹ %s"
+      % (_inc_no, _abs_no, "放行（危险）" if min(_inc_no, _abs_no) >= 17 else "拒绝"))
+print("  有预留：增量 %+.1f 绝对 %+.1f  ⟹ %s"
+      % (_inc_rs, _abs_rs, "放行" if min(_inc_rs, _abs_rs) >= 17 else "拒绝 ✓"))
+if abs(_inc_rs - (-18.0)) > 0.05 or abs(_abs_rs - (-18.0)) > 0.05:
+    print("  ✗ 有预留的期望是 −18.0/−18.0，得到 %+.1f/%+.1f" % (_inc_rs, _abs_rs))
+    bad += 1
+elif not (min(_inc_no, _abs_no) >= 17 and min(_inc_rs, _abs_rs) < 17):
+    print("  ✗ 预留必须**反转判决**（无预留放行、有预留拒绝），方向不对")
+    bad += 1
+else:
+    print("  ✓ 预留反转了判决：同一份内存读数，无预留放行、有预留拒绝")
+
+# 未预留时（phase 非 A）必须与旧行为完全一致 —— 保证 phase B/C 不受影响
+if abs(_inc_no - 45.0) > 0.05:
+    print("  ✗ phase 非 A 时增量为 %+.1f，期望 +45.0（旧的、无预留的行为）" % _inc_no)
+    bad += 1
+else:
+    print("  ✓ phase B/C（无预留）行为不变：增量 +45.0")
+
+# ★ 未知臂必须**响亮报错**，不许当成 0（当成 0 = 静默偏松 = 等于没修）
+with open(_drv, "a", encoding="utf-8") as _f:
+    _f.write("[t]   已起 some_unknown_arm（base，稳态 25 GB）\n")
+try:
+    m.driver_reserve(_runs5)
+    print("  ✗ 静态表外的臂**没有报错** —— 预留量会静默失准")
+    bad += 1
+except RuntimeError as _e:
+    print("  ✓ 静态表外的臂响亮报错（不当成 0）")
+_os.remove(_drv)
 
 print()
 print("结论：%s" % ("全部通过 ✓" if bad == 0 else "有 %d 处不符 ✗" % bad))
