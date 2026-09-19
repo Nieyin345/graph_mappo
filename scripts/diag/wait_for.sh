@@ -103,6 +103,14 @@ _count() {   # _count <ERE> <文件> -> 永远打印一个干净整数
     printf '%s' "${n:-0}"
 }
 
+# ★ **先剥掉整行注释再分析**。
+#   否则一个**记录**了坏形状的文件（比如本文件、以及任何解释这些坑的脚本）
+#   会被自己的文档举报。2026-09-19 实测：`.tmp/run_mode_de.sh` 的注释里写了
+#   「无超时的 `while pgrep ...; do sleep; done` 是坏形状」→ 被形状 3 抓了。
+#   一个会举报"描述反模式"的 linter 是误报机器，会被绕过。
+#   只剥**整行**注释（行首可带空白后接 #），不动行内 #（那可能是字符串里的）。
+_strip_comments() { sed 's/^[[:space:]]*#.*$//' "$1" 2>/dev/null; }
+
 lint_waits() {
     local f="$1" bad=0
     [ -f "$f" ] || { echo "无此文件: $f" >&2; return 2; }
@@ -110,30 +118,32 @@ lint_waits() {
     # 形状 1：(until|while) 里同时有 || 和 && —— bash 里两者**同优先级、左结合**，
     # 实际解析成 `(A || B) && C`，与读代码的人以为的 `A || (B && C)` 不同。
     # 先把 `{ ... }` 分组剥掉再判，否则 `A || { B && C; }` 这种**正确**写法会被误报。
-    local stripped n1
-    stripped="$(sed 's/{[^}]*}//g' "$f" 2>/dev/null || true)"
-    n1="$(printf '%s' "$stripped" | _count '(until|while) .*\|\|.*&&' /dev/stdin)"
+    local body stripped n1
+    body="$(_strip_comments "$f")"
+    stripped="$(printf '%s\n' "$body" | sed 's/{[^}]*}//g')"
+    n1="$(printf '%s\n' "$stripped" | _count '(until|while) .*\|\|.*&&' /dev/stdin)"
     [ "$n1" -gt 0 ] && { echo "✗ $n1 处 (until|while) 里 || 与 && 混用且未分组（优先级陷阱，条件会短路）"; bad=1; }
 
     # 形状 2：pgrep 用了本节点不支持的 -q（procps 版本老，报 invalid option）
-    local n2; n2="$(_count 'pgrep +-[a-zA-Z]*q' "$f")"
+    local n2; n2="$(printf '%s\n' "$body" | _count 'pgrep +-[a-zA-Z]*q' /dev/stdin)"
     [ "$n2" -gt 0 ] && { echo "✗ $n2 处 pgrep -q —— 本节点 procps 不支持，会退化成恒真/恒假"; bad=1; }
 
-    # 形状 3：有循环等待，但全文件找不到任何超时判据
+    # 形状 3：有循环等待，但全文件找不到任何超时判据。
+    # ★ 超时判据的写法很多（$tmo/$TMO/$TIMEOUT/-ge $x/timeout 命令），
+    #   所以这里**大小写不敏感**且接受常见的命名，宁可漏报也不误报。
     local n3 n4
-    n3="$(_count '(while|until) .*; *do *sleep' "$f")"
-    n4="$(_count '< *\$[a-zA-Z_]*tmo|-ge *\$[a-zA-Z_]*tmo|timeout ' "$f")"
+    n3="$(printf '%s\n' "$body" | _count '(while|until) .*; *do *sleep' /dev/stdin)"
+    n4="$(printf '%s\n' "$body" | _count -i '\-ge *"?\$[a-z_]*tmo|\-ge *"?\$[a-z_]*timeout|^[[:space:]]*timeout |\-ge *"?\$\{?[A-Z_]*TMO' /dev/stdin)"
     if [ "$n3" -gt 0 ] && [ "$n4" -eq 0 ]; then
         echo "✗ $n3 处循环等待但全文件找不到超时判据（失败时不是等得久，是永远不来）"; bad=1
     fi
 
     # 形状 4：pgrep -c / grep -c 用了 `|| echo 0` 兜底（会得到 "0\n0"）
-    local n5; n5="$(_count '(pgrep|grep) +-c[^|]*\|\| *echo 0' "$f")"
+    local n5; n5="$(printf '%s\n' "$body" | _count '(pgrep|grep) +-c[^|]*\|\| *echo 0' /dev/stdin)"
     [ "$n5" -gt 0 ] && { echo "✗ $n5 处 \`<pgrep|grep> -c ... || echo 0\`（无匹配时打印 0 但退出 1，会得到 \"0\\n0\"）"; bad=1; }
 
     # 形状 5：`pgrep -f <模式>` 与自身命令行同模式 → 自匹配
-    # 典型：脚本名/run-name 出现在自己的 pgrep 模式里且未做 [x] 转义
-    local n6; n6="$(_count 'pgrep +-[a-zA-Z]*f[^|]*\$\{?[A-Za-z_]*(SCRIPT|SELF|BASH_SOURCE)' "$f")"
+    local n6; n6="$(printf '%s\n' "$body" | _count 'pgrep +-[a-zA-Z]*f[^|]*\$\{?[A-Za-z_]*(SCRIPT|SELF|BASH_SOURCE)' /dev/stdin)"
     [ "$n6" -gt 0 ] && { echo "✗ $n6 处 pgrep -f 用了 \$0/\$BASH_SOURCE 类模式（会匹配到自己）；需写 [x] 转义"; bad=1; }
 
     [ "$bad" -eq 0 ] && echo "✓ $f：等待句柄未见已知坏形状"

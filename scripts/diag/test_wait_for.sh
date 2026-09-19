@@ -75,6 +75,25 @@ wait_gone train_graph_mappo.py 600 "描述"'
 expect_lint 0 "pgrep -cf 显式兜底（不用 || echo 0）" \
 'n="$(pgrep -cf PAT 2>/dev/null)"; n=${n:-0}'
 
+# ★ 这条是 2026-09-19 实测踩到的**误报**：我在 .tmp/run_mode_de.sh 的注释里
+#   写了「无超时的 `while pgrep ...; do sleep; done` 是坏形状」，结果被形状 3
+#   抓了 —— linter 举报了自己正在解释的那个反模式。
+#   一个会举报"文档里描述反模式"的 linter 是误报机器，会被绕过。故先剥注释。
+expect_lint 0 "注释里描述坏形状，不得被举报（否则文档即误报）" \
+'# 坏形状示例（反面教材）：while pgrep -f X > /dev/null; do sleep 120; done
+# 再举一例：until [ -f a ] || [ -f b ] && [ ! -d c ]; do sleep 1; done
+echo ok'
+
+expect_lint 0 "真实代码里带超时的 PID 轮询（本项目 run_mode_de.sh 的写法）" \
+'TMO=$((12 * 3600)); waited=0
+while :; do
+    alive=0
+    for p in $(cat "$PIDS"); do kill -0 "$p" 2>/dev/null && alive=$((alive+1)); done
+    [ "$alive" -eq 0 ] && break
+    if [ "$waited" -ge "$TMO" ]; then exit 1; fi
+    sleep 120; waited=$((waited+120))
+done'
+
 echo
 echo "=== 3. 原语本身要真的会超时（不是死等，也不是立刻返回）==="
 # 这是本文件存在的核心：坏的等待句柄的病症是**静默立刻返回**或**永不来**，
