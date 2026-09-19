@@ -27,6 +27,14 @@
 两者差三个数量级，没有中间地带。**阈值类工具上线前必须用实测校准**
 （本项目有一条被错误阈值精确杀掉对照臂的教训）。
 
+★ 2026-09-20 更正：上面这句「没有中间地带」是**实测那一次**的读数，
+**不是普遍保证**。真实的冻结签名是「卡在某个 syscall 里永不返回」，
+而同样 0 tick 也可能是**一次很长的 `madvise`/锁等待**，会自己恢复。
+⟹ 本脚本因此把**单次** 0 增量定为「**疑似**」，并**再采一次**确认；
+只有**两次连续** 0 增量才报「冻结」。
+（子代理指出本条存在假阳性模式；不采信它的具体机制，但"单点不定死"
+  这个方向是对的，且与本文件 docstring 原有的告诫一致——原先代码没照做。）
+
 ### 用法
     python scripts/diag/watch_liveness.py              # 只报（默认）
     python scripts/diag/watch_liveness.py --sample 20  # 改采样秒数
@@ -244,18 +252,45 @@ def main():
         for r in runs:
             r["t1"] = _ticks(r["pid"])
         time.sleep(a.sample)
-        frozen = []
+        suspects = []
+        rows = []
         for r in runs:
             t2 = _ticks(r["pid"])
             d = None if (t2 is None or r["t1"] is None) else t2 - r["t1"]
+            rows.append((r, d))
+            if d == 0:
+                suspects.append(r)
+
+        # ★ 单次 0 增量**不定死**：再采一次，两次都 0 才报冻结。
+        #   理由见文件头「判活为什么要 40 s」的 2026-09-20 更正。
+        reconfirm = {}
+        if suspects:
+            for r in suspects:
+                r["t2"] = _ticks(r["pid"])
+            time.sleep(a.sample)
+            for r in suspects:
+                t3 = _ticks(r["pid"])
+                reconfirm[r["run"]] = None if (t3 is None or r["t2"] is None) \
+                    else t3 - r["t2"]
+
+        frozen = []
+        for r, d in rows:
             n, age = rounds_and_age(r["run"])
             r["rounds"], r["age"], r["delta"] = n, age, d
             base = ROUND_S["hist"] if "hist" in r["run"] else ROUND_S["default"]
             stale = age is not None and age > base * STALE_FACTOR
             flag = ""
             if d is not None and d == 0:
-                flag = "  ✗**冻结**（0 tick）"
-                frozen.append(r["run"])
+                d2 = reconfirm.get(r["run"])
+                if d2 == 0:
+                    flag = "  ✗**冻结**（两次采样均 0 tick）"
+                    frozen.append(r["run"])
+                elif d2 is None:
+                    flag = "  ⚠疑似冻结（二次采样进程消失）"
+                    frozen.append(r["run"])
+                else:
+                    flag = ("  ·疑似停顿（首次 0，二次 %d tick ⟹ 已恢复，"
+                            "不报冻结）" % d2)
             elif stale:
                 flag = "  ⚠metrics 停滞 >%.0fs" % (base * STALE_FACTOR)
             print("    %-18s %-8d %8.1f %6d %9s %10s%s"
