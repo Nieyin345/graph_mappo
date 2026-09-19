@@ -48,12 +48,18 @@ fi
 
 # chain 刚退出，它最后一波的 run 可能还在收尾（trainer 进程还没退干净）
 echo "[$(date -Is)] 等最后一波 run 收尾…"
+# ⚠ `pgrep -c` 无匹配时**打印 0 但退出码是 1**，所以 `|| echo 0` 会再补一个 0，
+# 变量变成 "0\n0"（多行），`[ "$n" -eq 0 ]` 就报
+# `[: 0\n0: integer expression expected`，**永远为假** → 这个循环从不提前
+# 退出，每次都白等满 120×15s = 30 分钟。初版就是这个写法。
+# 正确写法：不要 `|| echo 0`，自己给变量兜底。
+pgrep_n() { pgrep -cf "$1" 2>/dev/null; }
 for _ in $(seq 1 120); do
-  n=$(pgrep -cf "train_graph_mappo.py" 2>/dev/null || echo 0)
+  n=$(pgrep_n "train_graph_mappo.py"); n=${n:-0}
   [ "$n" -eq 0 ] && break
   sleep 15
 done
-n=$(pgrep -cf "train_graph_mappo.py" 2>/dev/null || echo 0)
+n=$(pgrep_n "train_graph_mappo.py"); n=${n:-0}
 echo "[$(date -Is)] 剩余 train run: $n"
 
 if [ -f "$MARK" ]; then

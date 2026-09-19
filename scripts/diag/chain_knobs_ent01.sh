@@ -107,9 +107,14 @@ wave() {       # $1=波标签 $2=额外 config（可为空）
 #      继续等它们真跑完。
 # 两条合起来，无论本脚本是现在启动还是之后启动，顺序都正确。
 echo "[$(date -Is)] 等预注册波（ent01_s45/s46）跑完再开始"
+# ⚠ 不要写 `$(pgrep -cf X || echo 0)`：pgrep -c 无匹配时**打印 0 但退出码 1**，
+# `||` 会再补一个 0 → 变量变成 "0\n0" → `[ "$p" -eq 0 ]` 报
+# `[: 0\n0: integer expression expected` 且**永远为假**，循环白等满 12h。
+# （chain_prereg.sh 里同一个写法已实测报错。）
+pgrep_n() { pgrep -cf "$1" 2>/dev/null; }
 for _ in $(seq 1 1440); do        # 最多等 12h
-  p=$(pgrep -cf "bash /tmp/chain_prereg.sh" 2>/dev/null || echo 0)
-  r=$(pgrep -cf "run-name ent01_s4[56]" 2>/dev/null || echo 0)
+  p=$(pgrep_n "bash /tmp/chain_prereg.sh"); p=${p:-0}
+  r=$(pgrep_n "run-name ent01_s4[56]");     r=${r:-0}
   [ "$p" -eq 0 ] && [ "$r" -eq 0 ] && break
   sleep 30
 done
