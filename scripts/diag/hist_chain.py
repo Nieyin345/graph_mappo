@@ -76,7 +76,11 @@ def ppid(pid):
 
 def cmdline(pid):
     try:
-        return open("/proc/%d/cmdline" % pid, "rb").read().decode("utf-8", "replace")
+        # ★★ 必须把 NUL 换成空格（见 parallel_chain.py 里的详细说明）：
+        #    `/proc/<pid>/cmdline` 用 `\0` 分隔 argv，而 `\s` 不匹配 `\0`
+        #    ⟹ 漏了这行则 live_runs() 恒空、内存门恒通过。
+        with open("/proc/%d/cmdline" % pid, "rb") as f:
+            return f.read().decode("utf-8", "replace").replace("\0", " ")
     except OSError:
         return ""
 

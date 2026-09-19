@@ -95,7 +95,15 @@ def ppid(pid):
 
 def cmdline(pid):
     try:
-        return open("/proc/%d/cmdline" % pid, "rb").read().decode("utf-8", "replace")
+        # ★★ 必须把 NUL 换成空格（`/proc/<pid>/cmdline` 用 `\0` 分隔 argv，
+        #    而 `\s` **不匹配** `\0`）。漏了这一行 ⟹ `--run-name\s+(\S+)`
+        #    永远匹配不上 ⟹ `live_runs()` **恒为空** ⟹ 内存门**恒通过**
+        #    ⟹ 门形同不存在，无条件启动。
+        #    实测（2026-09-20）：6 条 run 在跑，日志却打印「在跑 0」。
+        #    `scripts/diag/pss_per_run.py` 里有这一行，所以它一直是对的；
+        #    本函数是从它移植来的，**移植时漏了**。
+        with open("/proc/%d/cmdline" % pid, "rb") as f:
+            return f.read().decode("utf-8", "replace").replace("\0", " ")
     except OSError:
         return ""
 
