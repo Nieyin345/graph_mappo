@@ -11,7 +11,21 @@
 
 判据用**同一份原始字节**两种算法各算一遍，看差多少；再拿一个在跑进程的 PSS
 对两个工具做交叉验证。不猜、不外推。
+
+## ★ 退出码必须分辨「判不出」与「通过」（B-13，2026-09-21 修）
+
+旧实现里 **三条 `return 0` 全都是「跳过」**（没训练进程 / 读不到 mem_pss /
+文件不存在）⟹ **rc 结构性恒为 0**（只有读 smaps 失败才 1）⟹ 无论查没查成，
+调用方看到的都是"通过"。同族：`gate-must-print-its-inputs`（恒真的门不报错）、
+`failed-launch-must-be-loud`（失败被当成"还在跑"）。
+
+约定（与 `watch_liveness.py` 的 0/1/2/3 一致）：
+
+    0 = 查了，且通过
+    1 = 查了，且有不合
+    2 = **判不出**（前提不具备：没有在跑的训练进程、或找不到被检文件）
 """
+
 from __future__ import annotations
 
 import os
@@ -22,7 +36,26 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 KB_IN_MIB = 1024.0
 MIB_IN_GIB = 1024.0
-GiB_PER_GB = 2 ** 30 / 1e9          # = 1.073741824
+# ★★ 两个**不同**的常数，原脚本把它们混为一个（2026-09-21 修）。
+#
+#   `KB_PER_GB        = 1e6`        ← kB 是 KiB，除以它得到十进制 GB
+#   `MIB_PER_GB       = 2**20/1e6`  ← **把已经是 MiB 的值**换算成十进制 GB
+#   `KB_PER_GIB       = 2**20`      ← kB（=KiB）除以它得到 GiB
+#
+#   本脚本第 42 行打印的「两者比值」= (kb/1e6)/(kb/2^20) = 2^20/1e6 = **1.048576**。
+#   而旧标签写的「理论 2^30/1e9 = 1.073742」是 `MIB_PER_GB` —— **另一个量**。
+#   两个数不一样，所以那行**从写下那天起标签就是错的**，却从没人发现：
+#   **它只是打印，从来没有任何断言读过它**。
+#   同族：`thresholds-and-transcribed-numbers`（手抄常数）——
+#   本条是它的变体：**手抄的常数写对了数字，但配错了场景**。
+KB_PER_GB = 1e6
+MIB_PER_GB = 2 ** 30 / 1e9          # = 1.073741824（用于"已是 MiB 的值"）
+KB_PER_GIB = 2 ** 20
+# 第 42 行那个比值的理论值 —— **是下面这个**，不是 MIB_PER_GB
+RATIO_GB_OVER_GIB = KB_PER_GIB / KB_PER_GB      # = 1.048576
+
+RC_OK, RC_FAIL, RC_UNDECIDED = 0, 1, 2
+_fails: list[str] = []
 
 
 def read_memtotal_kb() -> int:
@@ -34,12 +67,28 @@ def read_memtotal_kb() -> int:
 
 def main() -> int:
     kb = read_memtotal_kb()
+    if kb <= 0:
+        # ★ 旧实现这里也 `return 0` —— 连 MemTotal 都读不到却报"通过"。
+        print("✗ 读不到 MemTotal ⟹ **判不出**（不是通过）")
+        return RC_UNDECIDED
     as_gib = kb / KB_IN_MIB / MIB_IN_GIB          # mem_pss.py 的算法
     as_gb = kb / 1e6                              # launch_g2.py 的算法
     print("MemTotal 原始值 = %d kB" % kb)
     print("  mem_pss.py  算法 ÷1024÷1024 = %.1f GiB" % as_gib)
     print("  launch_g2.py 算法 ÷1e6      = %.1f GB" % as_gb)
-    print("  两者比值 = %.4f（理论 2^30/1e9 = %.4f）" % (as_gb / as_gib, GiB_PER_GB))
+    print("  两者比值 = %.6f（理论 %.6f = 2^20/1e6）"
+          % (as_gb / as_gib, RATIO_GB_OVER_GIB))
+    # ★ 这条以前只是**打印**，从不判定 —— 于是它的标签错了好几年没人发现。
+    #   现在它是一条断言：比值偏离理论值 ⟹ 两个实现真的不同源，
+    #   这正是本脚本存在的理由（记忆 `meminfo-kb-is-kib-not-gb`）。
+    ratio_err = abs(as_gb / as_gib - RATIO_GB_OVER_GIB)
+    if ratio_err > 1e-9:
+        _fails.append("比值 %.9f ≠ 理论 %.9f（2^20/1e6）"
+                      % (as_gb / as_gib, RATIO_GB_OVER_GIB))
+    # 正对照：把**另一个**常数也印出来，免得下次再有人把两个搞混
+    print("     ⚠ 别跟 %.6f（2^30/1e9）搞混 —— 那个是「已是 MiB 的值」换算成 GB"
+          % MIB_PER_GB)
+    print("       的系数，**不是**本行这个比值的理论值。旧标签配错了场景。")
     print()
 
     # ---- 交叉验证：取一个在跑的 run，两个工具各量一次 PSS ----
@@ -59,7 +108,7 @@ def main() -> int:
             break
     if target is None:
         print("（此刻没有训练进程，跳过 PSS 交叉验证）")
-        return 0
+        return _verdict(undecided="没有在跑的训练进程，PSS 交叉验证这一段没查")
 
     pid, name = target
     tot_kb = 0
@@ -68,8 +117,10 @@ def main() -> int:
             if ln.startswith("Pss:"):
                 tot_kb += int(ln.split()[1])
     except OSError as e:
-        print("读不到 %d 的 smaps_rollup: %s" % (pid, e))
-        return 1
+        # ★ 旧实现这里 `return 1`（报"有不合"），但**读不到 ≠ 有不合** ——
+        #   那是"判不出"。1 是留给真发现的。
+        print("读不到 %d 的 smaps_rollup: %s ⟹ **判不出**" % (pid, e))
+        return RC_UNDECIDED
     bytes_ = tot_kb * 1024
     print("在跑进程 %d (%s) 的 PSS：原始 %d kB" % (pid, name, tot_kb))
     print("  mem_pss.py  算法 = %.2f GiB" % (tot_kb / 1024 / 1024))
@@ -78,7 +129,9 @@ def main() -> int:
 
     print("== 对模型常数的影响 ==")
     for label, v_gib in (("PSS_BASE", 25.0), ("PSS_HIST", 63.0)):
-        v_gb = v_gib * GiB_PER_GB
+        # ★ 这里用的才是 MIB_PER_GB（值**已经是 GiB**，要换算成十进制 GB），
+        #   与第 42 行那个比值的理论值 RATIO_GB_OVER_GIB 是**两个不同的量**。
+        v_gb = v_gib * MIB_PER_GB
         print("  %s = %.1f（按 mem_pss 量的 GiB）⟹ 折算成 GB 是 %.1f（+%.1f）"
               % (label, v_gib, v_gb, v_gb - v_gib))
     print()
@@ -95,7 +148,7 @@ def main() -> int:
         s = open(mp, encoding="utf-8").read()
     except OSError:
         print("（读不到 %s，跳过标签检查）" % mp)
-        return 0
+        return _verdict(undecided="读不到 mem_pss.py，标签自检这一段没查")
     import re as _re
     gb_labels = len(_re.findall(r"GB", s))
     gib_labels = len(_re.findall(r"GiB", s))
@@ -106,9 +159,33 @@ def main() -> int:
     if divides_gib and gb_labels > gib_labels:
         print("  ⚠ **标签与算法不符** —— 它量的是 GiB 却标成 GB。读者照标签用会偏松 ≈5%。")
         print("     这不只是笔误：单位错就是**这样传播**的（读的人信任标签）。")
+        _fails.append("mem_pss.py 标签与算法不符（GB %d > GiB %d）"
+                      % (gb_labels, gib_labels))
     else:
         print("  ✓ 标签与算法一致")
-    return 0
+    return _verdict()
+
+
+def _verdict(undecided: str | None = None) -> int:
+    """把「发现了不合」与「有一段没查成」分开报，并给对应的 rc。
+
+    ★ 顺序有意：**先报不合**（那是真读数），再把"没查成的段"降级为不确定。
+      反之（有不合却因为某段没查成而报 2）会把真发现静默掉。
+    """
+    if _fails:
+        print()
+        print("✗ **有不合**：")
+        for f in _fails:
+            print("   · %s" % f)
+        return RC_FAIL
+    if undecided:
+        print()
+        print("⚠ **判不出**：%s" % undecided)
+        print("   —— 这既不是通过也不是失败。rc=2 让调用方能分辨。")
+        return RC_UNDECIDED
+    print()
+    print("✓ 两处实现同单位、标签与算法一致。rc=0")
+    return RC_OK
 
 
 if __name__ == "__main__":
