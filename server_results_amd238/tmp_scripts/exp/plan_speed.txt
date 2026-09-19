@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# 速度优化实验 plan。
+#   nohup bash .tmp/exp/run.sh .tmp/exp/plan_speed.txt > /tmp/exp_speed.log 2>&1 &
+#
+# 设计：
+#   * 线程数固定 16（线程数会确定性影响训练结果，混用就没法比）
+#   * 每个实验 8 轮，前 3 轮预热丢弃（corr_rss 实测第 4 轮封顶在 ~83.5s）
+#   * 先跑当前的 chunk=64 做基线，再扫 128 / 256
+#     顺序刻意让基线走两次（首尾），用来估计实验间的漂移
+#
+# 格式：<实验名>|<config 列表，逗号分隔>|<线程数>
+#
+# 基线 = 当前 rl_algorithm.yaml 的 batch_chunk: 64，不加任何覆盖
+
+sp_base_a||16
+sp_chunk128|_exp_chunk128.yaml|16
+sp_chunk256|_exp_chunk256.yaml|16
+sp_base_b||16

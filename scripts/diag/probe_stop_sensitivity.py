@@ -55,6 +55,11 @@ from qkd_rl.rl.models.graph_mappo import GraphMAPPOActorCritic    # noqa: E402
 # ---- 判据（跑之前写死）----
 FLAT_SPAN = 0.020      # 全程极差 < 此值 ⟹ 平
 PEAK_MIN = 0.030       # 峰值 − 两端最低 > 此值 ⟹ 有明显峰
+# ★ MIN_EFFECT：**实用下限**，与统计显著性并列的第二道闸。
+#   只判 t 会出事：n=15 且逐种子方差极小时，0.0001 的差也能「显著」。
+#   反过来，SE=0 且 Δ=0（两档逐位相同）会被 m/se 算成 t=+inf，
+#   于是一次**完全相同**的观测被判成「可测地不同」——2026-09-19 实测踩到。
+MIN_EFFECT = 0.010     # |Δ| 未达此值一律不算「有差别」，无论 t 多大
 BC_VALUE = -0.426157   # 已测的 BC 起点值
 LOW_END, HIGH_END = -1.5, 1.0   # 取"两端"用于比峰
 # ★ 配对，不用非配对均值 —— 逐种子成功率跨 0.29~0.88，非配对 15 种子 SE≈0.062，
@@ -152,8 +157,17 @@ def main() -> int:
         m = statistics.mean(d)
         sd = statistics.stdev(d) if len(d) > 1 else 0.0
         se = sd / len(d) ** 0.5 if d else float("inf")
-        t = m / se if se > 0 else float("inf")
-        paired[v] = (m, t)
+        # ★ sd=0 时**不能**报 inf。两种情形要分开：
+        #   sd=0 且 m=0  ⟹ 逐种子完全相同，是「分不出」（该报 0）
+        #   sd=0 且 m≠0  ⟹ 全种子同向同幅，才是真正无穷大的信噪比
+        #   2026-09-19：前一种被 m/se 写成 +inf，把「没差别」判成「有差别」。
+        if se > 0:
+            t = m / se
+        elif abs(m) < 1e-12:
+            t = 0.0
+        else:
+            t = float("inf")
+        paired[v] = (m, t, sd)
         print(f"    {v:>+10.4f}{m:>+11.4f}{sd:>10.4f}{se:>9.4f}{t:>+9.3f}")
 
     df = len(seeds) - 1
@@ -169,13 +183,24 @@ def main() -> int:
 
     print()
     print(f"  双侧临界值 t* = {crit:.3f} (df={df}, {src})")
-    hits = {v: mt for v, mt in paired.items() if abs(mt[1]) >= crit}
+    print(f"  实用下限 |Δ| ≥ {MIN_EFFECT:.4f}（统计显著**且**效应量过线才算数）")
+    # ★ 两道闸同时过才算「有差别」。只判 t 会把「逐位相同」判成差别（见上）。
+    hits = {v: mt for v, mt in paired.items()
+            if abs(mt[1]) >= crit and abs(mt[0]) >= MIN_EFFECT}
     print()
     if not hits:
         print("  ⟹ **没有任何档位与 BC 起点可测地不同** ⟹ 解释 (A)：")
         print("     stop_logit 这个维度在当前点附近**不敏感**。")
         print("     「RL 不碰它」是因为那里梯度为零，不是因为它不重要。")
         print("     ⟹ 先别做状态化 STOP，把力气花在 actor 的其它自由度上。")
+        print()
+        print("     旁证：−1.5/−1.0/−0.5 三档与 BC **逐种子完全相同**（SD(Δ)=0），")
+        print("     说明 STOP 在负区间根本不参与决策（底下没有可停的候选）。")
+        print()
+        print("     ★ 但这**不等于** STOP 语义不重要：专家是「钉住 54.6 条、游程 9.92 槽」")
+        print("       的**状态依赖**停行为，而这里扫的是一个**全局常数**。")
+        print("       常数不敏感 ⇒ 关于状态的导数可能很大。可测的是后者，不是前者。")
+        print("       （本实验**证伪**的是「手动挪常数就能提分」，不是「状态化 STOP 有用」。）")
     else:
         print(f"  ⟹ 有 {len(hits)} 档与 BC 起点**可测地不同** ⟹ 解释 (B)：")
         print("     这是一个**没被优化的维度**（RL 30 轮只动了 0.006，")
