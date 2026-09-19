@@ -66,21 +66,30 @@ def val_points(run: str) -> dict[int, list[float]]:
 
 
 def plateau_mean(run: str, window: tuple[int, ...]):
-    """窗口内逐验证种子取均值；窗口轮次缺失时退到**最后一个可用轮**。"""
+    """窗口内逐验证种子取均值；窗口轮次缺失时返回 (None, 原因)。
+
+    ★ 2026-09-19 修：这里原来是「窗口内**一个都没有**才退到最后一轮」，
+      **部分命中时静默放行** —— 对照臂有 u25+u30，实验臂只有 u25，
+      于是对照算的是 mean(u25,u30)、实验只有 u25，两边口径不同却
+      **只在全空时才报**。w329p 的判读就是这么作废的（见
+      docs/训练诊断记录.md「w329p 判读作废」一节）。
+
+      现在改成**严格要求窗口内每一轮都在**，缺任何一轮直接判数据不全，
+      由 main() 报错退出。宁可报错，也不要拿两个不同口径的数去配对。
+    """
     pts = val_points(run)
     if not pts:
         return None, "无 metrics"
-    us = [u for u in window if u in pts]
-    fell_back = False
-    if not us:
-        last = max(pts)
-        us = [last]
-        fell_back = True
-    n = len(pts[us[0]])
-    if any(len(pts[u]) != n for u in us):
+    missing = [u for u in window if u not in pts]
+    if missing:
+        have = sorted(pts)
+        return None, (f"窗口 {list(window)} 里缺 u{missing}"
+                      f"（该 run 只有 {have}）⟹ 口径与对照臂不一致，拒绝配对")
+    n = len(pts[window[0]])
+    if any(len(pts[u]) != n for u in window):
         return None, "窗口内各轮种子数不一致"
-    vals = [statistics.mean(pts[u][i] for u in us) for i in range(n)]
-    return vals, (f"退到 u{us[0]}（窗口 {list(window)} 无数据）" if fell_back else None)
+    vals = [statistics.mean(pts[u][i] for u in window) for i in range(n)]
+    return vals, None
 
 
 def t_crit(df: int) -> tuple[float, str]:
