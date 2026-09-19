@@ -91,19 +91,42 @@ def main() -> None:
             router=ServeProbe(env),
         )
         served = 0.0
+        # 2026-09-19 补：把**生成量**与**等待量**也记下来。
+        #
+        # 为什么：训练侧实测 RL 的密钥生成量单调掉 **41%**（10.93M → 6.47M），
+        # 而 `mean_reward_generated = 0`、`success_rate` 与 reward 都不动
+        # （见 docs/训练诊断记录.md「奖励看不见的行为漂移」）。也就是说奖励有一个
+        # 很大的零空间，策略在里面自由漂移。要判断这个漂移**是好是坏**，
+        # 必须有**同一 regime 上专家**的同一组量 —— 而本脚本原先只存
+        # success/served/failed/arrived，正好缺了有漂移的那两维。
+        #
+        # `served_keys`/`generated_keys` 是**每步流量**，累加即为整局总量；
+        # `waiting_keys` 是**存量**，累加得到"等待密钥·步"，因此同时存均值
+        # （= 总和/步数）以便与 rollout_debug 的 `mean_waiting_keys` 直接比。
+        generated = 0.0
+        waiting = 0.0
+        qkp_util = 0.0
+        n_steps = 0
         done = False
         while not done:
             actions, scores = expert.act(obs)
             obs, _reward, terminated, truncated, info = env.step(actions, scores)
             served += float(info.get("served_keys", 0.0))
+            generated += float(info.get("generated_keys", 0.0))
+            waiting += float(info.get("waiting_keys", 0.0))
+            qkp_util += float(info.get("qkp_utilization", 0.0))
+            n_steps += 1
             done = terminated or truncated
 
         summary = env.metrics.episode_summary()
         arrived = float(summary.get("arrived_keys", 0.0))
         failed = float(summary.get("failed_keys", 0.0))
-        rows.append((seed, served / arrived if arrived else 0.0, served, failed, arrived))
+        rows.append((seed, served / arrived if arrived else 0.0, served, failed, arrived,
+                     generated, waiting / n_steps if n_steps else 0.0,
+                     qkp_util / n_steps if n_steps else 0.0))
         print(f"  seed {seed:>3}  success {rows[-1][1]:.4f}  "
-              f"served {served:>13,.0f}  failed {failed:>13,.0f}")
+              f"served {served:>13,.0f}  failed {failed:>13,.0f}"
+              f"  gene {generated:>13,.0f}")
 
     n = len(rows)
     mean_sr = sum(r[1] for r in rows) / n
@@ -123,8 +146,18 @@ def main() -> None:
         "served": [r[2] for r in rows],
         "failed": [r[3] for r in rows],
         "arrived": [r[4] for r in rows],
+        # 2026-09-19 新增：训练侧发现的那两维（生成/等待）+ 利用率。
+        # 旧文件（如 expert_seeds100_240.json）**没有这些键**——缺键不是 0，
+        # 读的时候要判存在，别把"没测"读成"为 0"。
+        "generated": [r[5] for r in rows],
+        "waiting_mean": [r[6] for r in rows],
+        "qkp_util_mean": [r[7] for r in rows],
     }, indent=2), encoding="utf-8")
     print(f"  wrote {out_path}")
+    if rows and rows[0][2]:
+        g = sum(r[5] for r in rows) / n
+        s = sum(r[2] for r in rows) / n
+        print(f"  ★ 生成/服务 = {g / s:.2f}（训练侧 RL 末轮是 ~97.3）")
 
 
 if __name__ == "__main__":
