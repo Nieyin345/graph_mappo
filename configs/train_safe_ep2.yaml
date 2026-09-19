@@ -8,10 +8,19 @@
 # （3.9h vs 2.9h）。也就是说它若只是"打平"，**在预算上是亏的**——
 # 判据因此不能只看 Δ，还要看"同预算下谁更高"：epochs 2 的 30 轮 ≈ 其他臂的 60 轮。
 #
-# 已知的相互作用：`target_kl=0.02` 的早停语义在 epochs>1 时**不同**——
-# epochs=1 时早停会中止整轮更新，epochs=2 时可以只停掉第二个 epoch。
-# 代码注释（mappo_trainer.py:713-722）明确写了这一点，所以本臂的
-# `stop_for_kl` 行为与基线不可直接比，读指标时要注意 total_batches。
+# 已知的相互作用：`target_kl=0.02` 的早停**不会**触发（实测见下），
+# 所以本臂与基线的 `total_batches` 一致、指标可直接比。
+#
+# 这里原先写的是「epochs=1 时早停会中止整轮更新，epochs=2 时可以只停掉第二个
+# epoch」—— **这句是错的**。用 ast 查过 `mappo_trainer.py` 的两处 break：
+#     break @ 729 → 所属循环是 line 673 `for batch in batch_iter:`
+#     break @ 731 → 所属循环是 line 663 `for _epoch in range(epochs):`
+# 也就是说 KL 一触发就跳出 **epoch 循环**，epochs=1 和 2 都是**中止整轮更新**，
+# 不存在"只停第二个 epoch"。（缩进肉眼数是不可靠的，所以用 ast 问解释器。）
+#
+# 而且实测它**从没触发过**：6 个 run 逐轮 kl 最大 0.0042，target 是 0.02；
+# 逐轮 update_s 也无一塌陷（早停的指纹）。所以那句错误描述**没有影响读数**，
+# 但错误的代码语义描述必须改 —— 它会在真正需要按它判断时把人带偏。
 #
 # 用法（排在 train_full_rl.yaml 之后）：
 #   --configs rl_algorithm.yaml train_full_rl.yaml train_safe_ep2.yaml
