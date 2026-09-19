@@ -9,18 +9,26 @@
 是对的**，是被事故换来的（NUL 分隔、进程树求和、待涨量、打印输入、断言非空）。
 本文件把那套门**原样搬进版本库**并泛化到多族臂，不再每次重写。
 
-## ★★ 相对 wave263 的唯一实质改动：**逐条放，不是整批等**
+## ★★ 两处相对 wave263 的实质改动
 
 wave263 的 driver 是**一条一条**放的：每放一条就 `break` 回去**重读内存**再决策。
 而我的第一版 g2 链是"整批等 142G"——**这是错的模式**，实测代价：
 
   - T+108 时 driver 退出，此刻 MemAvailable ≈ 118G
   - 整批门（5×25+17 = 142G）**过不去** ⟹ 要等到 T+123 另一条 hist 跑完
-  - 逐条门（25+17 = 42G）在 T+108 **立刻能放 4 条**
+  - 逐条门（25+17 = 42G）在 T+108 **立刻能放**（实测 2 条；第 3 条余量转负）
+    ⟹ 不是"能放更多"，是"不用白等 15 分钟才放第一条"
 
 ⟹ 逐条放**不需要更大的内存**，只是不会把"一次放得下几条"这种事算错。
    `pending_growth()`（待涨量）是逐条门能成立的关键：新起的臂 PSS 只有 ~9G，
    没有待涨量就会以为还有富余，一路放到 OOM。
+
+**改动 2：纠正一个**静默偏松**的单位错。** 原版（含 wave263）把 `/proc/meminfo`
+当十进制 GB 读（÷1e6），而 `PSS_BASE/PSS_HIST` 是从 `mem_pss.py` 按 **GiB**
+（÷1024÷1024）量出来的 ⟹ 同一台机器两个 `MemTotal`（251.2 GiB vs 263.4 GB），
+稳态被系统性低估 1.8（base）~4.6（hist）GiB/run。现场 5 条 + 1 新臂时累计
+低估约 11 GiB，而 `FLOOR` 只有 17 ⟹ **安全边际被吃掉 63%**。详见下面常量处的
+注释；自检见 `scripts/diag/check_mem_units.py`。
 
 ## 三条服从（不是我想选的，是被在跑的波定死的）
 
@@ -28,8 +36,11 @@ wave263 的 driver 是**一条一条**放的：每放一条就 `break` 回去**�
    的对照同族才能合并成 n=5。已核对 `CTRL_CFGS` 与本文件 `CTRL_CFGS` 逐字相同。
 2. **线程数 8**：`launch_wave263.py` 的 `THREADS = "8"`。线程数**确定性**改变
    训练结果（差 0.018，记忆 `thread-count-changes-training`）⟹ 必须同为 8。
-3. **同一时刻只有一个启动器**：phase A 先**等 wave263 的 driver 进程退出**
-   （无歧义、无竞态，记忆 `plan-is-a-claim-...`），再接棒。**不抢、不杀它**。
+3. **同一时刻只有一个启动器** ⟹ 与 driver **划界**：本波只拿它不碰的臂。
+   ★ 第一版写的是"**等 driver 进程退出**"，实测**被推翻**：driver 卡在
+   hist 门 `2<2`，要 ~108 分钟才放下 `hist32_s44` 再退出，而本波的门**当时
+   就过得了** ⟹ 白等 108 分钟、机器闲置 40–70 GiB，违反"把电脑性能吃满"。
+   ⟹ 改成划界（集合不相交，可直接查验），并把 `hist32_s44` 让给 driver。
 
 ## 预注册（跑之前写死，防事后编故事）
 
@@ -71,7 +82,19 @@ THREADS = "8"                        # ★ 必须与 launch_wave263.py 一致
 UPDATES = 30                         # 从头训
 UPDATES_EXT = 20                     # 续跑 u30 → u50
 
-# 内存模型（实测）
+# ★★ 单位：**全程 GiB**（2^30 / 2^20），不是十进制 GB。
+#    实测教训：`/proc/meminfo` 的 "kB" 其实是 **KiB**。`mem_pss.py` 用
+#    ÷1024÷1024（GiB）读数，而 `PSS_BASE/PSS_HIST` 正是从它量出来的；
+#    本文件第一版却用 ÷1e6/÷1e9（十进制 GB）⟹ 同一台机器两个 MemTotal
+#    （251.2 GiB vs 263.4 GB），**稳态被系统性低估 1.8~4.6 GB/run**。
+#    现场 5 条稳态 + 1 条新臂时累计低估约 11 GB，而 FLOOR 只有 17 GB
+#    ⟹ 安全边际被吃掉 63%（记忆 `silent-lenient-fallback-in-thresholds`、
+#    `thresholds-and-transcribed-numbers` 同族：单位错是**静默偏松**）。
+#    自检见 `scripts/diag/check_mem_units.py`。
+KiB_PER_GiB = 1024.0 * 1024.0
+B_PER_GiB = 1024.0 ** 3
+
+# 内存模型（实测，单位 GiB）
 PSS_BASE = 25.0
 PSS_HIST = 63.0
 FLOOR = 17.0
@@ -109,7 +132,7 @@ def ppid(pid: int) -> int:
 
 
 def pss(pid: int) -> float:
-    """该进程的 PSS（GB）。含私有匿名页 + 共享页的公平分摊；**不是 RSS**
+    """该进程的 PSS（**GiB**）。含私有匿名页 + 共享页的公平分摊；**不是 RSS**
     （RSS 会把 8 个 spawn worker 共享的 torch 代码页重复计数）。"""
     tot = 0
     try:
@@ -119,7 +142,7 @@ def pss(pid: int) -> float:
                     tot += int(ln.split()[1]) * 1024
     except OSError:
         return 0.0
-    return tot / 1e9
+    return tot / B_PER_GiB      # tot 是 bytes
 
 
 def _pids() -> list[int]:
@@ -158,11 +181,11 @@ def kind_of(name: str) -> str:
     return "hist" if "hist" in name else "base"
 
 
-def avail_gb() -> float:
+def avail_gib() -> float:
     try:
         for ln in open("/proc/meminfo"):
             if ln.startswith("MemAvailable:"):
-                return int(ln.split()[1]) / 1e6
+                return int(ln.split()[1]) / KiB_PER_GiB
     except OSError:
         pass
     return 0.0
@@ -201,21 +224,21 @@ def pending_growth(runs) -> float:
     return pend
 
 
-def memtotal_gb() -> float:
+def memtotal_gib() -> float:
     try:
         for ln in open("/proc/meminfo"):
             if ln.startswith("MemTotal:"):
-                return int(ln.split()[1]) / 1e6
+                return int(ln.split()[1]) / KiB_PER_GiB
     except OSError:
         pass
     return 0.0
 
 
-def memfree_gb() -> float:
+def memfree_gib() -> float:
     try:
         for ln in open("/proc/meminfo"):
             if ln.startswith("MemFree:"):
-                return int(ln.split()[1]) / 1e6
+                return int(ln.split()[1]) / KiB_PER_GiB
     except OSError:
         pass
     return 0.0
@@ -232,12 +255,12 @@ def two_views(runs, kind_new: str) -> tuple[float, float, float, float]:
         问的是"涨到稳态后系统还剩多少" ⟸ **这道墙 `load average` 和
         `%CPU` 都看不见**，正是「照启动时的 23GB 排 5 个、涨到 u15 就顶格」的病根
     """
-    avail = avail_gb()
+    avail = avail_gib()
     pend = pending_growth(runs)
     inc = avail - pend - steady_of(kind_new)
-    other = memtotal_gb() - memfree_gb() - sum(p for _n, _k, p in runs)
+    other = memtotal_gib() - memfree_gib() - sum(p for _n, _k, p in runs)
     total_steady = sum(steady_of(k) for _n, k, _p in runs) + steady_of(kind_new)
-    absolute = memtotal_gb() - other - total_steady
+    absolute = memtotal_gib() - other - total_steady
     return inc, absolute, pend, other
 
 
@@ -246,13 +269,23 @@ def arms_for(phase: str) -> list[tuple[str, list[str], str, int, str | None]]:
     """[(run_name, cfgs, kind, num_updates, resume_ckpt_or_None)] —— **按优先级排序**。
 
     顺序即优先级（逐条放，前面的先占内存）：
-      hist32_s44 先 —— 它完成 wave263（Task #1），且它是唯一被 MAX_HIST 卡的
-      然后 gae90 ×5（Task #3 的预注册检验）
-      最后补对照 s45/s46（把对照族凑到 n=5，配对分析要用）
+      gae90 ×5        —— Task #3 的预注册检验（本波的主目的）
+      补对照 s45/s46  —— 把对照族凑到 n=5，配对分析要用
+      （续跑族在 phase B/C）
+
+    ★ **`hist32_s44` 不在本表里** —— 它归 wave263 的 driver 放。
+      理由：driver 的 todo 只剩它一条，本波对它的命令与 driver **逐字相同**
+      （`verify_takeover_equiv.py` 已验证 argv 16 token 全等、线程数全等），
+      所以"本波接手"与"driver 自己放"产出**同一条臂**，没有收益；
+      而**同时接管会抢**（两边各查各的 `alive()`，之间有窗口 ⟹ 可能双开
+      写同一 `outputs/` ⟹ 读数作废）。
+      ⟹ 划界比抢或等都好：driver 继续管它那一条，本波管它不碰的 7 条。
+
+    ★ 为什么**不等 driver 退出**：实测 driver 卡在 hist 门 `2<2`，要 ~108 分钟
+      才会放下 s44 再退出；而本波的门**现在就能过**。等它 = 让 gae90 白等
+      108 分钟、机器闲置 40–70 GB ⟹ 违反用户"把电脑性能吃满"的指示。
     """
     out = []
-    if phase == "A":
-        out.append(("hist32_s44", HIST_CFGS, "hist", UPDATES, None))
     if phase in ("A", "B"):
         for s in SEEDS:
             if phase == "B":
@@ -319,30 +352,44 @@ def launch(name, cfgs, kind, nupd, resume) -> int:
     pr = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=logf,
                           stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                           start_new_session=True)
-    log("  已起 %s（%s，稳态 %.0f GB，%d 轮，起点 %s）"
+    log("  已起 %s（%s，稳态 %.0f GiB，%d 轮，起点 %s）"
         % (name, kind, steady_of(kind), nupd, os.path.basename(ck)))
     return pr.pid
 
 
-# ---------------------------------------------------------------- 等 driver
-def wait_driver() -> bool:
-    """等 wave263 的 driver **进程退出**。无歧义、无竞态（记忆
-    `plan-is-a-claim-about-the-world-recheck-at-launch`）。
-    ⚠ 不能用 `pkill -f` —— 在 `ssh host '...'` 里会杀掉自己。"""
-    def running() -> list[int]:
-        return [p for p in _pids() if DRIVER_RE.search(cmdline(p))]
+# ---------------------------------------------------------------- 与 driver 划界
+DRIVER_LOG = "/tmp/wave263_driver.log"
+_DRIVER_STATIC = {                      # launch_wave263.py 的 ARMS（已从服务器抄回核对）
+    "ent01_rerun_s42", "ent01_rerun_s43", "ent01_rerun_s44",
+    "hist32_s42", "hist32_s43", "hist32_s44",
+}
 
-    if not running():
-        log("wave263 的 driver 已不在（可能早已退出）")
-        return True
-    log("等 wave263 的 driver 退出（它卡在 hist 门 2<2，还要放 hist32_s44）…")
-    for _ in range(720):                      # 最多等 6h
-        if not running():
-            log("driver 已退出 ✓ —— 本脚本现在是唯一启动器")
-            return True
-        time.sleep(30)
-    log("⚠ 等 driver 超时（6h），它还在跑 —— **不启动**（宁可漏跑，不冒险 OOM）")
-    return False
+
+def driver_arms() -> set[str] | None:
+    """wave263 driver 管的**全部**臂名。
+
+    ★ 第一版写成"从日志里读它**还没放**的臂"（正则 `候选 (\\S+?)（`），
+    **那是错的**：driver 日志是**累积**的，每一轮把 6 个臂全打一遍 ⟹ 这个正则
+    返回的是它的**全部 ARMS**，不是"待放"。名字与行为不符，而且随着它放臂，
+    返回值**不变** ⟹ 用它做划界会在错误的集合上做对的事（本例恰好安全，
+    因为它本来就不是本波的臂 —— 但那是**巧合**，不是设计）。
+
+    ⟹ 改成直接返回它的全部 ARMS（日志里的候选 ∪ 静态表），并把真正的判据
+      换成**集合不相交**：只要两边臂名不交，就不可能双开同一条臂；
+       这比"猜它还要放什么"是**更强且更可查**的不变量。
+    返回 None 表示日志读不到 ⟹ 调用方**必须停下**（不许猜）。
+    """
+    try:
+        with open(DRIVER_LOG, encoding="utf-8", errors="replace") as f:
+            txt = f.read()
+    except OSError:
+        return None
+    return _DRIVER_STATIC | set(re.findall(r"候选\s+(\S+?)（", txt))
+
+
+def driver_alive() -> list[int]:
+    """⚠ 用**字符类**避开自匹配（`pkill -f` 在 `ssh host '...'` 里会杀掉自己的教训）。"""
+    return [p for p in _pids() if DRIVER_RE.search(cmdline(p))]
 
 
 # ---------------------------------------------------------------- 主循环
@@ -364,10 +411,40 @@ def main(argv: list[str]) -> int:
     if not preflight(arms):
         return 1
 
-    if phase == "A" and not wait_driver():
-        return 1
+    # ---------- 与 wave263 的 driver 划界（**不等它退出**，见 arms_for 的说明）----
+    if phase == "A":
+        d_alive = driver_alive()
+        d_arms = driver_arms()
+        if d_arms is None:
+            log("✗ 读不到 driver 日志 %s ⟹ 无法知道它管哪些臂 ⟹ **不启动**。"
+                "（不许猜：猜错就可能与它抢同一条臂，双开写同一 outputs）" % DRIVER_LOG)
+            return 1
+        mine = [a for a in arms if a[0] not in d_arms]
+        theirs = [a for a in arms if a[0] in d_arms]
+        # ★★ 断言两个集合**不相交** —— 这才是有边界效应的不变量。它可直接查验，
+        #    不依赖"我猜它对不对"。相交就停：那种情况下的"让"或"抢"都会双开。
+        overlap = {a[0] for a in arms} & d_arms
+        if overlap:
+            log("✗ 本波的臂与 driver 的臂**相交**：%s ⟹ **不启动**（会双开同一条臂）"
+                % "、".join(sorted(overlap)))
+            return 1
+        if d_alive:
+            log("wave263 的 driver 仍在跑（pid %s）⟹ **划界不抢**：它管 %s；本波管 %s"
+                % (",".join(map(str, d_alive)),
+                   "、".join(sorted(d_arms)), "、".join(a[0] for a in mine) or "(无)"))
+            arms = mine
+            if not arms:
+                log("本波无臂可起（全归 driver）—— 写标记退出")
+                open(go, "w").write("noop-all-driver\n")
+                return 0
+        else:
+            log("driver 已不在 ⟹ 本波是唯一启动器（它那 %d 条归它，本波不碰）"
+                % len(d_arms))
+        if theirs:
+            log("  （本波按设计不含：%s —— 归 driver）"
+                % "、".join(a[0] for a in theirs))
 
-    # ★★ 待起清单必须**在等完 driver 之后**才算 —— 不是之前。
+    # ★★ 待起清单必须**在划界之后**才算 —— 不是之前。
     #   实测教训：`hist32_s44` 在启动时还没被 driver 放出来（所以它在 todo 里），
     #   等 driver 退出时，driver **已经把它起了**。若拿等之前的快照去起，就会
     #   **两份进程写同一个 outputs/** ⟹ 读数作废（记忆
@@ -401,7 +478,7 @@ def main(argv: list[str]) -> int:
 
         progressed = False
         for i, (name, cfgs, kind, nupd, resume) in enumerate(list(todo)):
-            avail = avail_gb()
+            avail = avail_gib()
             pend = pending_growth(runs)
             inc, absolute, _p, other = two_views(runs, kind)
             hist_ok = (kind != "hist") or (n_hist < MAX_HIST)
@@ -412,9 +489,10 @@ def main(argv: list[str]) -> int:
                 "、".join("%s(%.1fG,u=%d)" % (n, p, updates_done(n))
                           for n, _k, p in runs) or "无"))
             log("  MemTotal %.1f ｜ MemFree %.1f ｜ MemAvailable %.1f ｜ 其它占用 %.1f"
-                % (memtotal_gb(), memfree_gb(), avail, other))
-            log("  待涨量 %.1f GB（在跑的还没涨到稳态的部分，**隐形**）" % pend)
-            log("  候选 %s（%s，%d 轮，稳态 %.0fG）：" % (name, kind, nupd, steady_of(kind)))
+                "   （单位一律 **GiB**）"
+                % (memtotal_gib(), memfree_gib(), avail, other))
+            log("  待涨量 %.1f GiB（在跑的还没涨到稳态的部分，**隐形**）" % pend)
+            log("  候选 %s（%s，%d 轮，稳态 %.0fGiB）：" % (name, kind, nupd, steady_of(kind)))
             log("    视角A·增量：可用 %.1f − 待涨 %.1f − 本臂 %.0f = %.1f ≥ %.0f ? %s"
                 % (avail, pend, steady_of(kind), inc, FLOOR, inc >= FLOOR))
             log("    视角B·绝对：MemTotal − 其它 − Σ**全部**稳态 = %.1f ≥ %.0f ? %s"
