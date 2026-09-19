@@ -22,8 +22,49 @@
 # 逐轮 update_s 也无一塌陷（早停的指纹）。所以那句错误描述**没有影响读数**，
 # 但错误的代码语义描述必须改 —— 它会在真正需要按它判断时把人带偏。
 #
-# 用法（排在 train_full_rl.yaml 之后）：
-#   --configs rl_algorithm.yaml train_full_rl.yaml train_safe_ep2.yaml
+# 用法（★ 必须排在 train_ent01.yaml **之后**，否则跑在 ent=0.001 上）：
+#
+#   ★★ 2026-09-19 修：本行原先写的是
+#      `--configs rl_algorithm.yaml train_full_rl.yaml train_safe_ep2.yaml`
+#      —— **漏了 train_ent01.yaml**，那样得到的操作点是 `entropy_coef: 0.001`，
+#      也就是本项目已判定为**错误值**的那一档（ent=0.001 时 RL ≈ 0.653、
+#      比专家低 4.5 点；ent=0.01 时 ≈ 0.7178、比专家高 2 点）。
+#      按那行跑出来的 ep2 读数会与对照臂 ent01_t8_* 差**两个**旋钮，
+#      不是单参数 A/B。**用法行写在注释里没人会查，所以必须是对的。**
+#
+#   OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 /opt/qkd/venv/bin/python -u \
+#       scripts/train/train_graph_mappo.py \
+#       --configs rl_algorithm.yaml train_full_rl.yaml train_ent01.yaml \
+#                 train_safe_ep2.yaml \
+#       --checkpoint outputs/supervised_pg_phased/supervised_pg_phased_latest.pt \
+#       --seed 42 --num-updates 30 --run-name ep2_s42
+#
+# ### 为什么现在重跑（旧读数为什么不算）
+#
+# r4 那批 ep2 读数**不可用**：跑在播种修复之前、每臂 1 个种子、outputs 已丢失；
+# 有效的只有诊断场景那一半，而本项目自己最重要的方法论结论就是
+# 「诊断场景只能筛能不能学，**不能用来定哪个配置更好**」。
+#
+# ### 机理（正对已记的病症，但**先验仍然只是"有戏"不是"会赢"**）
+#
+# 已记：一轮只做一次梯度步，而**那一步把策略分布只挪了 0.1%**
+# （kl≈0.001–0.004，`clip_eps=0.1` 与 `target_kl=0.02` 因此**从未激活**）。
+# `epochs: 2` 就是在同一批数据上把步数翻倍 —— 唯一正对"步长太小"的旋钮里
+# 成本最低的一个（不动张量形状 ⟹ 不需要 BC 起点迁移）。
+#
+# ### 代价必须算进判据
+#
+# epochs=2 每轮跑两遍 minibatch。`update` 占一轮 ~75%，所以单轮墙钟约 ×1.75，
+# 90 轮时实测比其他臂晚 1 小时（3.9h vs 2.9h）。
+# ⟹ **若只是打平，在预算上是亏的**。判据不能只看 Δ，还要看"同预算下谁更高"。
+#
+# ### 判据（跑之前写死）
+#
+# 对照 `ent01_t8_s{42,43,44}`，8 线程，n=3（df=2，临界 4.303）。
+#   |Δ| 可测（t>4.303）⟹ 有结论，且须同时报墙钟代价；
+#   否则一律报「以 n=3 测不出」，**不报「没影响」**。
+# 起臂后必须跑 `scripts/diag/audit_arm_vs_control.py` 核对运行时线程数
+# 与唯一差异是不是 `train.ppo.epochs`（本波已因配置名猜错而报过假警）。
 train:
   ppo:
     epochs: 2
