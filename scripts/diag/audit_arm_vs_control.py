@@ -38,17 +38,35 @@ import yaml
 OUT = Path("/opt/qkd/graph_mappo/outputs")
 
 # 这些字段**允许**不同（本来就该随臂变）；其余任何不同都要报出来。
+#
+# ★★ 2026-09-19 二次修：这份名单原先的 `train.*` 条目是**照着文档猜的**，
+#   真实 resolved 结构是 `train.ppo.*` / `train.optimizer.*`
+#   （`train.learning_rate` / `train.critic_learning_rate` /
+#    `train.entropy_coef` / `activation_window.start_day` **一个都不存在**）。
+#   后果：本脚本自写出来起就对本该放行的差异**报假警**——
+#   第一次用（actor_lr 波）就报「✗ 1/1 臂有问题」，而那唯一差异
+#   正是要做实验的那个旋钮。假警会让真警被忽略，
+#   所以白名单**不再猜**，键名从 `.tmp/dump_keys.py` 的 dump 里抄。
 ALLOWED_DIFF = {
-    "train.gae_lambda", "train.entropy_coef", "train.clip_eps",
-    "train.learning_rate", "train.critic_learning_rate", "train.epochs",
-    "train.minibatch_size", "train.value_coef", "train.max_grad_norm",
-    "train.target_kl", "train.normalize_advantages", "train.num_updates",
+    # —— 算法旋钮（真实路径）——
+    "train.gae_lambda", "train.gamma",
+    "train.ppo.entropy_coef", "train.ppo.clip_eps", "train.ppo.epochs",
+    "train.ppo.minibatch_size", "train.ppo.value_coef",
+    "train.ppo.max_grad_norm", "train.ppo.target_kl",
+    "train.ppo.normalize_advantages", "train.ppo.batch_chunk",
+    "train.ppo.clip_per_role",
+    "train.optimizer.actor_lr", "train.optimizer.critic_lr",
+    "train.num_updates", "train.n_rollout_workers",
+    # —— 训练窗口（真实路径是 env.activation_window_*）——
+    "env.activation_window_start_day", "env.activation_window_end_day",
+    "env.activation_window_days",
+    # 保留旧写法，防止别处的配置链吐出来的是这一种
     "activation_window.start_day", "activation_window.end_day",
-    "runtime.run_name", "runtime.seed", "train.seed", "seed",
-    "project.run_name", "run_name",
-    # 种子字段：正常的配对用法里 arms 与 ctrl 同种子，这些不会差；
-    # 但拿它跨种子比（例如核对两条不同种子的臂）时该放行。
+    # —— 身份/种子字段：正常配对时两侧相同，不会触发；
+    #    跨种子核对（例如拿 s43 比 s42 的配置）时该放行 ——
+    "project.run_name", "runtime.run_name",
     "seed.env_seed", "seed.global_seed", "seed.rollout_seed",
+    "validation.request_seeds",
 }
 
 # 这些字段**看起来**像差异其实不是（同一配置的两种写法）；但也别静默放过，
