@@ -64,17 +64,20 @@ PREREG_T = 3.61
 def read_run(path: Path):
     """→ {轮号: mean_success_rate}。
 
-    轮号 = **该 eval 行之前累计的 `update` 条数**（不是 `update` 的值、更不是
-    行号）。依据：`eval_validation` 行**没有 `update` 键**，而续跑会把计数器
-    归零后**追加**同一文件 ⟹ 只能按文件顺序数（记忆
-    `eval-update-number-not-from-position`）。
+    ★★ 轮号 = **该 eval 行前面最近那个非 eval 行的 `update` 值**。
 
-    ⚠ 实测坑：`gae90_n5_s45` 是「跑到 u5 崩掉（**没来得及写 EVAL**）+ 从 u5
-    续跑」，文件里 `upd[1..5]` 与 `upd[6..10]` **拼成连续一块** ⟹ 第一个 EVAL
-    落在**累计 10 = u10**，而它的对照从 u5 就有 EVAL ⟹ 本函数按累计数取键，
-    天然做到**错一位配对**，不会把 u10 当 u5。
+    这是**唯一正确**的规则，三条错法都已在别处踩过（记忆
+    `eval-update-number-not-from-position`）：
+      - 用 `seq * eval_interval` → 续跑臂整体错位；
+      - 用"累计行数" → 对从头跑的臂碰巧对，对续跑臂错
+        （续跑的 `update` **续着编**：实测 `ent01_s42_u30to50` 是 31…50，
+        不是 1…20；计数器不归零，见 `mappo_trainer.py:1319`）；
+      - 用 `update` 的顺序位置 → 同上。
+
+    续跑又是**追加**（`open("a")`，`mappo_trainer.py:1517`）而非重开，
+    所以续跑段与前段在文件里**看起来是连续的**，错法不容易暴露。
     """
-    out, n = {}, 0
+    out, last = {}, None
     with path.open(encoding="utf-8", errors="replace") as f:
         for ln in f:
             ln = ln.strip()
@@ -84,10 +87,13 @@ def read_run(path: Path):
                 o = json.loads(ln)
             except Exception:
                 continue
-            if "eval_validation" in o:
-                out[n] = o["eval_validation"]["mean_success_rate"]
-            elif "update" in o:
-                n += 1
+            if "update" in o:
+                last = int(o["update"])
+            elif "eval_validation" in o and last is not None:
+                if last % 5 != 0:
+                    print("  !! %s 的 eval 落在 update=%d（非 5 的倍数）"
+                          "⟹ 轮号规则存疑" % (path.parent.name, last))
+                out[last] = o["eval_validation"]["mean_success_rate"]
     return out
 
 
