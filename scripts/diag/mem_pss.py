@@ -126,18 +126,39 @@ def main(argv: list[str]) -> int:
     for pid, cmd in cmds.items():
         if "python" not in cmd:
             continue
-        g = ancestor_run(pid)
-        if not g:
-            continue
         v = pss_of(pid)
         if v <= 0:
+            continue
+        # ★★ 孤儿必须**在归属判定之外**单独收（2026-09-21 修正）。
+        #
+        #   旧实现把它写在 `if not g: continue` **之后**：
+        #       g = ancestor_run(pid)      # 走到 ppid<=1 ⟹ return ""
+        #       if not g: continue         # ⟹ 孤儿在这里就被丢掉了
+        #       ...
+        #       if ppid_of(pid) == 1 and ...:   # ← 永远够不到
+        #   而孤儿**按定义**就是 `PPid==1`，`ancestor_run()` 一走到 `ppid<=1`
+        #   就 `return ""` ⟹ **两个条件互斥** ⟹ `orphans` **恒为空**，
+        #   整块孤儿告警是**死代码**。
+        #
+        #   同族三连（都是「条件被周围代码变成不可达」）：
+        #     `gate-must-print-its-inputs` —— 恒真的门不报错
+        #     B-8（本文件）—— 两个"独立"视角其实是同一个量
+        #     本条 —— 恒空的告警器
+        #   代价不抽象：CLAUDE.md 记着**每发生一次 OOM 就新增约 9 GB 孤儿**、
+        #   且孤儿**会继续空转不退出**，而当时唯一的告警器永远不会响。
+        if ppid_of(pid) == 1 and "multiprocess" in cmd:
+            # worker 自身 cmdline 里**没有 run-name**，**别试图从它自证归属**
+            # （记忆 `oom-orphan-workers`）—— 只报总量，不硬塞给某个 run。
+            # 若那个 run 之后被重启，硬塞会把它算成"在跑且占 9G"的假象。
+            orphans["(未归属 · 孤儿 worker)"] += v
+            total_pss += v          # 孤儿**确实在吃内存**，必须进合计
+            continue                # 但不进 groups：孤儿不随轮数增长
+        g = ancestor_run(pid)
+        if not g:
             continue
         total_pss += v
         groups[g] += v
         counts[g] += 1
-        # 孤儿：PPid==1 的 worker —— OOM 的**结果**，不该混进活跃 run 的账
-        if ppid_of(pid) == 1 and "multiprocess" in cmd:
-            orphans[g] += v
 
     mi = meminfo()
     print("=" * 74)

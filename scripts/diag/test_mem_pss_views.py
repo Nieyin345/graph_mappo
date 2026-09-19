@@ -178,5 +178,76 @@ check("正对照：非空分支仍在说『可以安全跑完』", "可以安全
 
 print()
 print("=" * 78)
+print("6. ★★ 孤儿告警**恒为空**（子代理漏报；本文件核查时发现）")
+print("=" * 78)
+# 机制：孤儿按定义 PPid==1；而 ancestor_run() 一走到 ppid<=1 就 return ""
+# ⟹ 「是孤儿」与「能被归属」**互斥**。旧代码把孤儿统计写在
+# `if not g: continue` **之后** ⟹ 永远够不到 ⟹ orphans 恒为空。
+#
+# 用**模拟两种次序**造反证（不是只 grep 源码）：
+PSS = {"trainer": 14.0, "worker_ok": 1.1, "worker_orphan": 1.1, "worker_orphan2": 1.1}
+# ★ 关键前提：**活着的 worker 的 PPid 是 trainer 的 pid，不是 1**；只有孤儿
+#   才 PPid==1。第一版我把 worker_ok 也写成 PPid==1 ⟹ 它被误判成孤儿
+#   ⟹ 「旧次序恒为空」测不出来。**夹具错了，断言就测到反面。**
+PPID = {"trainer": 1, "worker_ok": 4242,          # 4242 = trainer 的 pid
+        "worker_orphan": 1, "worker_orphan2": 1}
+# worker_ok 的祖先链到 trainer；两个 orphan 直接挂 init（PPid==1）。
+# trainer 自己就命中 `--run-name` ⟹ 它的 ancestor 就是它自己那条臂
+# （真实代码里 `ancestor_run()` 的 `if cur in owner: return owner[cur]`）。
+ANCESTOR = {"trainer": "arm_x", "worker_ok": "arm_x",
+            "worker_orphan": "", "worker_orphan2": ""}
+IS_MULTIPROCESS = {"worker_orphan": True, "worker_orphan2": True, "worker_ok": True}
+IS_PY = {k: True for k in PSS}
+
+
+def simulate(orphan_inside_guard):
+    """orphan_inside_guard=True 复刻旧次序（孤儿在 `if not g: continue` 之后）。"""
+    groups, orphans, total = {}, {}, 0.0
+    for pid in PSS:
+        if not IS_PY[pid]:
+            continue
+        v = PSS[pid]
+        if v <= 0:
+            continue
+        if not orphan_inside_guard:
+            if PPID[pid] == 1 and IS_MULTIPROCESS.get(pid):
+                orphans[pid] = v
+                total += v
+                continue
+        g = ANCESTOR[pid]
+        if not g:
+            continue                      # ← 旧实现把孤儿丢在这里
+        total += v
+        groups[pid] = v
+        if orphan_inside_guard:
+            if PPID[pid] == 1 and IS_MULTIPROCESS.get(pid):
+                orphans[pid] = v          # ← 永远够不到
+    return groups, orphans, total
+
+
+g_old, o_old, t_old = simulate(orphan_inside_guard=True)
+g_new, o_new, t_new = simulate(orphan_inside_guard=False)
+check("旧次序：**孤儿恒为空**（告警是死代码）", len(o_old), 0)
+check("新次序：孤儿被抓到（2 个 worker）", len(o_new), 2)
+check("新次序：孤儿进入合计（14.0 + 3×1.1 = 17.3）", round(t_new, 1), 17.3)
+check("旧次序漏掉孤儿的内存（合计只有 15.1）", round(t_old, 1), 15.1)
+check("★ 两个次序的合计**必须不同**——否则这个测试测不出东西",
+      round(t_old, 1) != round(t_new, 1), True)
+
+# 源码层：孤儿的判据必须在 ancestor_run 之前（否则不可达）
+i_orph = live.find("ppid_of(pid) == 1")
+i_anc = live.find("g = ancestor_run(pid)")
+check("源码：孤儿判据**先于**归属判定（否则恒不可达）",
+      0 < i_orph < i_anc, True)
+check("源码：孤儿用独立桶名，不硬塞给某个 run",
+      '(未归属 · 孤儿 worker)' in live, True)
+# ⚠ `live` 是**去注释**的视图（`l.split("#")[0]`）⟹ 断言里不能含 `#` 注释文本，
+#   否则在构造上不可能为真。要断言注释得读**原始**源码。
+_raw = SRC.read_text(encoding="utf-8")
+check("源码：孤儿进 total_pss（确实在吃内存）",
+      "total_pss += v" in live and "# 孤儿" in _raw, True)
+
+print()
+print("=" * 78)
 print("全部通过 ✓" if _ok[0] else "**有失败 ✗**")
 sys.exit(0 if _ok[0] else 1)
