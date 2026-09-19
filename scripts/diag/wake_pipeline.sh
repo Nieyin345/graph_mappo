@@ -65,10 +65,31 @@ while true; do
       printf '%s\n' "$OUT" | grep -E "^(PAIR ${w}_s|VERDICT ${w} )" || true
       SEEN[$w]=2
     elif [ "$prev" -eq 3 ] && [ "$alive" -gt 0 ] && [ "$alive" -lt 3 ]; then
-      # 曾见过 3 个在跑，现在少了但没归零 → 异常
-      echo "ALERT ${w} 有 run 提前消失（3 → ${alive}），疑似被杀/OOM"
-      echo "  仍存活：$RUNNING"
-      printf '%s\n' "$OUT" | grep -E '^(MEM|PAIR|VERDICT) ' || true
+      # 曾见过 3 个在跑，现在少了但没归零 → **先分辨正常收尾与被杀**。
+      # 三个 run 隔 10s 依次启动，结束时刻也差 ~10s，所以"3 → 2"
+      # 在每次正常收尾时都会出现。判据同 wake_parse.py：正常结束有
+      # checkpoint_final.pt + 日志 `Final: UpdateStats`。
+      # ⚠ wake_wave.sh 初版漏了这一层，vcoef1 正常跑完时报了"疑似被杀/OOM"。
+      killed=""
+      for s in $SEEDS; do
+        n="${w}_s${s}"
+        case " $RUNNING " in *" $n "*) continue;; esac
+        d="/opt/qkd/graph_mappo/outputs/$n"
+        if [ -f "$d/checkpoint_final.pt" ] \
+           && grep -q "Final: UpdateStats" "/tmp/$n.log" 2>/dev/null; then
+          continue
+        fi
+        killed="$killed $n"
+      done
+      if [ -z "$killed" ]; then
+        echo "PARTIAL ${w}: 3 → ${alive}，消失的都是**正常收尾**，继续等"
+        SEEN[$w]=1
+      else
+        echo "ALERT ${w} 有 run 提前消失且**非正常收尾**（3 → ${alive}）"
+        echo "  疑似被杀/OOM：$killed"
+        echo "  仍存活：$RUNNING"
+        printf '%s\n' "$OUT" | grep -E '^(MEM|PAIR|VERDICT) ' || true
+      fi
     elif [ "$alive" -eq 3 ]; then
       SEEN[$w]=3
     elif [ "$alive" -gt 0 ]; then

@@ -44,9 +44,33 @@ while true; do
     exit 0
   fi
 
-  # 部分消失 = 异常（本波应当三个同时在跑或三个同时结束）
+  # 部分消失：**先分辨"正常跑完"与"被杀"**，别一律报事故。
+  # 三个 run 是隔 10s 依次启动的，所以结束时刻也差 ~10s ——
+  # "3 → 2" 这种读数在**每次正常收尾**时都会出现一次。
+  # 判据（与 wake_parse.py 同款）：正常结束会有 checkpoint_final.pt
+  # 且日志里有 `Final: UpdateStats`。
+  # ⚠ 本文件初版没有这一层，于是 vcoef1 正常跑完时报了"疑似被杀/OOM"。
+  # 误报的代价是真实的：它训练我去忽视 ALERT，而 ALERT 是唯一的事故信号。
   if [ -n "$PREV" ] && [ "$alive" -lt "$PREV" ]; then
-    echo "ALERT ${WAVE} 有 run 提前消失（$PREV → $alive），疑似被杀/OOM"
+    killed=""
+    for s in 42 43 44; do
+      n="${WAVE}_s${s}"
+      case " $RUNS " in *" $n "*) continue;; esac   # 还活着，跳过
+      d="/opt/qkd/graph_mappo/outputs/$n"
+      if [ -f "$d/checkpoint_final.pt" ] \
+         && grep -q "Final: UpdateStats" "/tmp/$n.log" 2>/dev/null; then
+        continue                                   # 正常收尾
+      fi
+      killed="$killed $n"
+    done
+    if [ -z "$killed" ]; then
+      echo "PARTIAL ${WAVE}: ${PREV} → ${alive}，消失的都是**正常收尾**，继续等"
+      PREV="$alive"
+      sleep 90
+      continue
+    fi
+    echo "ALERT ${WAVE} 有 run 提前消失且**非正常收尾**（$PREV → $alive）"
+    echo "  疑似被杀/OOM：$killed"
     echo "  仍存活：$RUNS"
     printf '%s\n' "$OUT" | grep -E "^(MEM|PAIR|VERDICT) " || true
     exit 0
