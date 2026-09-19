@@ -60,9 +60,21 @@ UPDATES = 30
 STEADY = 25.0      # GB/run 稳态（本配置实测 23.8~25.0）
 FLOOR = 17.0       # GB 绝对余量下限
 THREADS = "8"
-NEED = len(QUEUE) * STEADY + FLOOR
 LOG = "/tmp/gae90_n5.log"
 VERDICT = "/tmp/gae90_n5_verdict.txt"
+
+
+def need_for(n_left):
+    """还差 `n_left` 条没起时，放行**下一条**需要的可用量。
+
+    ★ 必须随「已起臂数」递减，不能写成 `len(QUEUE) * STEADY + FLOOR` 这样的常量。
+    起完第一条后，那条臂会从 ~4G 爬到稳态 25G，而**这段已经计入 `grow`**
+    （本波起的臂同样出现在 `live_runs()` 里）。若 NEED 里再算一份 25G，
+    同一个 25G 就被算了两遍 ⟹ **余量永远差 25G ⟹ 剩下的臂一辈子起不来**。
+    我第一版就是这么写的，幸好在一条都没起时发现（记忆
+    `gate-must-print-its-inputs`：门必须打印输入，打印出来才看得出来）。
+    """
+    return (n_left - 1) * STEADY + FLOOR
 
 # 判读口径（预注册，跑之前写死）
 CTRL_RUNS = {42: "ent01_rerun_s42", 43: "ent01_rerun_s43", 44: "ent01_rerun_s44",
@@ -178,18 +190,19 @@ def last_update(run):
 
 # ---------------------------------------------------------------- 门
 
-def gate():
+def gate(n_left):
     """返回 (是否放行, 说明)。**必须打印输入**。"""
+    need = need_for(n_left)
     a = avail()
     runs = live_runs()
     n = len(runs)
     # 待涨量：刚起的 run 从当前 PSS 爬到稳态，这段是隐形的
     grow = sum(max(0.0, STEADY - p) for _, _, p in runs)
-    margin = a - grow - NEED
+    margin = a - grow - need
     detail = ("可用 %.1fG ｜ 在跑 %d 条(合计%.1fG) ｜ 待涨 %.1fG ｜ "
-              "本波需 %.1fG(%d×%.0f+余量%.0f) ｜ **余量 %.1fG**"
-              % (a, n, sum(p for _, _, p in runs), grow, NEED,
-                 len(QUEUE), STEADY, FLOOR, margin))
+              "本波剩余 %d 条需 %.1fG(%d×%.0f+余量%.0f) ｜ **余量 %.1fG**"
+              % (a, n, sum(p for _, _, p in runs), grow, n_left, need,
+                 max(0, n_left - 1), STEADY, FLOOR, margin))
     return margin >= 0, detail
 
 
@@ -391,9 +404,13 @@ def verdict():
 # ---------------------------------------------------------------- 主流程
 
 def main():
-    log("gae90 n=5 链启动 ｜ 队列 %d 条 %s ｜ 放行需 **Need=%.1fG**"
-        % (len(QUEUE), [q[0] for q in QUEUE], NEED))
-    log("  门要求：可用 − 待涨 − %.1f >= %.1f" % (NEED, FLOOR))
+    log("gae90 n=5 链启动 ｜ 队列 %d 条 %s" % (len(QUEUE), [q[0] for q in QUEUE]))
+    log("  门要求（放行**下一条**）：可用 − 待涨 − need(剩余条数) >= %.1f" % FLOOR)
+    log("  need(n_left) = (n_left−1)×%.0f + %.0f  ⟹ 起一条就降一条" % (STEADY, FLOOR))
+    log("  ★ 为什么不写成 4×%.0f+%.0f=%.0f 的常量：已起臂的爬坡量已计入「待涨」，"
+        % (STEADY, FLOOR, len(QUEUE) * STEADY + FLOOR))
+    log("    常量写法会把它**算两遍** ⟹ 余量永远差 %.0fG ⟹ 剩下的臂一辈子起不来"
+        % STEADY)
 
     # 前置检查
     if not os.path.exists(os.path.join(ROOT, CKPT)):
@@ -411,7 +428,8 @@ def main():
     launched = []
     t0 = time.time()
     while len(launched) < len(QUEUE) and time.time() - t0 < 5 * 3600:
-        ok, detail = gate()
+        n_left = len(QUEUE) - len(launched)
+        ok, detail = gate(n_left)
         fs = fs_runs()
         log("  门：%s" % detail)
         log("  交叉验证：/proc 数到 %d 条 ｜ 文件系统数到 %d 条 %s"
