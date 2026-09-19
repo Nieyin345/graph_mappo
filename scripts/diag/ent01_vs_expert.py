@@ -21,10 +21,22 @@
 u25–u30 已被证实是平台区（见日志 u50 判决那节）。所以这里把 **u20/u25/u30**
 三个点都算出来 —— 若只有某一个点显著，那是挑点；若尾部一致，才是真的。
 
-用法（服务器上）：python scripts/diag/ent01_vs_expert.py
+用法（服务器上）：
+    python scripts/diag/ent01_vs_expert.py                     # 默认 ent01_s{42,43,44}
+    python scripts/diag/ent01_vs_expert.py --runs ent01_rerun_s{42,43,44}
+
+### ★★ 2026-09-19 补充：默认的 `ent01_s*` 与 `ent01_t8_*` 是**跨节点搬来的**
+
+`ent01_s{42,43,44}` / `ent01_t8_s{42,43,44}` 跑在**旧节点 amd238（EPYC 7402P）**，
+硬件偏置 **+0.0197**（已用两种独立方法测出同一个数，见
+`docs/训练诊断记录.md`「★★★ 重标定终判」）。用它当基线会把偏置读成"RL 赢了专家"。
+
+**本节点、8 线程的干净基线是 `ent01_rerun_s{42,43,44}`**（或第五波之后的 `ent01_s*` 重跑）。
+所以本脚本加了 `--runs` 参数，比较任何臂之前先确认基线是新节点跑的。
 """
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import statistics
@@ -33,6 +45,14 @@ from pathlib import Path
 OUT = Path("/opt/qkd/graph_mappo/outputs")
 EXPERT = OUT / "eval" / "expert_seeds100_240.json"
 SEEDS = [42, 43, 44]
+
+_ap = argparse.ArgumentParser(description="RL vs 专家：跨训练种子分母（正确的那个）")
+_ap.add_argument("--runs", default="ent01",
+                 help="臂名前缀，脚本会拼成 <runs>_s{42,43,44}。"
+                      "★ 本节点的干净基线是 ent01_rerun；ent01 / ent01_t8 是跨节点搬来的，"
+                      "含 +0.0197 硬件偏置。")
+ARGS = _ap.parse_args()
+STEM = ARGS.runs
 
 
 def t_crit(df: int, p: float = 0.975) -> float:
@@ -119,9 +139,10 @@ seeds = sorted(ex)
 base = [ex[s] for s in seeds]
 print(f"专家 @ 种子 {seeds[0]}-{seeds[-1]}（n={len(seeds)}）")
 print(f"  均值 = {statistics.mean(base):.4f}   SD = {statistics.stdev(base):.4f}")
+print(f"  待判臂: {STEM}_s{SEEDS}")
 print()
 
-pts = {s: points(f"ent01_s{s}") for s in SEEDS}
+pts = {s: points(f"{STEM}_s{s}") for s in SEEDS}
 for u in (15, 20, 25, 30):
     print(f"=== u{u} ===")
     deltas: list[float] = []
@@ -129,7 +150,7 @@ for u in (15, 20, 25, 30):
     for s in SEEDS:
         ps = pts[s].get(u)
         if ps is None or len(ps) != len(seeds):
-            print(f"  ent01_s{s}: 缺 u{u} 或长度不符")
+            print(f"  {STEM}_s{s}: 缺 u{u} 或长度不符")
             continue
         diffs = [ps[i] - base[i] for i in range(len(seeds))]
         md = statistics.mean(diffs)
@@ -137,7 +158,7 @@ for u in (15, 20, 25, 30):
         t = md / sed if sed else float("nan")
         deltas.append(md)
         valid_t.append(t)
-        print(f"  ent01_s{s}  均值 {statistics.mean(ps):.4f}  "
+        print(f"  {STEM}_s{s}  均值 {statistics.mean(ps):.4f}  "
               f"配对差 {md:+.4f} (评估侧 t={t:+.2f})")
     if len(deltas) < 2:
         print("  种子不足，跳过\n")
@@ -169,6 +190,6 @@ for u in (15, 20, 25, 30):
 
 print("=== 结论 ===")
 print("  判据是**跨训练种子的双侧 p < 0.05**（df=n−1 的 t 分布），不是 t>2。")
-print("  若尾部几轮一致显著，则『ent01 在验证 regime 达到/超过专家』成立；")
+print(f"  若尾部几轮一致显著，则『{STEM} 在验证 regime 达到/超过专家』成立；")
 print("  若只是方向一致但 p>0.05，只能说『**这次没测出显著差异**』——")
 print("  **不等于**『没有差异』（n=3 的功效本身就有限，见 scripts/diag/rho_measure.py）。")
