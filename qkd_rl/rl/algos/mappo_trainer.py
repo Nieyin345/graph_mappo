@@ -29,6 +29,18 @@ def _reset_module(module: torch.nn.Module) -> None:
         module.reset_parameters()
 
 
+def _mean_ratio(numerators, denominators) -> float:
+    """Sum(numerators) / Sum(denominators)，而不是逐项比值再平均。
+
+    为什么按**总和**算：密钥效率要的是"整局一共用了多少密钥服务了多少需求"，
+    这正是两个总量的比。逐项比值再平均会被小分母的局放大（有一局服务量很低时
+    它的比值会很大），把整体比拉偏。分母为 0 的局直接跳过。
+    """
+    num = sum(float(x) for x in numerators)
+    den = sum(float(x) for x in denominators)
+    return float(num / den) if den > 0 else 0.0
+
+
 # Minimum minibatches a PPO update must run before the KL early stop is allowed
 # to fire. With epochs=1 an early stop aborts the whole update, so letting the
 # very first minibatch decide throws away the entire epoch on one noisy draw.
@@ -1083,6 +1095,34 @@ class MAPPOTrainer:
             "per_seed_success": [
                 float(summary.get("success_rate", 0.0)) for summary in summaries
             ],
+            # 2026-09-19 新增：**密钥效率**也逐种子记下来。
+            #
+            # 为什么（实测驱动，不是预防性加字段）：训练侧 `rollout_debug.jsonl`
+            # 显示 RL 的密钥生成量单调掉 41%，而 `mean_reward_generated = 0`、
+            # success_rate 与 reward 都不动 —— 奖励有一个很大的零空间。
+            # 后来在**同一验证 regime**上把专家并排量，才判定那是**漂对了**：
+            # RL 比专家省 36.5% 的密钥（3 个训练种子 22/42/45%，逐个 15/15 同向）
+            # 而服务量不降。见 docs/训练诊断记录.md「奖励看不见的行为漂移」。
+            #
+            # 但那个判定**当时做不了**，因为本函数只存 `per_seed_success`，
+            # 正好缺了发生漂移的那两维。补上后，训练过程中就能直接看到
+            # 密钥效率、不必事后补评估。`served/generated` 越大越省。
+            "per_seed_generated_keys": [
+                float(summary.get("generated_keys", 0.0)) for summary in summaries
+            ],
+            "per_seed_served_keys": [
+                float(summary.get("served_keys", 0.0)) for summary in summaries
+            ],
+            # 注意 `waiting_keys` 是**存量**：`episode_summary` 给的是整局均值
+            # （累加÷步数），可与 `rollout_debug.jsonl` 的 `mean_waiting_keys`
+            # 直接对照；不要与 `served_keys`（流量总量）混着比。
+            "per_seed_waiting_keys_mean": [
+                float(summary.get("waiting_keys_mean", 0.0)) for summary in summaries
+            ],
+            "mean_key_efficiency": _mean_ratio(
+                [summary.get("generated_keys", 0.0) for summary in summaries],
+                [summary.get("served_keys", 0.0) for summary in summaries],
+            ),
         }
 
     # ------------------------------------------------------------------- control
@@ -1137,6 +1177,14 @@ class MAPPOTrainer:
                         )
                         self._append_log({"eval_validation": val_stats}, log_path)
                         val_success = float(val_stats["mean_success_rate"])
+                        # 与 success_rate 并排打印密钥效率：实测 RL 省 36.5% 密钥，
+                        # 而这在 success_rate 上**完全看不见**。不打印出来，等于
+                        # 每轮都在丢掉一个已证实的优势信号（见 evaluate_validation）。
+                        print(
+                            f"  validation success={val_success:.4f} "
+                            f"key_eff={float(val_stats.get('mean_key_efficiency', 0.0)):.3f} "
+                            "(生成/服务，越低越省)"
+                        )
                         if val_success > self.best_validation_success:
                             self.best_validation_success = val_success
                             self.save_checkpoint(
