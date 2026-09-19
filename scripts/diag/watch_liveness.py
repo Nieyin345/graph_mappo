@@ -38,7 +38,24 @@
 ### 用法
     python scripts/diag/watch_liveness.py              # 只报（默认）
     python scripts/diag/watch_liveness.py --sample 20  # 改采样秒数
-退出码：0=全健康；1=有冻结的 run；2=有**在跑的**链在等已经死掉的臂；3=两者都有
+
+退出码：`rc` 是**位掩码**，另加两个**整值**的第三态：
+    0 = 全健康
+    1 = 有 run 冻结（或**进程在采样窗内消失**）
+    2 = 有**在跑的**链在等已经死掉的臂
+    3 = 上两者都有（1|2）
+    ★ 3 同时也是「**没有可判读的对象**」的专用码 —— 见下。
+
+★ 退出码 3 的**二义**是刻意保留的（2026-09-21）：`1|2` 与「0 条 run」
+在数值上撞车，但两者的**结论行不同**（一个说"有冻结/有链卡住"，
+一个说"无法判定"），而 `0 条 run` 在实操里只会出现在**停训期间**，
+不会与"既冻结又有链卡住"同时发生。真要消除二义得改成 4，但那会让
+"位掩码"这条更值钱的约定失效。**先记下这个取舍，别当成没想到。**
+
+★ 第三态为什么必要：原实现在 0 条 run 时走 `if runs and any(...)` 的短路，
+⟹ `rc = 0` ⟹ 打印「结论：全部健康（**0 条 run 在算**）」。**那是自相矛盾**：
+没在算的东西不可能"健康"。而在停训期间这恰恰是**最常见**的状态，
+于是一个本该喊"我什么都没看到"的工具，天天报"一切正常"。
 
 ★ 假警防护（实测踩过，务必保留）：
   · 链**不在跑**时，它的日志是**历史**，不能拿来判「永远等不到」——
@@ -104,30 +121,85 @@ def _ticks(pid):
 
 
 def rounds_and_age(run):
-    """(轮数, metrics.jsonl 年龄秒)。轮数 = 带 `update` 键的**行数**
-    （与链的 `last_update()` 同一口径 —— 必须一致，否则我这边的判读
-     和链的等待条件会对不上）。"""
+    """(轮号, metrics.jsonl 年龄秒)。**轮号 = 最后一个 `"update": N` 的值。**
+
+    ★★ 本函数原先数的是「带 `update` 键的**行数**」，注释还写着「与链的
+    `last_update()` 同一口径」—— 而两件事**都错了**：
+
+      1. `metrics.jsonl` **每轮不止一行**：`eval_validation` 行也占一行，且它
+         **没有 `update` 键**（`eval_interval=5` ⟹ 30 轮是 36 行）。数行数会
+         系统性多报 `轮数 // eval_interval`。实测：`ent01_rerun_s43` 报 34、
+         真值 30。
+      2. 链侧 `hist32_chain.last_update()` 当时**也**在数行数，所以「同一口径」
+         这句在当时成立，但**两边一起错**。链侧已改为按末个 `"update"` 读。
+
+    这里返回的轮号**直接驱动 `u >= target` 的完成判据**（`:332`），所以偏快
+    ⟹ 在本工具里报「✓ 已到 u30」，而链还在等 6 轮。
+
+    这是本项目在「拿位置/计数冒充身份」上的**第四次**复发（前三次：
+    按行号当轮号、按累计行数、`launch_g2.updates_done` 数行数）。
+    记忆 `eval-update-number-not-from-position`。
+    """
     p = os.path.join(ROOT, "outputs", run, "metrics.jsonl")
     n, age = -1, None
     try:
         age = time.time() - os.path.getmtime(p)
     except OSError:
         return -1, None
-    n = 0
+    n, last = -1, None          # last = 轮号；n 保留为「文件是否读得出」的信号
     try:
-        with open(p, encoding="utf-8") as f:
+        with open(p, encoding="utf-8", errors="replace") as f:
             for ln in f:
                 ln = ln.strip()
-                if not ln:
+                if not ln or '"update"' not in ln:
                     continue
                 try:
-                    if json.loads(ln).get("update"):
-                        n += 1
-                except ValueError:
-                    pass
+                    u = json.loads(ln)["update"]     # 没有该键的（eval 行）会 KeyError
+                except (ValueError, KeyError, TypeError):
+                    continue                          # 半行 / eval 行：跳过，不猜
+                try:
+                    last = int(u)
+                except (TypeError, ValueError):
+                    continue
     except OSError:
         pass
-    return n, age
+    return (last if last is not None else (-1 if not os.path.exists(p) else 0)), age
+
+
+def classify(delta, delta2=None, stale_after=None):
+    """把「一次采样 + 一次复采」映射成 `(kind, flag)`。**纯函数，可造反证。**
+
+    `kind ∈ {None, "frozen", "vanished"}`；`flag` 是给人看的后缀。
+
+    ★★ 为什么把它从打印循环里**拎出来**（2026-09-21）：
+    这条判据原先是**内联在打印循环里的一条 if/elif 链**，而 `rc` 又在
+    结论段**另算一遍**（`any(r.get("delta") == 0)`，用的是**首次**采样）。
+    于是「明细行说了什么」与「退出码怎么定」**各自漂移**，实测就漂了：
+    明细打印「疑似停顿（二次已恢复，**不报冻结**）」，结论却判有冻结、exit 1。
+
+    **判据一旦只能靠人读源码来确认，就一定会与它自己的打印分家。**
+    拎成纯函数之后，「判据」这件事有了**唯一的实现**（同族记忆：
+    `cross-check-must-compare-same-population` —— 口径只能有一个）。
+
+    参数语义（顺序要紧 —— `delta is None` 优先于 `delta == 0`）：
+      delta is None                ⟹ 进程在采样窗内消失（最严重，原实现漏报）
+      delta == 0 且 delta2 is None ⟹ 进程在**复采**窗口消失
+      delta == 0 且 delta2 == 0    ⟹ 冻结（两次连续 0 tick）
+      delta == 0 且 delta2  > 0    ⟹ 疑似停顿但已恢复 ⟹ **不报**
+      delta  >  0 且 stale_after   ⟹ 在算，但 metrics 不落盘（另一种故障）
+    """
+    if delta is None:
+        return "vanished", "  ✗**进程消失**（采样窗内）"
+    if delta == 0:
+        if delta2 == 0:
+            return "frozen", "  ✗**冻结**（两次采样均 0 tick）"
+        if delta2 is None:
+            return "vanished", "  ✗**进程在二次采样窗口消失**"
+        return None, ("  ·疑似停顿（首次 0，二次 %d tick ⟹ 已恢复，"
+                      "不报冻结）" % delta2)
+    if stale_after is not None:
+        return None, "  ⚠metrics 停滞 >%.0fs（进程在算，但结果没落盘）" % stale_after
+    return None, ""
 
 
 def scan():
@@ -274,25 +346,23 @@ def main():
                     else t3 - r["t2"]
 
         frozen = []
+        vanished = []
         for r, d in rows:
-            n, age = rounds_and_age(r["run"])
-            r["rounds"], r["age"], r["delta"] = n, age, d
+            # ★ 用 scan() 早先量到的轮号/年龄；**不要**在这里再读一次文件
+            #   （原实现每行调一次 `rounds_and_age`，与 scan() 那次读的
+            #   可能不是同一个瞬间 —— 又一次"同一个量两个实现"）。
+            n, age = r["rounds"], r["age"]
             base = ROUND_S["hist"] if "hist" in r["run"] else ROUND_S["default"]
-            stale = age is not None and age > base * STALE_FACTOR
-            flag = ""
-            if d is not None and d == 0:
-                d2 = reconfirm.get(r["run"])
-                if d2 == 0:
-                    flag = "  ✗**冻结**（两次采样均 0 tick）"
-                    frozen.append(r["run"])
-                elif d2 is None:
-                    flag = "  ⚠疑似冻结（二次采样进程消失）"
-                    frozen.append(r["run"])
-                else:
-                    flag = ("  ·疑似停顿（首次 0，二次 %d tick ⟹ 已恢复，"
-                            "不报冻结）" % d2)
-            elif stale:
-                flag = "  ⚠metrics 停滞 >%.0fs" % (base * STALE_FACTOR)
+            stale_after = base * STALE_FACTOR if (age or 0) > base * STALE_FACTOR \
+                else None
+            kind, flag = classify(d, reconfirm.get(r["run"]), stale_after)
+            r["kind"], r["flag"] = kind, flag
+            if kind == "frozen":
+                frozen.append(r["run"])
+            elif kind == "vanished":
+                vanished.append(r["run"])
+            r["frozen"] = kind == "frozen"
+            r["vanished"] = kind == "vanished"
             print("    %-18s %-8d %8.1f %6d %9s %10s%s"
                   % (r["run"], r["pid"], r["pss"], n,
                      ("%.0fs" % age) if age is not None else "--",
@@ -345,16 +415,36 @@ def main():
     # [3] 结论
     print("\n" + "=" * 88)
     rc = 0
-    if runs and any(r.get("delta") == 0 for r in runs):
+    # ★★ 判据一律以 `frozen` / `vanished` 为准，**不用 `delta == 0`**。
+    #   原实现用 `any(r.get("delta") == 0 ...)` 判冻结，而 `delta` 是**首次**
+    #   采样的结果 ⟹ 与明细行自相矛盾：明细写「疑似停顿（二次已恢复，不报冻结）」
+    #   而结论行写「有 run 冻结」、exit 1。**打印修了、判据没修**
+    #   （记忆 `later-sections-retract-earlier-ones`：别信"已修"，要求证代码）。
+    dead = [r["run"] for r in runs if r.get("frozen") or r.get("vanished")]
+    if dead:
         rc |= 1
     if blocked:
         rc |= 2
+    if not runs:
+        # ★ 「一条 run 都没有」不许说"健康" —— 那是自相矛盾（原实现会打印
+        #   「结论：全部健康（0 条 run 在算）」并 exit 0）。也不能报故障：
+        #   可能只是链还没放臂。所以是**第三态**：明确说"没有可判的对象"。
+        print("结论：**没有可判读的对象**（0 条 run 在跑）。"
+              "这既不是健康也不是故障 —— 无法判定。")
+        if blocked:
+            print("  但已有 %d 条链在等（见上），它们等的臂**当前不在跑**。" % len(waits))
+        print("=" * 88)
+        return 3
     if rc == 0:
         print("结论：全部健康（%d 条 run 在算，%d 条链没有在等死物）" % (len(runs), len(waits)))
     else:
         if rc & 1:
-            print("!! 有 run **冻结**：%s"
-                  % ", ".join(r["run"] for r in runs if r.get("delta") == 0))
+            fz = [r["run"] for r in runs if r.get("frozen")]
+            vz = [r["run"] for r in runs if r.get("vanished")]
+            if fz:
+                print("!! 有 run **冻结**（两次采样均 0 CPU tick）：%s" % ", ".join(fz))
+            if vz:
+                print("!! 有 run **进程消失**（采样窗内退出）：%s" % ", ".join(vz))
         if rc & 2:
             print("!! 有链在等**已经死掉的臂**：")
             for logf, run, u in blocked:
