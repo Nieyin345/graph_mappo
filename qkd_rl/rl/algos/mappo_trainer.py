@@ -29,6 +29,65 @@ def _reset_module(module: torch.nn.Module) -> None:
         module.reset_parameters()
 
 
+def _expand_last_dim(t: torch.Tensor, new_dim: int) -> torch.Tensor:
+    """把张量最后一维加宽到 ``new_dim``，**新增的列/行初始化为零**。
+
+    专为「给已有模型的 encoder 输入接上一段新特征」而写：新特征的投影权重
+    置零 ⟹ 前向传播逐位等于旧模型（新分支贡献恰好为 0），于是**旧 checkpoint
+    仍然等价可用**，新分支再从零开始学。
+
+    只处理最后一维变宽的情形；其余形状差异直接交给调用方判定为"不可升级"。
+    """
+    if t.dim() == 0 or t.size(-1) >= new_dim:
+        raise ValueError("_expand_last_dim: %s 无法加宽到 %d" % (tuple(t.shape), new_dim))
+    pad = list(t.shape[:-1]) + [new_dim - t.size(-1)]
+    return torch.cat([t, t.new_zeros(pad)], dim=-1)
+
+
+def _upgrade_state_dict_for_model(
+    model: torch.nn.Module, state: dict
+) -> tuple[dict, list[str], list[str], list[str], list[str]]:
+    """把 checkpoint 的 state_dict 适配到**当前**模型的结构上。
+
+    返回 ``(新 state, 已加宽, 已丢弃, 缺失, 多余)``。
+
+    为什么需要它：本项目里「改结构」与「沿用权重」一直被当成互斥的两件事
+    （`docs/当前状态与优化方向.md` §4：改形状 = 丢 BC 暖启动）。但其实只有当
+    **形状变了且无法零填**时才必须丢。若某个权重只是**最后一维变宽**
+    （典型：encoder 的输入维度因为接了新特征而变大），把它按
+    ``[旧权重 | 0]`` 加宽就得到**逐位等价**的模型 ⟹ 暖启动可以保留。
+
+    实测（2026-09-20，`history_encoder` 只开节点通道）：
+    101 个键里 **100 个形状完全相同**，**只有 1 个**变宽
+    （``encoder.node_proj.0.weight (128,17) → (128,81)``）⟹ 正好落在这个函数能救的范围。
+
+    ⚠ **本函数放松了 `load_state_dict(strict=True)` 的两项检查**（缺失键、
+    多余键），所以它**必须**把这两项回传给调用方**显式打印**——静默放宽是
+    本项目反复吃过的亏（记忆 `failed-launch-must-be-loud`）。
+    """
+    cur = model.state_dict()
+    out: dict = {}
+    widened: list[str] = []
+    dropped: list[str] = []
+    missing: list[str] = []
+    for k, v in cur.items():
+        old = state.get(k)
+        if old is None:
+            # 新增的模块（如 history_encoder.*）：用当前初始化值，等价于从零学。
+            out[k] = v
+            missing.append(k)
+        elif tuple(old.shape) == tuple(v.shape):
+            out[k] = old
+        elif old.dim() >= 1 and old.shape[:-1] == v.shape[:-1] and old.size(-1) < v.size(-1):
+            out[k] = _expand_last_dim(old, v.size(-1))
+            widened.append("%s %s→%s" % (k, tuple(old.shape), tuple(v.shape)))
+        else:
+            out[k] = v
+            dropped.append("%s %s→%s" % (k, tuple(old.shape), tuple(v.shape)))
+    unexpected = sorted(k for k in state if k not in cur)
+    return out, widened, dropped, missing, unexpected
+
+
 def _mean_ratio(numerators, denominators) -> float:
     """Sum(numerators) / Sum(denominators)，而不是逐项比值再平均。
 
@@ -1223,7 +1282,30 @@ class MAPPOTrainer:
 
     def load_checkpoint(self, path: str | Path) -> None:
         data = load_checkpoint(path, self.device)
-        self.model.load_state_dict(data.model_state)
+        # ★ 不再直接 `load_state_dict`（默认 strict=True，形状一变就抛异常，
+        #   于是"改结构"被迫等于"丢暖启动"）。先让 checkpoint 适配当前结构：
+        #   能靠**末维补零**救回的键就救（救回后前向逐位等价），其余才丢。
+        state, widened, dropped, missing, unexpected = _upgrade_state_dict_for_model(
+            self.model, data.model_state
+        )
+        if widened:
+            print("checkpoint 结构升级：加宽 %d 个键（新增维置零 ⟹ 前向逐位等价）" % len(widened))
+            for w in widened:
+                print("    + %s" % w)
+        if dropped:
+            print("checkpoint 结构升级：丢弃 %d 个键（形状无法靠补零救回）" % len(dropped))
+            for d in dropped:
+                print("    - %s" % d)
+        # strict=True 之外的两项，pyTorch 会静默放过；这里必须吵出来。
+        if missing:
+            print("checkpoint 缺失 %d 个键（用当前初始化值，等价于从零学）" % len(missing))
+            for k in missing:
+                print("    ? %s" % k)
+        if unexpected:
+            print("!! checkpoint 多余 %d 个键（模型里不存在，**已忽略**）" % len(unexpected))
+            for k in unexpected:
+                print("    ! %s" % k)
+        self.model.load_state_dict(state)
         if data.config is not None and data.config.get("reward") != self.config.get("reward"):
             # The critic value head carries the scale of the OLD reward; reset
             # it so the stale value magnitude cannot poison the GAE bootstrap
