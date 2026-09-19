@@ -38,6 +38,16 @@ while true; do
   FAILS=0
 
   RUNNING=$(printf '%s\n' "$OUT" | grep '^RUNNING ' | sed 's/^RUNNING //')
+  # ★ 「是否正常收尾」必须用**服务器上**算出来的 FINISHED 列表，不能在本地判。
+  #   wake_pipeline.sh 跑在 Windows 本机，而 `/opt/qkd/...` 与 `/tmp/<name>.log`
+  #   都在服务器上 —— 本地 `[ -f ]` / `grep` 永远为假，于是"正常收尾"的分支
+  #   永远走不到，**每一次正常结束都会报 ALERT**。
+  #   后果比"吵"严重得多：狼来了。真有 run 被杀时，它和常量假警报长得一模一样，
+  #   等于没有告警。判据改成服务器给的 FINISHED（wake_parse.py 已经算好了）。
+  FINISHED=$(printf '%s\n' "$OUT" | grep '^FINISHED ' | sed 's/^FINISHED //')
+  is_finished() {   # $1 = run 名
+    case " $FINISHED " in *" $1 "*) return 0;; *) return 1;; esac
+  }
 
   # ---- 1. 预注册波：ent01_s45/s46（2 个 run，不是 3 个）----
   # ⚠ 初版这里是 `prev==1 && alive==0` 就直接报 WAVE_DONE，**漏了"正常收尾 vs 被杀"的
@@ -55,11 +65,7 @@ while true; do
     for s in 45 46; do
       n="ent01_s${s}"
       case " $RUNNING " in *" $n "*) continue;; esac
-      d="/opt/qkd/graph_mappo/outputs/$n"
-      if [ -f "$d/checkpoint_final.pt" ] \
-         && grep -q "Final: UpdateStats" "/tmp/$n.log" 2>/dev/null; then
-        continue
-      fi
+      is_finished "$n" && continue
       killed="$killed $n"
     done
     if [ -n "$killed" ]; then
@@ -99,11 +105,7 @@ while true; do
       for s in $SEEDS; do
         n="${w}_s${s}"
         case " $RUNNING " in *" $n "*) continue;; esac
-        d="/opt/qkd/graph_mappo/outputs/$n"
-        if [ -f "$d/checkpoint_final.pt" ] \
-           && grep -q "Final: UpdateStats" "/tmp/$n.log" 2>/dev/null; then
-          continue
-        fi
+        is_finished "$n" && continue
         killed="$killed $n"
       done
       if [ -z "$killed" ]; then
