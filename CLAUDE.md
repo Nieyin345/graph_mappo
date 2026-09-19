@@ -100,7 +100,12 @@ default → rate_provider → features → env_small → graph_mappo → train_m
 | 回合长度 | 1440 步 | 240 步 |
 | 种子 | 训练种子 `--seed` | 15 个请求种子（`global.yaml` validation 段） |
 
-训练窗口侧成功率 ~0.86 已近饱和（专家 0.869），**4.5 点的真实差距在验证 regime**（专家 0.698 vs RL 0.653）。训练器内置 `eval_interval` 轮的 `evaluate_validation` 并存 `checkpoint_best_val.pt`。
+训练窗口侧成功率 ~0.86 已近饱和（专家 0.869）—— **训练侧确实看不出差距**，差距在验证 regime（专家 0.6979）。验证侧的方向取决于 `entropy_coef`：
+
+- `0.001`（旧的错误值，如 `r6_base`）：RL ≈ **0.653**，比专家**低** 4.5 点 —— 就是这一条常被引用成"RL 打不过专家"
+- `0.01`（现用值，`configs/train_ent01.yaml`）：RL ≈ **0.7178**，比专家**高**约 2 点
+
+后者 3/3 种子同向，但 n=3（df=2，临界值 4.303）下 t=3.46、**p=0.074，未达显著**——只能说"方向一致、未测出"。判据与预注册（补种子 45/46 到 n=5）见 `docs/训练诊断记录.md` 的对应节。训练器内置 `eval_interval` 轮的 `evaluate_validation` 并存 `checkpoint_best_val.pt`。
 
 ### 核心数据流
 
