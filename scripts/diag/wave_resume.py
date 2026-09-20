@@ -95,6 +95,49 @@ def live_names():
     return names
 
 
+def live_with_update():
+    """[(run_name, pss_gib, update)] —— 按**进程组**聚合（父 + 8 workers）。
+
+    ★ 别只抓父进程：worker 的 cmdline 是
+      `python -c from multiprocessing.spawn import spawn_main ...`，
+      **不含** `train_graph_mappo` ⟹ 只抓父会低估约 6.6 GiB/条。
+    """
+    r = sh("ps -eo pid,ppid,comm,args")
+    parents, workers = {}, []
+    for ln in r.stdout.splitlines():
+        parts = ln.split(None, 3)
+        if len(parts) < 4:
+            continue
+        pid, ppid, comm, args = parts
+        if not comm.startswith("python"):
+            continue
+        if TRAIN_PATTERN in args and "--run-name" in args:
+            toks = args.split()
+            parents[int(pid)] = toks[toks.index("--run-name") + 1]
+        elif "multiprocessing" in args or "spawn_main" in args:
+            workers.append((int(pid), int(ppid)))
+    agg = {nm: [pss_of(pid), 0.0] for pid, nm in parents.items()}
+    for wpid, wppid in workers:
+        nm = parents.get(wppid)
+        if nm in agg:
+            agg[nm][1] += pss_of(wpid)
+    out = []
+    for nm, (p, w) in agg.items():
+        out.append((nm, p + w, last_update(nm) or -1))
+    return out
+
+
+def pss_of(pid):
+    """单进程 PSS（GiB）。读不到返回 0.0。"""
+    try:
+        for line in Path(f"/proc/{pid}/smaps_rollup").read_text().splitlines():
+            if line.startswith("Pss:"):
+                return int(line.split()[1]) / 1024.0 / 1024.0
+    except Exception:
+        pass
+    return 0.0
+
+
 def last_update(run):
     p = OUT / run / "metrics.jsonl"
     if not p.exists():
@@ -113,12 +156,27 @@ def last_update(run):
     return last
 
 
-def plan_batches(candidates, avail, live_count):
+def plan_batches(candidates, avail):
     """还有多少条能起 ⟹ 切出第一批。
 
-    ★ 判据用**可用内存 − 在跑臂的待涨量 − 预留**，不是核数。
+    ★★ 判据 = 可用 − **在跑臂的待涨量** − 预留，不是核数。
+
+    @@ 2026-09-21 修：原先硬编码 `warm = 0.0`，注释写"在跑的臂都在 u>25
+    已稳态"。**链式触发时那是假的** —— clean 波刚起在 u1、每条才 17.5 GiB
+    却要涨到 25 ⟹ 待涨量被记成 0 ⟹ 超发 3 条 ⟹ 实测 MemAvailable 掉到
+    21.0 GiB（地板 17），**差几分钟就 OOM**。
+    现在按**实测轮号**推每条自己的待涨量（u1≈9G → u15+≈25G 线性插值）。
     """
-    warm = 0.0                     # 在跑的臂都在 u>25 ⟹ 已稳态
+    warm = 0.0
+    rows = live_with_update()
+    for nm, _pss, upd in rows:
+        if upd < 0:
+            est_now = PSS_PER_RUN       # 读不到轮号 ⟹ 按稳态算（保守）
+        elif upd >= 15:
+            est_now = PSS_PER_RUN
+        else:
+            est_now = 9.0 + (PSS_PER_RUN - 9.0) * (upd / 15.0)
+        warm += max(0.0, PSS_PER_RUN - est_now)
     room = avail - warm - RESERVE
     max_new = int(room // PSS_PER_RUN)
     return candidates[:max_new], candidates[max_new:], max_new
@@ -183,9 +241,23 @@ def main() -> int:
 
     # ---------- 3. 分批计划 ----------
     avail = mem_available_gib()
-    batch, rest, max_new = plan_batches(ready, avail, len(names))
+    live = live_with_update()
+    warm = 0.0
+    print(f"\n  在跑的 run（按进程组聚合 = 父 + workers）：")
+    for nm, pss, upd in sorted(live):
+        if upd < 0:
+            est = PSS_PER_RUN
+        elif upd >= 15:
+            est = PSS_PER_RUN
+        else:
+            est = 9.0 + (PSS_PER_RUN - 9.0) * (upd / 15.0)
+        d = max(0.0, PSS_PER_RUN - est)
+        warm += d
+        print(f"      {nm:<20} PSS={pss:5.1f}  u={upd:<4} 待涨={d:5.1f}")
+    batch, rest, max_new = plan_batches(ready, avail)
     print(f"\n  内存门与分批计划")
     print(f"    MemAvailable            {avail:.1f} GiB")
+    print(f"    在跑 {len(live)} 条的待涨量     −{warm:.1f} GiB")
     print(f"    预留（别的启动器）        −{RESERVE:.1f} GiB")
     print(f"    每条稳态                 −{PSS_PER_RUN:.1f} GiB")
     print(f"    ⟹ 本批最多可起           {max_new} 条")
