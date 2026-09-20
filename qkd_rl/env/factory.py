@@ -78,6 +78,7 @@ def build_env_from_config(config: dict) -> QKDEnv:
         normalizer,
         config,
         history_buffer=history_buffer,
+        routing=routing,
     )
     request_generator = RequestGenerator(
         [node.node_id for node in scenario.nodes if node.node_type.value == "gs"],

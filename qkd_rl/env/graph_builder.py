@@ -55,6 +55,7 @@ class GraphBuilder:
         normalizer: RateNormalizer,
         config: dict,
         history_buffer=None,
+        routing=None,
     ):
         self.nodes = nodes
         self.edges = edges
@@ -64,6 +65,9 @@ class GraphBuilder:
         self.normalizer = normalizer
         self.config = config
         self.history_buffer = history_buffer
+        # v2：`_compute_on_pending_path` 需要 routing 的**规范路**
+        # （`_next_hop` 的 tie-break 定义在 RoutingPolicy 里）⟹ 绝不自己重写 BFS。
+        self.routing = routing
         self.node_index = {node.node_id: idx for idx, node in enumerate(nodes)}
         self.gs_ids = [node.node_id for node in nodes if node.node_type == NodeType.GS]
         # Precomputed lookups avoid O(nodes x edges) scans and repeated
@@ -533,86 +537,81 @@ class GraphBuilder:
         return rows
 
     def _compute_on_pending_path(self, requests: RequestQueue) -> np.ndarray:
-        """``(n_registered_edges,)`` float32 —— 该边是否**此刻**在某个待服务请求的通路上。
+        """``(n_registered_edges,)`` float32 —— 该边是不是某条待服务请求的**瓶颈跳**。
 
-        对每条 pending 请求，在「**有存量的边**」子图上取最短路（**与服务阶段
-        `routing.py:_find_positive_path` 完全同一张子图、同一个判据**），路径并集
-        里的边记 1。
+        **v2（2026-09-20）**：语义从 v1 的「在通路上」换成「**决定这条请求吞吐的那一跳**」。
 
-        ★ 为什么加这一列（2026-09-20 机制体检，见 `docs/训练诊断记录.md` 对应节）：
+        对每条 pending 请求，取它的**规范路**（`routing.shortest_path(src, dst)`，
+        由 routing 预计算的 `_next_hop` 决定），在**这条路**上取**存量最小**的一跳，
+        记 1。其余为 0。
 
-        实测（真实验证协议，只读）——**约束不是"不够"，是"没打在点上"**：
+        ★ 为什么是「最小那一跳」（三层实测，缺一不可）
+        ------------------------------------------------------------------------
+        ① **服务吞吐 = 最弱一跳**：`routing.py:238`
+           `serve_now = min(hop_levels + [remaining])`，然后 `consume_path` 从**每一跳**
+           等量扣除。⟹ 在**非瓶颈跳**上生成密钥，对这条请求的吞吐贡献**恰好 0**。
+        ② **路径由环境定，策略够不着**：`_usable_cached_path` 优先用 `shortest_path`
+           （纯拓扑、**常量**；实测 `probe_path_is_fixed.py`：211 个 (src,dst) 对、
+           4128 次比对，**0 次变化**）；路不通才回退 `_find_positive_path`，而那个 BFS
+           走的是 `prepare_serve` 建的**静态拓扑 × qkp.positive** 子图
+           （`routing.py:141-171`，只读 `self.adj` 与 `qkp`，**不读 agent 激活了哪些边**）。
+           ⟹ 策略**唯一的杠杆是"把货生成在哪"**，不是"走哪条路"。
+           实测：1978 条边**全部**在动作候选里（可触达 100%），动作空间**不是**瓶颈。
+        ③ **v1 的列对被卡的请求全 0**：`probe_onpath_silence.py`，15 种子 × 240 步——
+           v1 只标记 **11.15%** 的待服务请求，**70.69%** 是"全物理图可达但特征全 0"。
+        ④ **规范路本身几乎从不全通**：`probe_canon_stock.py`，4614 个样本，
+           「有货跳占比」的**上界够不到 0.7**（mean 9.83%，路长 mean 2.18）
+           ⟹ 服务主要靠正存量子图上的 BFS 回退 ⟹ 服务量 `= min(hop_levels)` 仍然成立。
 
-        | 量 | 读数 |
-        |---|---|
-        | 覆盖全部在挂请求路径所需的**不同跳数** U | p50 **9**（p95 22） |
-        | 实际激活弧数 | **60** |
-        | 挡路的**空跳**数 | p50 11 |
-        | 其中上一步被激活过的 | **0.00** |
+        ⟹ 这一列标的正是"**让它有货能解锁多少**"，也就是全仓缺失的那个 `min` 的 argmin。
+        `relay_importance` 是**乘性权重的求和**、`req_hop` 是**距离**、节点那一列是**求和**
+        —— 都不是下界。子代理独立复核的结论一致：
+        「服务量恰恰等于 `min(hop_levels)`，而观测里没有任何'路径下界'的量」。
 
-        端口预算 = 节点数 90，`U / 90 = 0.10` ⟹ **端口、路径长度、回合长度都不是约束**。
-        策略激活 60 条高分边，而真正卡住那 9 条请求的跳**一条都没被激活过**。
+        ★ v1 → v2 是**同一列、换语义** ⟹ 末维不变 ⟹ 本改动**不改维度**
+        （`checkpoint-can-upgrade-instead-of-drop`：末维不变 ⟹ 末维变宽/变窄都不涉及，
+        暖启动权重逐位可复用）。
 
-        模型的既有代理信号都不表达"成员资格"：
+        ⚠ 不同请求的瓶颈跳落在同一条边上时，`out` 记 1（不是计数）。这是**有意的**：
+        这一列回答"这跳要不要紧"，不回答"有多要紧"。
 
-        - `include_req_hop`（4 列）= 端点到最近请求源/宿的 **hop 数**，
-          是**距离**不是成员资格 ——"在通路上"与"离通路很近"在它眼里几乎一样
-        - `include_relay_importance` 是图上的**软扩散**，同样不是成员资格
+        ⚠ v1 的实测（对照臂 `v1_onpath`，同训练种子配对 n=5）：
+        Δ+0.0154、t=1.724、4/5 同向、**未过临界 2.776** ⟹ 方向为正但判别力不足。
+        那批臂跑的是 v1 语义；v2 换语义后**不能**拿它当预期值。
 
         ⚠ **不要改成 `include_qkp_level`（level/capacity）**：那一列与已有的
         `include_qkp_capacity_left` **完全共线**（互为 `1 - x`），而且实测
         `level/capacity` 的 `p25=0 / p50=0.04 / p95=1.0` ⟹ 存量信息**已经在输入里**，
         再加一列是**零信息改动**。缺的从来不是"这一跳有多少"，是
         **"这一跳要不要紧"**。
-
-        历史对照：`relay_importance` 的 `max_path_links` 3→8 曾把
-        「（请求,槽）路径一跳都拿不到分」的比例从 72% 降到 50%，
-        专家 0.7801→0.7886（`features.yaml` 注释）—— 本列是那个方向的**硬版本**：
-        从"软扩散给点分"变成"在通路上就是 1"。
         """
         n = len(self._edge_list)
         out = np.zeros(n, dtype=np.float32)
         pending = requests.get_pending()
         if not pending:
             return out
-        positive = self.qkp.positive
-        if not positive:
+        routing = self.routing
+        if routing is None:
+            # 没有 routing ⟹ 拿不到**规范路**的定义（`_next_hop` 的 tie-break 在
+            # routing 里）。★ 绝不自己重写一份 BFS 去凑 —— 那会与
+            # `_usable_cached_path` 走的路不同，列就标错了对象。
             return out
-        # 有存量的边子图（与服务阶段同构）：边 id -> 两端 node_index
-        adj: dict[int, list[tuple[int, int]]] = {}
-        for edge in self.edges:
-            if edge.edge_id not in positive:
-                continue
-            si = self.node_index[edge.src]
-            di = self.node_index[edge.dst]
-            pi = self._edge_pos[edge.edge_id]
-            adj.setdefault(si, []).append((di, pi))
-            adj.setdefault(di, []).append((si, pi))
+
+        # ---- 每条待服务请求：找它的**瓶颈跳** ----
         for req in pending:
-            src = self.node_index.get(req.src_gs)
-            dst = self.node_index.get(req.dst_gs)
-            if src is None or dst is None or src == dst:
+            path = routing.shortest_path(req.src_gs, req.dst_gs)
+            if not path:
+                # 无规范路 ⟹ 拓扑孤岛，谁都救不了（实测约 18–23%）
                 continue
-            parent: dict[int, tuple[int, int]] = {src: (-1, -1)}
-            queue: deque[int] = deque([src])
-            found = False
-            while queue:
-                cur = queue.popleft()
-                if cur == dst:
-                    found = True
-                    break
-                for nxt, pos in adj.get(cur, ()):
-                    if nxt in parent:
-                        continue
-                    parent[nxt] = (cur, pos)
-                    queue.append(nxt)
-            if not found:
-                continue
-            cur = dst
-            while parent[cur][0] != -1:
-                prev, pos = parent[cur]
+            # `routing.shortest_path` 返回的是**边 id**（`routing.py:62-73`）
+            levels = [float(self.qkp.get_level(eid)) for eid in path]
+            k = 0
+            for i in range(1, len(levels)):
+                if levels[i] < levels[k]:
+                    k = i
+            pos = self._edge_pos.get(path[k])
+            if pos is not None:
                 out[pos] = 1.0
-                cur = prev
         return out
 
     def _compute_req_hop_features(
