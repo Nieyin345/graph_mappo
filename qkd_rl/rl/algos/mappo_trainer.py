@@ -111,6 +111,57 @@ def _torch_names(module: torch.nn.Module, prefix: str = "") -> list[str]:
     return out
 
 
+def build_param_groups(model: torch.nn.Module, policy_lr: float, critic_lr: float):
+    """构造优化器的 ``param_groups``，并**守住「模型每个参数都被注册」**。
+
+    为什么是模块级函数而不是 ``__init__`` 里的一段：本仓库曾经有**四处**
+    手写了同一份三组列表（``MAPPOTrainer.__init__`` + 三个
+    ``scripts/train/supervised_train_*.py``），2026-09-20 发现它们**同时**
+    漏掉了 ``history_encoder`` —— 同一份逻辑的四个副本、bug 也四份
+    （记忆 ``duplicate-implementation-drifts``：正解是让第二份**上岗失败**，
+    不是把四份都改对）。收敛到这里之后，漏注册只可能发生在一个地方，且有守卫。
+
+    分组语义（**保持 3 组不变**，为了与既有 checkpoint 的 ``param_groups``
+    结构对齐；改成 2 组会让 ``load_state_dict`` 抛错 ⟹ 静默丢掉热身优化器状态）：
+      · 组 0 = encoder（若开了 ``history_encoder``，它并入此组——它只喂
+        encoder/actor，不喂 critic，属策略侧，与 encoder 共享 lr）
+      · 组 1 = actor（策略侧）
+      · 组 2 = critic（价值侧）
+
+    ★ 守卫是**必须**的：漏注册的症状（参数永不更新）与「配置没开那个子模块」
+      在读数上**完全一样**，没有任何东西会报错。这个 bug 静默活了一整条 hist
+      实验线，就是因为没人检查它。
+
+    返回 ``(param_groups, policy_params, value_params)``。
+    """
+    hist = getattr(model, "history_encoder", None)
+    enc_params = list(model.encoder.parameters())
+    if hist is not None:
+        enc_params = enc_params + list(hist.parameters())
+    param_groups = [
+        {"params": enc_params, "lr": float(policy_lr)},
+        {"params": list(model.actor.parameters()), "lr": float(policy_lr)},
+        {"params": list(model.critic.parameters()), "lr": float(critic_lr)},
+    ]
+
+    registered = {id(p) for g in param_groups for p in g["params"]}
+    unreg = [p for p in model.parameters() if id(p) not in registered]
+    if unreg:
+        unreg_ids = {id(p) for p in unreg}
+        owners = sorted(
+            n for n, m in model.named_children()
+            if any(id(q) in unreg_ids for q in m.parameters())
+        )
+        raise RuntimeError(
+            "★ 有 %d 个模型参数（%d 个张量）未被注册进优化器：%s —— "
+            "它们将永不更新，而症状与「配置没开」无法区分。"
+            "请在 build_param_groups 里把该子模块并入对应的一组。"
+            % (sum(p.numel() for p in unreg), len(unreg), owners or "顶层参数"))
+
+    policy_params = list(param_groups[0]["params"]) + list(param_groups[1]["params"])
+    return param_groups, policy_params, list(param_groups[2]["params"])
+
+
 def _upgrade_optimizer_state_for_model(
     model: torch.nn.Module, optimizer: torch.optim.Optimizer, opt_state: dict
 ) -> list[str]:
@@ -344,54 +395,23 @@ class MAPPOTrainer:
             float(opt_cfg["actor_lr"]),    # actor
             float(opt_cfg["critic_lr"]),   # critic
         ]
-        # ★★ 2026-09-20 修：`history_encoder` 曾**不在**这个列表里。
-        #   它是 `graph_mappo.py:768` 的**兄弟模块**，而这里只注册 encoder/actor/critic
-        #   ⟹ 打开 `features.history_encoder.enabled` 时，它的 37,760 个参数
-        #   （LSTM + 三个投影，占模型 3.44%）**从不被 Adam 更新**，
-        #   输出的是**固定随机特征** —— 整条 hist 实验线付了 2.3× 内存却没换来能力。
-        #   实测装置：`.tmp/audit_hist_optimizer.py`（正对照 = 基线链「未注册 0 个参数」）。
-        _param_groups = [
-            {"params": self.model.encoder.parameters(), "lr": self._configured_lrs[0]},
-            {"params": self.model.actor.parameters(), "lr": self._configured_lrs[1]},
-            {"params": self.model.critic.parameters(), "lr": self._configured_lrs[2]},
-        ]
-        if getattr(self.model, "history_encoder", None) is not None:
-            # 与 encoder 同组同 lr：两者都以"给节点/边造表示"为职责，共享策略侧 lr。
-            _param_groups[0] = {
-                "params": list(self.model.encoder.parameters())
-                + list(self.model.history_encoder.parameters()),
-                "lr": self._configured_lrs[0],
-            }
-        self.optimizer = torch.optim.Adam(_param_groups)
         # Gradient clipping is applied per role by default: see the note in
         # ``update``. Set ``train.ppo.clip_per_role: false`` to clip the whole
         # model together (the previous behaviour, kept for ablation).
         self.clip_per_role = bool(self.ppo_cfg.get("clip_per_role", True))
-        # The encoder is shared, so it belongs to the policy group.
-        self._policy_params = list(self.model.encoder.parameters()) + list(self.model.actor.parameters())
-        if getattr(self.model, "history_encoder", None) is not None:
-            # 同样属于策略侧：它只喂 actor/encoder，不喂 critic。
-            self._policy_params += list(self.model.history_encoder.parameters())
-        self._value_params = list(self.model.critic.parameters())
-
-        # ★★ 守卫：模型的**每一个**参数都必须落进优化器。
-        #    上面那个 bug 静默活了一整条实验线，就是因为没有任何东西检查它。
-        #    「漏一个子模块」和「配置没开那个子模块」在读数上长得一模一样，
-        #    所以这里**必须**主动问一次世界（不靠人读代码）。
-        _registered = {id(p) for g in self.optimizer.param_groups for p in g["params"]}
-        _unreg = [p for p in self.model.parameters() if id(p) not in _registered]
-        if _unreg:
-            _n = sum(p.numel() for p in _unreg)
-            _owners = sorted({
-                n for n, m in self.model.named_children()
-                if any(id(q) in {id(x) for x in _unreg} for q in m.parameters())
-            }) if _unreg else []
-            raise RuntimeError(
-                "★ 有 %d 个模型参数（%s 个张量）未被注册进优化器：%s —— "
-                "它们将永不更新，而症状与「配置没开」无法区分。"
-                "请把它们加进 __init__ 的 param_groups。"
-                % (_n, len(_unreg), _owners or "顶层参数")
-            )
+        # ★★ 2026-09-20 修：`history_encoder` 曾**不在**这些组里。
+        #   它是 `graph_mappo.py:768` 的**兄弟模块**，而这里只注册
+        #   encoder/actor/critic ⟹ 打开 `features.history_encoder.enabled` 时，
+        #   它的 37,760 个参数（LSTM + 三个投影，占模型 3.44%）**从不被更新**，
+        #   输出的是**固定随机特征** —— 整条 hist 实验线付了 2.3× 内存却没换来能力。
+        #   同一份三组列表在仓库里被**手写了四处**（这里 + 三个
+        #   `scripts/train/supervised_train_*.py`），四处**同时**漏了它
+        #   ⟹ 收敛到 `build_param_groups`，让漏注册只可能发生在一个地方，
+        #   并由它内部的守卫当场报错（症状与「配置没开」无法区分，必须主动问世界）。
+        #   实测装置：`.tmp/audit_hist_optimizer.py`（正对照 = 基线链「未注册 0」）。
+        _param_groups, self._policy_params, self._value_params = build_param_groups(
+            self.model, self._configured_lrs[0], self._configured_lrs[2])
+        self.optimizer = torch.optim.Adam(_param_groups)
 
         seed = int(config["seed"]["global_seed"])
         torch.manual_seed(seed)

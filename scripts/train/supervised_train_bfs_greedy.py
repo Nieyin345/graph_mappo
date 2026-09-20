@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from qkd_rl.rl.algos.checkpoint import load_checkpoint, save_checkpoint
+from qkd_rl.rl.algos.mappo_trainer import build_param_groups
 from qkd_rl.baselines.greedy_relay_diffusion import GreedyRelayDiffusionPolicyV3
 from qkd_rl.core.config import ConfigValidator, deep_merge, load_config
 from qkd_rl.env.factory import build_env_from_config, load_default_config
@@ -145,13 +146,13 @@ def main() -> None:
         include_stocked_unavailable=grd_cfg.get("include_stocked_unavailable", True),
     )
 
-    optimizer = torch.optim.Adam(
-        [
-            {"params": model.encoder.parameters(), "lr": args.lr},
-            {"params": model.actor.parameters(), "lr": args.lr},
-            {"params": model.critic.parameters(), "lr": args.lr},
-        ]
-    )
+    # ★ 走共享构造函数：本仓库曾在**四处**手写同一份三组列表
+    #   （MAPPOTrainer.__init__ + 三个 supervised_train_*.py），四处**同时**
+    #   漏掉 history_encoder —— 同一份逻辑的四个副本、bug 也四份
+    #   （记忆 duplicate-implementation-drifts）。收敛到这里之后，
+    #   漏注册只可能发生在一个地方，且有守卫当场报错。
+    _param_groups, _, _ = build_param_groups(model, args.lr, args.lr)
+    optimizer = torch.optim.Adam(_param_groups)
     if args.checkpoint:
         data = load_checkpoint(args.checkpoint, device)
         model.load_state_dict(data.model_state)
