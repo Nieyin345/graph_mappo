@@ -28,7 +28,16 @@ import subprocess
 import sys
 import time
 
-ROOT = "/opt/qkd/graph_mappo"
+# ★ 允许用环境变量指向别处的 outputs/ —— 让**同一个判读实现**既能在服务器上
+#   跑（实时、要 /proc），也能在本地跑（抓回来的快照、只读文件）。
+#
+#   为什么不是"在本地另写一份判读"：本项目反复踩的坑就是**每个新地方重新推导**
+#   （`updates_done` 数行数、`last_update` 数行数、`avail` 单位错 —— 三次都是
+#   同一个口径在新文件里被重新发明）。判读口径必须**只有一个实现**。
+#
+#   ⚠ 本地跑时 `live_runs()` / `avail()` 这些读 `/proc` 的函数**没有意义**
+#     （本地没有那些 run 在跑）；本地只用 `verdict()` 那一半（纯读文件）。
+ROOT = os.environ.get("QKD_ROOT", "/opt/qkd/graph_mappo")
 PY = "/opt/qkd/venv/bin/python"
 CKPT = "outputs/supervised_pg_phased/supervised_pg_phased_latest.pt"
 BASE = ["rl_algorithm.yaml", "train_full_rl.yaml", "train_ent01.yaml", "train_hist.yaml"]

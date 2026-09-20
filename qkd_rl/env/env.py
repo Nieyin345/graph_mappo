@@ -106,10 +106,14 @@ class QKDEnv:
             self.t = self.rng.randint(self.scenario.start_t, max_start)
         else:
             self.t = self.scenario.start_t
-        episode_start_day = int(self.config["env"].get("episode_start_day", -1) or -1)
-        if episode_start_day >= 0:
+        # ★ 不能用 `get(k, -1) or -1`：Python 里 `0 or -1` 求值为 `-1`
+        #   ⟹ **day 0 会被静默忽略**（传 0 = 不钉起日）。实测踩到过：
+        #   一个判读脚本要 day0、实得 day330，且只在自检里才发现。
+        #   `None` 才是「不钉」，0 是合法的一天（= scenario.start_t）。
+        episode_start_day = self.config["env"].get("episode_start_day", None)
+        if episode_start_day is not None and int(episode_start_day) >= 0:
             day_steps = int(self.config["env"].get("day_steps", 1440))
-            self.t = self.scenario.start_t + episode_start_day * day_steps
+            self.t = self.scenario.start_t + int(episode_start_day) * day_steps
         if self.continuous and "activation_window_start_day" in self.config["env"]:
             day_steps = int(self.config["env"].get("day_steps", 1440))
             start_day = int(self.config["env"].get("activation_window_start_day", 0) or 0)

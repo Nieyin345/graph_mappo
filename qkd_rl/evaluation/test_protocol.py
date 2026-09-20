@@ -21,16 +21,39 @@ DAY_STEPS = 1440
 
 
 def load_validation_profile(config_path: str | Path = "configs/global.yaml") -> dict:
-    """Read the canonical validation settings from ``global.yaml``."""
+    """Read the canonical validation settings from ``global.yaml``.
+
+    ★★ 两个键位都认，且**读不到就抛错**。
+
+    原先只读 ``raw["global"]["validation"]``，用一个 ``.get`` 链兜底到
+    ``window_end_day=30`` / ``episode_days=1``。而 ``configs/train_full_rl.yaml``
+    的 ``validation:`` 写在**顶层**（没有 ``global:`` 包裹）⟹ 拿它当参数调用时
+    **不报错**，静默返回窗口 **0–30 天**——正好落在**训练窗口内**。
+    实测踩到过一次：一个判读脚本因此在训练窗口上跑完了全程，还打印了
+    「天 0–30」而没人注意，差一点把窗内读数当留出读数写进结论。
+
+    静默的默认值在这里是最坏的失败模式：它不崩，只是让判读**测了另一个东西**。
+    所以：两种键位都支持（``global.validation`` 优先，其次顶层 ``validation``），
+    两者都没有就**抛 FileNotFoundError 式的 ValueError**，让调用方立刻知道。
+    """
     path = Path(config_path)
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    ev = raw.get("global", {}).get("validation", {}) or {}
+    ev = (raw.get("global", {}) or {}).get("validation")
+    if ev is None:
+        ev = raw.get("validation")
+    if ev is None:
+        raise ValueError(
+            "%s 里找不到 validation 段（既不在 global.validation，也不在顶层 "
+            "validation）。**不会用默认值兜底**：默认窗口是 0–30 天，会静默地"
+            "把测量跑在训练窗口内。" % path)
     window = ev.get("window", {}) or {}
     episode = ev.get("episode", {}) or {}
     seeds = [int(s) for s in (ev.get("seeds", []) or ev.get("request_seeds", []) or [])]
+    if "start_day" not in window or "end_day" not in window:
+        raise ValueError("%s 的 validation.window 缺 start_day/end_day" % path)
     return {
-        "window_start_day": int(window.get("start_day", 0)),
-        "window_end_day": int(window.get("end_day", 30)),
+        "window_start_day": int(window["start_day"]),
+        "window_end_day": int(window["end_day"]),
         "episode_days": int(episode.get("days", ev.get("episode_days", 1))),
         "episode_steps": int(episode.get("steps", ev.get("episode_steps", 0)) or 0),
         "episodes": int(ev.get("episodes", 3)),
