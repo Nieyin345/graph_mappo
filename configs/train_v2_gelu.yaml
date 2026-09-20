@@ -1,0 +1,32 @@
+# v2 实验：编码器激活函数 relu -> gelu（**唯一的自变量**）
+#
+# 为什么是这一条：
+#   peer 的 `e044efc` 修好了 `model.encoder.activation` 的层级错位 —— 修复前
+#   它读的是 model 顶层的 `config.get("activation", "relu")`（该键**从不被设置**）
+#   ⟹ 策略头与价值头**被钉死在 relu**，这个旋钮**从未被扫过**
+#   （同族记忆 [[ablation-name-is-not-the-parameter]]：全库多取值=1 的键=从未测过）。
+#   修好后它仍停在默认值 `relu`（运行时 resolved_config 实测）⟹ 现在**扫它才有意义**。
+#
+# ★ 判据上的一条硬约束（与 v1 的 u1 守卫**相反**）：
+#   `build_mlp` 以 `nn.Linear` 收尾（`qkd_rl/rl/models/mlp.py:6-23`），
+#   换激活**必然改变输出** ⟹ **暖启动前向不再逐位等价** ⟹
+#   **v1 用的「u1 两侧逐位相同」守卫在 v2 上不可用**，照搬会把正确实验误判成污染。
+#   v2 的"起点合法"改判为：两侧载入**同一个 BC checkpoint**、同种子、同节点、
+#   且**只差这一处**（激活）。
+#
+# ★ 控制复用：`ent01_rerun_s{42,43,44}`（relu / ent=0.01 / 无 hist）**就是本实验的对照**
+#   —— 不需要另起对照臂，只起 3 条 gelu 臂即可配对（同种子、同 BC、其余逐项相同）。
+#   前提：这些对照臂的 resolved_config 与本题的 relu 基线**逐项相同**（已核）。
+#
+# ★ 单变量纪律：**dropout 不要混进这一臂**。dropout 的作用面是
+#   update 正则化（`mappo_trainer.py:1074/1414/1509` 的 `self.model.train()`），
+#   **不进探索**（`rollout_workers.py:131` 的 `policy.model.eval()`）——
+#   与激活的作用面不同，混在一臂里 Δ 无法归因。dropout 单开一臂。
+#
+# 判据（照 v1 预注册同规格）：
+#   Δ ≥ +0.035 有用 / |Δ| < 0.035 测不出 / Δ ≤ −0.035 有害
+#   窗口 u25/u30，n=3（df=2，临界 4.303），8 线程，同节点。
+
+model:
+  encoder:
+    activation: gelu
