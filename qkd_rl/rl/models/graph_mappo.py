@@ -406,8 +406,15 @@ class GraphEncoder(nn.Module):
 class SharedNodeActor(nn.Module):
     def __init__(self, hidden_dim: int, config: dict, invalid_logit_value: float):
         super().__init__()
-        activation = config.get("activation", "relu")
-        dropout = float(config.get("dropout", 0.0))
+        # ★ 本类收到的是**整个 `model` 段**（`graph_mappo.py` 构造处传
+        #   `model_cfg`），而 `activation`/`dropout` 住在 `model.encoder` 下
+        #   （`configs/graph_mappo.yaml:14-15`）⟹ 从顶层读**永远取不到**，
+        #   静默回落 relu/0.0：yaml 那两行看起来在管策略头，实际从未生效。
+        #   与 `self.mode`（确实在 `model` 顶层）和 `GlobalCritic.pooling`
+        #   （正确地读了 `config["critic"]`）并排看，层级错位一目了然。
+        enc_cfg = config.get("encoder", {})
+        activation = enc_cfg.get("activation", "relu")
+        dropout = float(enc_cfg.get("dropout", 0.0))
         self.mode = config.get("mode", "mixed")
         # Both modes score an edge from its two endpoint node embeddings plus
         # the physical edge embedding. In demand_edge mode the encoder still
@@ -690,8 +697,13 @@ class SharedNodeActor(nn.Module):
 class GlobalCritic(nn.Module):
     def __init__(self, hidden_dim: int, config: dict):
         super().__init__()
-        activation = config.get("activation", "relu")
-        dropout = float(config.get("dropout", 0.0))
+        # 同 `SharedNodeActor`：`config` 是**整个 `model` 段**，
+        # 激活/dropout 须从 `model.encoder` 取，不能从顶层取。
+        # 注意本类紧邻的下一行就读了 `config["critic"]` —— 两种层级
+        # 写法并排，正是这处错位的证据。
+        enc_cfg = config.get("encoder", {})
+        activation = enc_cfg.get("activation", "relu")
+        dropout = float(enc_cfg.get("dropout", 0.0))
         self.pooling = config["critic"].get("pooling", "mean")
         if self.pooling == "typed_mean":
             # 节点平均 + 物理边平均 + 逻辑边平均 + 3 个图规模计数。

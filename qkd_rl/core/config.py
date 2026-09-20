@@ -177,6 +177,28 @@ class ConfigValidator:
             raise ValueError("model.encoder.gnn_type: only 'graphsage' is implemented.")
         if not bool(enc.get("share_actor_critic_encoder", True)):
             raise ValueError("model.encoder.share_actor_critic_encoder: False (separate actor/critic encoders) is not implemented.")
+        # ★ 激活/dropout 的**唯一真相在 `model.encoder` 下**，却有三个消费者：
+        #   `GraphEncoder`、`SharedNodeActor`、`GlobalCritic`（后两者收到的是整个
+        #   `model` 段）。2026-09-20 修：后两者原从 `model` **顶层**读这两个键
+        #   ⟹ 永远取不到 ⟹ 策略头与价值头被静默钉死在 relu + 无 dropout，而
+        #   `graph_mappo.yaml` 那两行看起来在管它们 —— 本仓库的招牌失败模式
+        #   「存在但没接线」的又一例（前两例：`idle_scorer`、`history_encoder`）。
+        #   把键写到 `model` 顶层**不会被任何代码读到**，所以这里直接报错，
+        #   而不是让它静默变成死键。
+        for _k in ("activation", "dropout"):
+            if _k in model_cfg:
+                raise ValueError(
+                    f"model.{_k} 位置无效：激活/dropout 只从 model.encoder.{_k} "
+                    f"读取（encoder/actor/critic 三处共用这一个来源）。"
+                    f"写在 model 顶层不会被任何代码读到。")
+        if str(enc.get("activation", "relu")) not in ("relu", "gelu", "tanh"):
+            raise ValueError(
+                "model.encoder.activation: 只实现了 relu/gelu/tanh "
+                "（见 rl/models/mlp.py:13 的查表；未知值会在建模时 KeyError）。")
+        _drop = float(enc.get("dropout", 0.0))
+        if not 0.0 <= _drop < 1.0:
+            raise ValueError(
+                f"model.encoder.dropout 必须在 [0, 1) 内，收到 {_drop}。")
         actor_cfg = config["model"]["actor"]
         if not bool(actor_cfg.get("share_actor_across_node_types", True)):
             raise ValueError("model.actor.share_actor_across_node_types: False (per-node-type actors) is not implemented.")
