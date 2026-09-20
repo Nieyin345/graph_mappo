@@ -489,6 +489,11 @@ class GraphBuilder:
         req_hop_arr: np.ndarray | None = None
         if edge_cfg.get("include_req_hop", False):
             req_hop, req_hop_arr = self._compute_req_hop_features(active_edges, requests)
+        # 通路成员资格（1 维）：该边此刻在不在某个 pending 请求的服务路径上。
+        # 与 req_hop 的"距离"不同，这是**成员资格**；构造见 _compute_on_pending_path。
+        on_pending_path: np.ndarray | None = None
+        if edge_cfg.get("include_on_pending_path", False):
+            on_pending_path = self._compute_on_pending_path(requests)
         ewindows = env_state.edge_windows
         blocks = getattr(ewindows, "blocks", None)
         if blocks is not None and blocks[2] is not None:
@@ -502,6 +507,7 @@ class GraphBuilder:
                 relay_importance=relay_importance,
                 req_hop=req_hop,
                 req_hop_arr=req_hop_arr,
+                on_pending_path=on_pending_path,
             )
         else:
             rows = self._build_physical_edge_rows_loop(
@@ -512,6 +518,7 @@ class GraphBuilder:
                 demand_dim,
                 relay_importance=relay_importance,
                 req_hop=req_hop,
+                on_pending_path=on_pending_path,
             )
         dem_rows = self.build_demand_edge_features(
             env_state, requests, request_history, demand_pairs, demand_stats_by_pair=demand_stats_by_pair
@@ -524,6 +531,89 @@ class GraphBuilder:
                 return np.concatenate([rows, dem_padded], axis=0)
             return dem_padded
         return rows
+
+    def _compute_on_pending_path(self, requests: RequestQueue) -> np.ndarray:
+        """``(n_registered_edges,)`` float32 —— 该边是否**此刻**在某个待服务请求的通路上。
+
+        对每条 pending 请求，在「**有存量的边**」子图上取最短路（**与服务阶段
+        `routing.py:_find_positive_path` 完全同一张子图、同一个判据**），路径并集
+        里的边记 1。
+
+        ★ 为什么加这一列（2026-09-20 机制体检，见 `docs/训练诊断记录.md` 对应节）：
+
+        实测（真实验证协议，只读）——**约束不是"不够"，是"没打在点上"**：
+
+        | 量 | 读数 |
+        |---|---|
+        | 覆盖全部在挂请求路径所需的**不同跳数** U | p50 **9**（p95 22） |
+        | 实际激活弧数 | **60** |
+        | 挡路的**空跳**数 | p50 11 |
+        | 其中上一步被激活过的 | **0.00** |
+
+        端口预算 = 节点数 90，`U / 90 = 0.10` ⟹ **端口、路径长度、回合长度都不是约束**。
+        策略激活 60 条高分边，而真正卡住那 9 条请求的跳**一条都没被激活过**。
+
+        模型的既有代理信号都不表达"成员资格"：
+
+        - `include_req_hop`（4 列）= 端点到最近请求源/宿的 **hop 数**，
+          是**距离**不是成员资格 ——"在通路上"与"离通路很近"在它眼里几乎一样
+        - `include_relay_importance` 是图上的**软扩散**，同样不是成员资格
+
+        ⚠ **不要改成 `include_qkp_level`（level/capacity）**：那一列与已有的
+        `include_qkp_capacity_left` **完全共线**（互为 `1 - x`），而且实测
+        `level/capacity` 的 `p25=0 / p50=0.04 / p95=1.0` ⟹ 存量信息**已经在输入里**，
+        再加一列是**零信息改动**。缺的从来不是"这一跳有多少"，是
+        **"这一跳要不要紧"**。
+
+        历史对照：`relay_importance` 的 `max_path_links` 3→8 曾把
+        「（请求,槽）路径一跳都拿不到分」的比例从 72% 降到 50%，
+        专家 0.7801→0.7886（`features.yaml` 注释）—— 本列是那个方向的**硬版本**：
+        从"软扩散给点分"变成"在通路上就是 1"。
+        """
+        n = len(self._edge_list)
+        out = np.zeros(n, dtype=np.float32)
+        pending = requests.get_pending()
+        if not pending:
+            return out
+        positive = self.qkp.positive
+        if not positive:
+            return out
+        # 有存量的边子图（与服务阶段同构）：边 id -> 两端 node_index
+        adj: dict[int, list[tuple[int, int]]] = {}
+        for edge in self.edges:
+            if edge.edge_id not in positive:
+                continue
+            si = self.node_index[edge.src]
+            di = self.node_index[edge.dst]
+            pi = self._edge_pos[edge.edge_id]
+            adj.setdefault(si, []).append((di, pi))
+            adj.setdefault(di, []).append((si, pi))
+        for req in pending:
+            src = self.node_index.get(req.src_gs)
+            dst = self.node_index.get(req.dst_gs)
+            if src is None or dst is None or src == dst:
+                continue
+            parent: dict[int, tuple[int, int]] = {src: (-1, -1)}
+            queue: deque[int] = deque([src])
+            found = False
+            while queue:
+                cur = queue.popleft()
+                if cur == dst:
+                    found = True
+                    break
+                for nxt, pos in adj.get(cur, ()):
+                    if nxt in parent:
+                        continue
+                    parent[nxt] = (cur, pos)
+                    queue.append(nxt)
+            if not found:
+                continue
+            cur = dst
+            while parent[cur][0] != -1:
+                prev, pos = parent[cur]
+                out[pos] = 1.0
+                cur = prev
+        return out
 
     def _compute_req_hop_features(
         self,
@@ -604,6 +694,7 @@ class GraphBuilder:
         relay_importance: dict[str, float] | None = None,
         req_hop: dict[str, tuple[float, float, float, float]] | None = None,
         req_hop_arr: np.ndarray | None = None,
+        on_pending_path: np.ndarray | None = None,
     ) -> np.ndarray:
         """Physical edge feature rows assembled from the cached numpy blocks.
 
@@ -684,6 +775,15 @@ class GraphBuilder:
             )
             cap_left = np.divide(cap - lvl, cap, out=np.zeros_like(cap), where=cap > 0)
             cols.append(cap_left.astype(np.float32))
+        # 通路成员资格：该边此刻在不在某个 pending 请求的服务路径上。
+        # 与 req_hop（距离）不同，这是**成员资格**；详见 _compute_on_pending_path。
+        if edge_cfg.get("include_on_pending_path", False):
+            if on_pending_path is not None:
+                # `active_pos` 与 `_edge_capacity_arr` 的用法一致，都是 `_edge_list`
+                # 的下标；`_compute_on_pending_path` 也按同一套下标产出 ⟹ 直接取。
+                cols.append(on_pending_path[active_pos])
+            else:
+                cols.append(np.zeros(len(active_ids), dtype=np.float32))
         dyn = np.column_stack(cols) if cols else np.zeros((len(active_ids), 0), dtype=np.float32)
         static_rows = self._edge_static_arr[active_pos]
         rows = np.concatenate(
@@ -704,6 +804,7 @@ class GraphBuilder:
         demand_dim: int,
         relay_importance: dict[str, float] | None = None,
         req_hop: dict[str, tuple[float, float, float, float]] | None = None,
+        on_pending_path: np.ndarray | None = None,
     ) -> list[list[float]]:
         """Legacy per-window loop for directly-constructed windows (tests)."""
         horizon = int(edge_cfg.get("prediction_horizon", 0))
@@ -742,6 +843,9 @@ class GraphBuilder:
                 capacity = self.qkp.get_capacity(edge.edge_id)
                 level = self.qkp.get_level(edge.edge_id)
                 row.append((capacity - level) / capacity if capacity > 0 else 0.0)
+            if edge_cfg.get("include_on_pending_path", False):
+                pos = self._edge_pos[edge.edge_id]
+                row.append(float(on_pending_path[pos]) if on_pending_path is not None else 0.0)
             row.extend([0.0] * demand_dim)
             if len(row) != physical_dim + demand_dim:
                 raise ValueError(f"Physical edge feature dim mismatch: {len(row)} != {physical_dim + demand_dim}")
