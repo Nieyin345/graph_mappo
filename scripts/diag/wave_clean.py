@@ -52,7 +52,7 @@ PY = "/opt/qkd/venv/bin/python"
 OUT = REPO / "outputs"
 LOGDIR = Path("/tmp/cleanlogs")
 
-SEEDS = (42, 43, 44, 45, 46)
+SEEDS = (47, 48, 49, 50)
 ARMS = [f"clean_s{s}" for s in SEEDS]
 CTRL = [f"scratch_s{s}" for s in SEEDS]
 CONFIGS = ["rl_algorithm.yaml", "train_full_rl.yaml", "train_ent01.yaml",

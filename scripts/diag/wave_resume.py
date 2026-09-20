@@ -61,8 +61,9 @@ TRAIN_PATTERN = "train_graph_mappo"
 BASE_CONFIGS = ["rl_algorithm.yaml", "train_full_rl.yaml", "train_ent01.yaml"]
 
 # 从零族 9 条（主问题）+ BC 族 4 条（对照）。顺序**有意义**：先铺从零族。
-ALL_ARMS = [f"scratch_s{s}" for s in range(42, 51)] + \
-           [f"ent01_rerun_s{s}" for s in range(42, 46)]
+# @@ 2026-09-21 20:1x：scratch 族已续跑完（u58~60），本波改为**只续 BC 族**
+# —— 作为 resume 判读的对照：没有它，从零族续跑后只能报单侧曲线。
+ALL_ARMS = [f"ent01_rerun_s{s}" for s in range(42, 46)]
 
 RESUME_UPDATES = 30          # 增量：u30 -> u60
 PSS_PER_RUN = 25.0
@@ -201,27 +202,35 @@ def main() -> int:
         print(f"      {n}")
 
     # ---------- 1. 每条臂体检 ----------
-    print(f"\n  {'臂':<20}{'u':>5}{'final.pt':>10}  状态")
+    # @@ 2026-09-21：判据从 `checkpoint_final.pt` 改成 **metrics 的 u 号**。
+    #   ★ 实测发现 `checkpoint_final.pt` 对**续跑臂不可靠**：
+    #     `scratch_s42` 还在跑 u58，但它的 final.pt mtime 是 **16:12**
+    #     （第一次 u30 跑留下的**陈旧文件**）—— 照它判会误以为已完工。
+    #     `trainer.train()` 只有返回时才重写 final，中途一直是旧的。
+    print(f"\n  {'臂':<20}{'u':>5}  状态")
     ready = []
     for a in ALL_ARMS:
         ck = OUT / a / "checkpoint_final.pt"
         u = last_update(a)
         st = []
-        if not ck.exists():
-            st.append("★ 无 final.pt")
-            fails.append(f"{a}: 无 checkpoint_final.pt")
         if u is None:
             st.append("★ 无 metrics")
             fails.append(f"{a}: 无 metrics.jsonl")
+        else:
+            u_stale = ck.exists() and ck.stat().st_mtime < (
+                OUT / a / "metrics.jsonl").stat().st_mtime
+            if u_stale:
+                st.append("（final.pt 陈旧于 metrics）")
         if a in names:
             st.append("★ 正在跑（会双写）")
             fails.append(f"{a}: 正在跑，双写风险")
         if u is not None and u != 30:
             st.append(f"⚠ u={u}（预期 30）")
-        if not st:
+            fails.append(f"{a}: u={u} 不是 30 ⟹ 语义不是「从 u30 续」")
+        if not any("★" in x or "⚠" in x for x in st):
             ready.append(a)
-        print(f"  {a:<20}{u if u is not None else '—':>5}"
-              f"{'✓' if ck.exists() else '✗':>10}  {' '.join(st) if st else '✓ 可续跑'}")
+        print(f"  {a:<20}{u if u is not None else '—':>5}  "
+              f"{' '.join(st) if st else '✓ 可续跑'}")
 
     # ---------- 2. ★ 续跑配置自证 ----------
     print("\n  ★ 续跑配置自证：`pool_include_max` 必须为 false")
