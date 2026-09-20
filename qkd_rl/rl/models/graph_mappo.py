@@ -167,6 +167,27 @@ def _segment_sum(
     return sums, counts
 
 
+def _segment_max(x: torch.Tensor, gid: torch.Tensor, n_segments: int) -> torch.Tensor:
+    """Per-segment **max** over the rows of ``x``.
+
+    Why max exists alongside mean: the scheduler's bottleneck is a *min* over a
+    path (``routing.partial_consume_for_request``: ``serve_now = min(hop_levels)``),
+    so the discriminating signal sits in the single worst entity, not the
+    average one. Mean pooling dilutes that entity to 1/N and the critic cannot
+    see it; max is the aggregation that preserves it.
+
+    Empty segments yield 0 (matching ``_segment_sum``'s placeholder), not -inf,
+    so a graph with no demand edges contributes no spurious extreme.
+    """
+    if x.size(0) == 0:
+        return x.new_zeros((n_segments, x.size(1)))
+    out = x.new_full((n_segments, x.size(1)), float("-inf")).scatter_reduce_(
+        0, gid.unsqueeze(1).expand_as(x), x, reduce="amax", include_self=True
+    )
+    counts = x.new_zeros(n_segments).index_add_(0, gid, torch.ones_like(x[:, 0]))
+    return torch.where((counts == 0).unsqueeze(1), torch.zeros_like(out), out)
+
+
 class EdgeConditionedGraphLayer(nn.Module):
     def __init__(
         self,
@@ -705,6 +726,10 @@ class GlobalCritic(nn.Module):
         activation = enc_cfg.get("activation", "relu")
         dropout = float(enc_cfg.get("dropout", 0.0))
         self.pooling = config["critic"].get("pooling", "mean")
+        # Opt-in: append a per-type MAX pool next to the mean pools. Default
+        # False leaves every existing arm's input width (and therefore its
+        # behavior) bit-identical.
+        self.pool_include_max = bool(config["critic"].get("pool_include_max", False))
         if self.pooling == "typed_mean":
             # 节点平均 + 物理边平均 + 逻辑边平均 + 3 个图规模计数。
             value_input_dim = hidden_dim * 3 + 3
@@ -712,6 +737,8 @@ class GlobalCritic(nn.Module):
             value_input_dim = hidden_dim * 2
         else:
             raise NotImplementedError(f"Unsupported critic pooling: {self.pooling}")
+        if self.pool_include_max:
+            value_input_dim += hidden_dim * (3 if self.pooling == "typed_mean" else 1)
         self.value_head = build_mlp(
             value_input_dim,
             list(config["critic"]["hidden_dims"]),
@@ -749,6 +776,13 @@ class GlobalCritic(nn.Module):
                 )
             )
             graph_emb = torch.cat([node_pool, physical_pool, demand_pool, scale_counts], dim=-1)
+            if self.pool_include_max:
+                node_mx = node_emb.max(dim=0).values
+                phys_mx = (edge_emb_directed[:num_physical_directed].max(dim=0).values
+                           if num_physical_directed > 0 else torch.zeros(hidden, device=device))
+                dem_mx = (edge_emb_directed[num_physical_directed:].max(dim=0).values
+                          if num_demand_directed > 0 else torch.zeros(hidden, device=device))
+                graph_emb = torch.cat([graph_emb, node_mx, phys_mx, dem_mx], dim=-1)
         else:
             if edge_emb_directed.shape[0] == 0:
                 # Mask-first filtering may leave the graph with no physical links.
@@ -756,6 +790,11 @@ class GlobalCritic(nn.Module):
             else:
                 edge_pool = edge_emb_directed.mean(dim=0)
             graph_emb = torch.cat([node_pool, edge_pool], dim=-1)
+            if self.pool_include_max:
+                node_mx = node_emb.max(dim=0).values
+                edge_mx = (edge_emb_directed.max(dim=0).values
+                           if edge_emb_directed.shape[0] > 0 else torch.zeros(hidden, device=device))
+                graph_emb = torch.cat([graph_emb, node_mx, edge_mx], dim=-1)
         return self.value_head(graph_emb).squeeze(-1)
 
 
@@ -1132,6 +1171,11 @@ class GraphMAPPOActorCritic(nn.Module):
         node_sum, node_cnt = _segment_sum(node_emb, _segment_ids(n_nodes, device), n_graphs)
         phys_sum, phys_cnt = _segment_sum(phys_emb, _segment_ids(n_phys, device), n_graphs)
         dem_sum, dem_cnt = _segment_sum(demand_emb, _segment_ids(n_demand, device), n_graphs)
+        include_max = self.critic.pool_include_max
+        if include_max:
+            node_mx_all = _segment_max(node_emb, _segment_ids(n_nodes, device), n_graphs)
+            phys_mx_all = _segment_max(phys_emb, _segment_ids(n_phys, device), n_graphs)
+            dem_mx_all = _segment_max(demand_emb, _segment_ids(n_demand, device), n_graphs)
         for i in range(len(tensors_list)):
             node_pool = node_sum[i] / node_cnt[i].clamp(min=1.0)
             if pooling == "typed_mean":
@@ -1144,11 +1188,23 @@ class GraphMAPPOActorCritic(nn.Module):
                         device=edge_emb.device,
                     )
                 )
-                value_inputs.append(torch.cat([node_pool, physical_pool, demand_pool, scale_counts], dim=-1))
+                parts = [node_pool, physical_pool, demand_pool, scale_counts]
+                if include_max:
+                    parts += [node_mx_all[i], phys_mx_all[i], dem_mx_all[i]]
+                value_inputs.append(torch.cat(parts, dim=-1))
             else:
                 n_edge_i = n_phys[i] + n_demand[i]
                 edge_pool = (phys_sum[i] + dem_sum[i]) / max(n_edge_i, 1)
-                value_inputs.append(torch.cat([node_pool, edge_pool], dim=-1))
+                parts = [node_pool, edge_pool]
+                if include_max:
+                    n_edge_all = n_phys[i] + n_demand[i]
+                    if n_edge_all > 0:
+                        # Combined max over physical+demand rows for this graph.
+                        edge_mx = torch.maximum(phys_mx_all[i], dem_mx_all[i])
+                    else:
+                        edge_mx = torch.zeros(hidden, device=edge_emb.device)
+                    parts += [node_mx_all[i], edge_mx]
+                value_inputs.append(torch.cat(parts, dim=-1))
         if value_inputs:
             values_all = self.critic.value_head(torch.stack(value_inputs, dim=0)).squeeze(-1)
             values = [values_all[i] for i in range(len(tensors_list))]
