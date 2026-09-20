@@ -25,7 +25,7 @@ from pathlib import Path
 
 OUT = Path("/opt/qkd/graph_mappo/outputs")
 EXPERT = OUT / "eval" / "expert_seeds100_240.json"
-T = {4: 2.776, 5: 2.571, 8: 2.306, 14: 2.145}
+T = {2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 7: 2.365, 8: 2.306, 14: 2.145}
 
 
 def valpts(run):
