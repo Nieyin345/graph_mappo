@@ -49,8 +49,12 @@ PY = "/opt/qkd/venv/bin/python"
 OUT = REPO / "outputs"
 LOGDIR = Path("/tmp/delogs")
 
-SEEDS = (42, 43, 44, 45, 46)
+SEEDS = (47, 48, 49, 50)
 ARMS = [f"demandedge_s{s}" for s in SEEDS]
+# @@ 2026-09-21：对照 ent01_rerun **只有 s42..46** ⟹ 扩到 n=9 必须**同时起对照**，
+#    否则 s47..50 没有配对对象。CTRL 在本波里也要真起。
+CONTROL_ARMS = [f"ent01_rerun_s{s}" for s in SEEDS]
+LAUNCH = ARMS + CONTROL_ARMS
 CTRL = [f"ent01_rerun_s{s}" for s in SEEDS]
 CONFIGS = ["rl_algorithm.yaml", "train_full_rl.yaml", "train_ent01.yaml",
            "train_demandedge.yaml"]
@@ -165,7 +169,7 @@ def main() -> int:
     print(f"  臂      {' '.join(ARMS)}")
     print(f"  对照    {' '.join(CTRL)}（同配置、同 BC 起点、同种子、u30 已跑完）")
     print(f"  configs {' '.join(CONFIGS)}")
-    print(f"  唯一变量 model.mode: 对照=mixed（缺省） / 臂=demand_edge")
+    print(f"  唯一变量 model.mode: 对照=mixed（缺省） / 臂=demand_edge\n  本波**同时起对照**（ent01_rerun 只有 s42..46，扩到 n=9 需补）")
     print(f"  两侧都给 --checkpoint（BC 暖启动）")
     print()
 
@@ -196,12 +200,12 @@ def main() -> int:
     print(f"\n  进程表里在跑的 run（comm 锚定）：{len(names)} 条")
     for n in names:
         print(f"      {n}")
-    clash = [a for a in ARMS if a in names]
+    clash = [a for a in LAUNCH if a in names]
     if clash:
         fails.append(f"已有同名臂在跑 ⟹ 会双写：{clash}")
 
     # ---------- 4. outputs 目录不得已存在（防续写混入） ----------
-    for a in ARMS:
+    for a in LAUNCH:
         d = OUT / a
         if d.exists():
             existing = list(d.glob("metrics.jsonl"))
@@ -247,11 +251,11 @@ def main() -> int:
         delta = max(0.0, PSS_PER_RUN - est_now)
         warm += delta
         print(f"      {nm:<20} PSS={pss:5.1f} GiB  u={upd:<3} 待涨={delta:5.1f}")
-    need = PSS_PER_RUN * len(ARMS)
+    need = PSS_PER_RUN * len(LAUNCH)
     print(f"\n  内存门（三量）")
     print(f"    MemAvailable            {avail:.1f} GiB")
     print(f"    在跑 {len(live)} 条的待涨量       −{warm:.1f} GiB")
-    print(f"    本批 {len(ARMS)} 条稳态需求      −{need:.1f} GiB")
+    print(f"    本批 {len(LAUNCH)} 条稳态需求      −{need:.1f} GiB")
     residual = avail - warm - need
     print(f"    ⟹ 剩余                   {residual:.1f} GiB   （地板 {FLOOR}）")
     if residual < FLOOR:
@@ -270,18 +274,25 @@ def main() -> int:
         print("\n--dry-run：不启动。")
         return 0
 
+    # ★ 先把启动清单**完整构造**出来（本次就是在这里炸过：构造写在循环里，
+    #   4 条臂被拉起后父进程抛 NameError，臂跟着一起死）。
+    jobs = [(a, a.split("_s")[-1], CONFIGS) for a in ARMS] + \
+           [(a, a.split("_s")[-1], CONFIGS[:-1]) for a in CONTROL_ARMS]
+    assert len(jobs) == len(LAUNCH), f"jobs({len(jobs)}) != LAUNCH({len(LAUNCH)})"
+
     LOGDIR.mkdir(parents=True, exist_ok=True)
-    print(f"\n启动 {len(ARMS)} 条臂，日志 → {LOGDIR}")
+    print(f"\n启动 {len(jobs)} 条（{len(ARMS)} 臂 + {len(CONTROL_ARMS)} 对照），日志 → {LOGDIR}")
     launched = []
-    for arm, seed in zip(ARMS, SEEDS):
+    for arm, seed, cfgs in jobs:
         log = LOGDIR / f"{arm}.log"
         cmd = (f"cd {REPO} && OMP_NUM_THREADS={OMP_THREADS} MKL_NUM_THREADS={OMP_THREADS} "
                f"setsid nohup {PY} -u scripts/train/train_graph_mappo.py "
-               f"--configs {' '.join(CONFIGS)} "
+               f"--configs {' '.join(cfgs)} "
                + (f"--checkpoint {CKPT} " if CKPT else "")
                + f"--seed {seed} --num-updates {args.num_updates} "
                f"--run-name {arm} > {log} 2>&1 < /dev/null &")
-        print(f"  --- 启动 {arm} (seed {seed}) ---")
+        tag = "臂" if cfgs is CONFIGS else "对照"
+        print(f"  --- 启动 {arm} (seed {seed}, {tag}) ---")
         sh(cmd, timeout=25)
         launched.append(arm)
         time.sleep(2)
