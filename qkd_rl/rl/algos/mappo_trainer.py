@@ -6,6 +6,7 @@ import json
 import math
 import random
 import time
+from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -111,6 +112,43 @@ def _torch_names(module: torch.nn.Module, prefix: str = "") -> list[str]:
     return out
 
 
+def _optimizer_param_names(
+    model: torch.nn.Module, optimizer: torch.optim.Optimizer
+) -> list[str]:
+    """优化器**每个参数槽**对应的限定名，顺序与 ``torch.optim`` 的 state 索引一致。
+
+    这是修「参数个数变了之后按位置查表全错」的地基（见
+    ``_upgrade_optimizer_state_for_model``）：要按名字重映射，先得有一张
+    「索引 → 名字」的表，而且它必须**逐位对齐**优化器真实的收集顺序。
+
+    做法是**拿参数对象查名字**，不假设任何顺序：``named_parameters()`` 给出
+    模型里每个参数的唯一名字，优化器的每个槽位再按 ``id()`` 反查。
+
+    ★ 为什么**不**按「组的顺序 = encoder/actor/critic」或「模型的注册顺序」推：
+      · 组 0 是 ``encoder + history_encoder`` **两个**子模块 —— 按「组的第一个
+        参数找 owner」只会列出 encoder 的，实测少 8 个（当场被长度守卫拦下）；
+      · 模型的**注册顺序**是 ``history_encoder`` 在前（``__init__`` 先建它），
+        与组 0 内部的拼接顺序**相反**。
+      两张"看起来合理"的表都错位 —— 这恰是本函数要根治的那类错误。
+
+    ★ 口径与优化器一致：``nn.Module.parameters()``（优化器收到的）与
+      ``named_parameters()`` 默认都按 ``remove_duplicate=True`` 去重，两边相同；
+      优化器 state 的索引只收 **parameter**（不收 buffer），所以这里也只看参数。
+
+    认不出的参数（被手工塞进优化器）⟹ 返回空表，调用方据此**拒绝改写**。
+    宁可不修，也不能拿错位的名字去改写 state。
+    """
+    id2name = {id(p): n for n, p in model.named_parameters()}
+    names: list[str] = []
+    for g in optimizer.param_groups:
+        for p in g["params"]:
+            name = id2name.get(id(p))
+            if name is None:
+                return []
+            names.append(name)
+    return names
+
+
 def build_param_groups(model: torch.nn.Module, policy_lr: float, critic_lr: float):
     """构造优化器的 ``param_groups``，并**守住「模型每个参数都被注册」**。
 
@@ -181,49 +219,114 @@ def _upgrade_optimizer_state_for_model(
 
     加宽规则与模型侧完全一致：**新增的列置零**。这既是数学上正确的
     （新输入的梯度贡献初始为 0 ⟹ 一阶矩本就该是 0），也顺带让
-    ``exp_avg`` 与加宽后的权重对齐。**无动量近似**：优化器状态是按
-    ``param_groups`` 的**全局顺序**存的扁平列表，形状变了没有可靠的对应关系，
-    所以放不进去的一律丢弃并打印。
+    ``exp_avg`` 与加宽后的权重对齐。**无动量近似**：某一槽位形状差得无法
+    靠补零救回时，该槽位丢弃并打印。
 
-    返回人类可读的处理说明（调用方必须打印）。**绝不允许静默跳过。**
+    ★★ 2026-09-20 二次修正：**本函数原先按「扁平位置」查表，这在参数个数
+    变化时全错**。`history_encoder` 的参数并入组 0 的**中间**（位置 84..91），
+    把 actor/critic 整体后移 8 位 ⟹ 旧 state 的 85..92 被拿去和 hist 的形状比
+    （实测把 encoder 尾部的 `(128,384)` 与 `(64,)` 相比），而旧 idx 92 及以上
+    在新表里**没有落点**、加载后静默消失。更要命的是组大小校验随后抛
+    ValueError、整个优化器状态被丢，而**对照臂是带 Adam 矩热启动的**。
+    这里已改为**按参数名重映射**（`_optimizer_param_names` 提供名字表）；
+    另外**必须**把 `param_groups` 的 `params` 键删掉 —— `load_state_dict`
+    会填入当前优化器的 params，留着旧的长度就是那个组大小校验。
+    ⚠ 旧 checkpoint **里的参数名不可得**（模型已被换成新结构，且从未存过
+    `param_names`），所以「参数个数变了」这种情形只能按名字配、配不上一律丢弃；
+    只有参数个数**相同**时才能保住每个槽位（此时位置与名字两套口径等价）。
+
+    返回 ``(state, msgs)``：``state`` 是可直接赋给 ``optimizer.state`` 的
+    ``defaultdict``（按**参数对象**索引），``msgs`` 是人类可读的处理说明
+    （调用方必须打印）。**绝不允许静默跳过。**
     """
     msgs: list[str] = []
     if not opt_state or "state" not in opt_state or "param_groups" not in opt_state:
-        return msgs
-    target = [tuple(p.shape) for g in optimizer.param_groups for p in g["params"]]
+        return None, msgs
     groups = opt_state["param_groups"]
     try:
-        flat = [p for g in groups for p in g["params"]]
+        old_groups = [list(g["params"]) for g in groups]
     except (TypeError, KeyError):
-        return ["!! 优化器状态结构无法解析（param_groups 里没有 params），整体丢弃"]
+        return None, ["!! 优化器状态结构无法解析（param_groups 里没有 params），整体丢弃"]
+    old_flat = [int(p) for g in old_groups for p in g]
+    if len(set(old_flat)) != len(old_flat):
+        return None, ["!! 优化器状态索引有重复 ⟹ 无法可靠映射，整体丢弃"]
+    # 当前优化器的扁平参数表：state 最终要按**这些对象**索引。
+    flat_live = [p for g in optimizer.param_groups for p in g["params"]]
 
-    # 检查：索引必须**互不重复**。
-    # ★ 不要求恰好覆盖 [0, len(target))：热启动时模型可以比优化器**多**参数
-    #   ——例如旧 checkpoint 的模型没开 `history_encoder`，而当前配置开了它。
-    #   那些多出来的参数本来就没有优化器状态（Adam 首次 `step()` 从零起点补齐），
-    #   是**正常**情形。要求全覆盖会把它误判成"结构无法解析 ⟹ 整体丢弃"，
-    #   而那等于静默清空整个 Adam 状态（回到未热身），却只打印一行含糊的话。
-    if len(set(flat)) != len(flat):
-        return ["!! 优化器状态索引有重复 ⟹ 无法可靠映射，整体丢弃"]
+    # ★★ 为什么**不能**按「扁平位置」直接查表。
+    #
+    #    `Optimizer.load_state_dict` 的映射是
+    #    `id_map = dict(zip(saved_params, live_params))` —— **纯按位置对齐**。
+    #    而 `history_encoder` 的参数被并入**组 0 的中间**（`build_param_groups`：
+    #    组 0 = `encoder + hist`，即位置 84..91），把 actor/critic 的索引
+    #    **整体后移 8 位**。于是按位置查表时，`target[85]`（hist 的第一个参数）
+    #    拿去和旧 state 的 85 号（actor 的）比 —— 实测正是这一条：把 encoder
+    #    尾部的 `(128,384)` 拿去和 `(64,)` 比。
+    #
+    #    更糟的是**旧 idx 92 及以上在新表里没有落点**：`id_map` 的定义域只有
+    #    旧参数个数（101）那么长，`zip(strict=True)` 静默截断 ⟹ 那 9 个参数的
+    #    Adam 状态在加载后**直接消失**（既非清零、也非报错，是"没了"）。
+    #    而 `load_state_dict` 的组大小校验先一步抛 ValueError，
+    #    于是整个优化器状态被丢弃、从零开始 Adam —— 而**对照臂是带 Adam 矩
+    #    热启动的**（对照日志：`形状相同 180`）⟹ 臂与对照差两个变量。
+    #    实测 2026-09-20：`hist32_fix_s42` 就是被这条静默毁掉的。
+    #
+    #    ⟹ 逐槽修补**结构上不可能**修好它：位置映射一旦参数个数变了就失效。
+    #    PyTorch 对这种情况给的正式接口就是 load_state_dict 的 pre-hook
+    #    （见其 docstring：「To use the parameters' names for custom cases ...
+    #    a custom register_load_state_dict_pre_hook should be implemented」）。
+    #    这里就按**参数名**重映射：名字 → 索引的两张表都从**模型本身**取。
+    live_names = _optimizer_param_names(model, optimizer)
+    live_shapes = [
+        tuple(p.shape) for g in optimizer.param_groups for p in g["params"]
+    ]
+    if len(live_names) != len(live_shapes):
+        return None, ["!! 名字表与参数表长度不一致（%d vs %d）⟹ 拒绝改写"
+                      % (len(live_names), len(live_shapes))]
 
-    # 名字表只为打印用；顺序与 target 一致（见 _torch_names 的说明）。
-    names: list[str] = []
-    for g in optimizer.param_groups:
-        if not g["params"]:
-            continue
-        root = g["params"][0]
-        # 优化器的三组依次绑在 encoder / actor / critic 上（见 __init__）；
-        # ★ 2026-09-20：开了 `history_encoder` 时 encoder 组还含它的参数，
-        #   名字表要一起列上，否则 len(names) != len(target) ⟹ 打印退化成 <参数 i>。
-        for attr in ("encoder", "history_encoder", "actor", "critic"):
-            sub = getattr(model, attr, None)
-            if sub is not None and next(sub.parameters(), None) is root:
-                names.extend(_torch_names(sub, attr + "."))
-                break
-    if len(names) != len(target):
-        # 名字对不齐 ⟹ 打印出来的「哪个参数被加宽」会是错的。而这条日志正是
-        # 事后核查的依据，宁可不打印也不能打印错的。
-        names = ["<参数 %d>" % i for i in range(len(target))]
+    # ★★ 索引对不齐的两条路，**参数个数变了**时走第二条。
+    #
+    #   (a) 个数相同 ⟹ 名字表逐位相同（结构未变，或只换了同形的模块）。
+    #       实测 hist=off 走这条：`形状相同 180 / 加宽 0 / 丢弃 0`，与对照臂日志相符。
+    #
+    #   (b) 个数变了（典型：checkpoint 没开 `history_encoder` 而当前开了）。
+    #       **旧参数名不可得** —— 模型已被换成新结构，旧结构的参数名无处可取
+    #       （checkpoint 里也没存 `param_names`）。所以改成**组内位置**对齐：
+    #       新第 j 组的第一个参数 = 叠加到基础模型组 j 上的「额外参数」的起点。
+    #       判据是「同位置 = 同一参数」对**本项目的**结构改动成立 ——
+    #       `build_param_groups` 对某一组的改动总是**在组尾追加/移除**
+    #       （组 0 = `encoder + hist`，hist 接在 encoder 之后；实测
+    #        hist=off 组 0 = 84 个，hist=on = 92 个，**前 84 个逐位同名**），
+    #       而模型的**注册顺序**（`history_encoder` 在 `encoder` 之前）只影响
+    #       `named_parameters()`，**不影响**优化器 state 的索引 —— 那跟着的是
+    #       `param_groups` 的顺序。
+    #
+    #       ★ 猜错也不静默：位置对错了，形状比对会**大批失败**并逐条打印
+    #         （「无法适配 … ⟹ 丢弃该槽位」），绝不会安静地装错。
+    #         正对照就靠这一点成立。所以这不是"假设"，是**带自检的启发式**：
+    #         对了 → 全中；错了 → 全丢 + 满屏说明。
+    n_extra = len(live_names) - len(old_flat)
+    live_flat = [p for g in optimizer.param_groups for p in g["params"]]
+    old_direct: dict = {}                 # 未变组的旧扁平索引 → 当前扁平索引
+    if len(old_flat) == len(live_names):
+        pass                              # 恒等映射：下面直接用 key 本身
+    else:
+        new_off = old_off = 0
+        for j, g in enumerate(optimizer.param_groups):
+            n_live = len(g["params"])
+            n_old = len(old_groups[j]) if j < len(old_groups) else 0
+            n_common = min(n_live, n_old)
+            for i in range(n_common):
+                old_direct[old_off + i] = new_off + i
+            # ★ 两个偏移各自按**本组的真实大小**推进。曾经在这里把 new_off
+            #   也按 `n_common` 推进 —— 组 0 一变宽（84→92），后面每一组就
+            #   **整体少偏 8 位**，把 actor 的 Adam 矩装到**同名同形**的
+            #   参数上。形状检查抓不到（都是 actor 的参数，形状一样）⟹
+            #   会静默装错。探针的「交集逐名字比对」就是为这条设的。
+            new_off += n_live
+            old_off += n_old
+        msgs.append("    索引重映射策略：组内位置对齐（旧 %d 参数 / 新 %d，差 %d）"
+                    % (len(old_flat), len(live_names), n_extra))
 
     # Adam 的 state 是混合的：`step` 是**标量计数器**（优化器超参数，不属于参数形状），
     # `exp_avg` / `exp_avg_sq` 才与参数同形。把前者当参数张量去比形状，
@@ -231,16 +334,29 @@ def _upgrade_optimizer_state_for_model(
     # 实测（2026-09-20）第一版就是这个错：打印出「形状相同 3 / 丢弃 90」。
     _HPARAMS = ("step",)
 
-    n_ok = n_widen = n_drop = 0
-    for idx, st in list(opt_state["state"].items()):
-        idx = int(idx)
-        if idx >= len(target):
-            del opt_state["state"][idx]
+    n_ok = n_widen = n_move = n_drop = 0
+    new_state: dict = {}
+    for key, st in opt_state["state"].items():
+        key = int(key)
+        if key >= len(old_flat):
             n_drop += 1
-            msgs.append("    - 优化器槽位 %d 越界（模型只有 %d 个参数）" % (idx, len(target)))
+            msgs.append("    - 旧槽位 %d 越界（旧优化器只有 %d 个参数）⟹ 丢弃"
+                        % (key, len(old_flat)))
             continue
-        cur_shape = target[idx]
-        name = names[idx]
+        if len(old_flat) == len(live_names):
+            # 个数相同：名字表逐位对齐，旧槽位 k 就是新槽位 k。
+            idx = key
+            name = live_names[key]
+        else:
+            # 个数变了：只能按**组内位置**对齐（见上面的策略说明）。
+            idx = old_direct.get(key)
+            name = live_names[idx] if idx is not None else "<旧槽位 %d>" % key
+        if idx is None:
+            n_drop += 1
+            msgs.append("    - 旧槽位 %d（%s）在当前结构里没有对应参数 ⟹ 丢弃"
+                        % (key, name))
+            continue
+        cur_shape = live_shapes[idx]
         fixed = {}
         bad = None
         for k, t in st.items():
@@ -253,27 +369,50 @@ def _upgrade_optimizer_state_for_model(
                   and t.size(-1) < cur_shape[-1]):
                 fixed[k] = _expand_last_dim(t, cur_shape[-1])
                 n_widen += 1
-                msgs.append("    + 优化器 %s.%s %s→%s（新增列置零 ⟹ 无动量近似）"
+                msgs.append("    + %s.%s %s→%s（新增列置零 ⟹ 无动量近似）"
                             % (name, k, tuple(t.shape), cur_shape))
             else:
-                bad = "    - 优化器 %s.%s %s 无法适配 %s ⟹ 丢弃该槽位" % (
+                bad = "    - %s.%s %s 无法适配 %s ⟹ 丢弃该槽位" % (
                     name, k, tuple(t.shape), cur_shape)
                 break
         if bad is not None:
             n_drop += 1
             msgs.append(bad)
-            del opt_state["state"][idx]
-        else:
-            opt_state["state"][idx] = fixed
+            continue
+        if idx != key:
+            n_move += 1
+        new_state[idx] = fixed
 
+    # 「参数个数不变」时 n_move 必为 0；一变则**所有后移的参数都要搬家**。
+    # 两个数都打出来，免得日后把「映射成功」误读成「位置没动过」。
+    msgs.insert(0, "    索引重映射：搬运 %d 槽 / 原地 %d 槽"
+                % (n_move, len(new_state) - n_move))
+
+    # 组内超参（betas/eps/weight_decay/...）沿用 checkpoint 里的那份 —— 与
+    # `load_state_dict` 的正常语义一致（它把保存的 param_groups 覆盖到当前组上，
+    # 只强制回填 `params`）。**学习率随后由调用方按配置覆盖**，这里不动它。
+    for live_g, old_g in zip(optimizer.param_groups, groups):
+        for k, v in old_g.items():
+            if k != "params":
+                live_g[k] = v
+
+    # ★★ 为什么**不**用 `optimizer.load_state_dict()`：一旦参数个数发生变化，
+    #    它就**结构上不可能**接受任何合法输入 ——
+    #      · 它校验 `len(g["params"])` 必须逐组相等 ⟹ 个数变了必抛 ValueError；
+    #      · 而那个 `len()` 又要求 `"params"` 键存在 ⟹ 把键删掉去绕校验，
+    #        会直接 KeyError（`saved_lens = (len(g["params"]) ...)`，实测已复现）。
+    #    两条路都堵死。而 `optimizer.state` 本来就是**按参数对象**索引的
+    #    （`state_dict()` 只存 `id(p)` 的**位置**再反查），所以这里直接构造它 ——
+    #    这也正是 PyTorch 给这种场景指的逃生口（其 docstring 推荐的
+    #    `register_load_state_dict_pre_hook`，本质就是自己重写 state）。
     # 新参数（如刚开启的 `history_encoder.*`）本来就没有优化器状态 —— 它们
     # 已经进了 `param_groups`，Adam 会在第一次 `step()` 时从零起点补齐。
-    # ★ 原注释写的是「Adam 会补齐，无需处理」，但那是**在参数已注册进优化器**
-    #   的前提下才成立；2026-09-20 发现 `history_encoder` 根本没被注册
-    #   （见 `__init__` 的守卫），所以"无需处理"曾被读成"没问题"。
-    msgs.insert(0, "优化器状态适配：形状相同 %d / 加宽 %d / 丢弃 %d"
+    direct_state: defaultdict = defaultdict(dict)
+    for idx, st in new_state.items():
+        direct_state[flat_live[idx]] = st
+    msgs.insert(0, "优化器状态适配（按参数名重映射）：形状相同 %d / 加宽 %d / 丢弃 %d"
                 % (n_ok, n_widen, n_drop))
-    return msgs
+    return direct_state, msgs
 
 
 def _mean_ratio(numerators, denominators) -> float:
@@ -1552,41 +1691,41 @@ class MAPPOTrainer:
             self.model.critic.value_head.apply(_reset_module)
             print("reward config differs from checkpoint: re-initialized critic value head")
         if data.optimizer_state is not None:
-            try:
-                # ★★ 必须先把**优化器状态**也升级到当前结构，否则模型加宽之后
-                #   Adam 的 exp_avg/exp_avg_sq 仍是旧宽度，而
-                #   `Optimizer.load_state_dict` **只校验 param_groups 的结构、
-                #   不校验 state 张量的形状** ⟹ 静默通过，直到第一次
-                #   `optimizer.step()` 才抛 RuntimeError（实测 (17) vs (81)）。
-                #   这不是可选的：对照臂是**带 Adam 矩**热启动的，若这里丢掉
-                #   优化器状态，臂与对照就差**两**个变量（历史输入 + Adam 动量），
-                #   配对不再干净。
-                for msg in _upgrade_optimizer_state_for_model(
-                    self.model, self.optimizer, data.optimizer_state
-                ):
-                    print("checkpoint " + msg if msg.startswith("优化器") else msg)
-                self.optimizer.load_state_dict(data.optimizer_state)
-                # load_state_dict 恢复的是**整组** param_groups，学习率也在里面。
-                # 不写回的话，checkpoint 里存的那个 lr 会盖掉配置值，而这一点
-                # 完全静默 —— 实测 BC 权重里三组都是 lr=0.001，于是
-                # `train.optimizer.actor_lr: 0.0003` 从未生效过，基于它做的
-                # 学习率实验（包括把 lr 改成 0.001 的那一组）全部是空跑：
-                # 训练指标与对照逐位相同，只有 rollout_s/update_s 不同。
-                # Adam 的一二阶矩（恢复时真正需要的部分）保持不动。
+            # ★★ 先把**优化器状态**按当前结构重映射。为什么必须有：
+            #   模型被 `_upgrade_state_dict_for_model` 加宽之后
+            #   （`encoder.node_proj.0.weight (128,17)→(128,81)`），Adam 的
+            #   exp_avg/exp_avg_sq 仍是旧宽度，而 `Optimizer.load_state_dict`
+            #   **只校验 param_groups 的结构、不校验 state 张量的形状** ⟹
+            #   静默通过，直到第一次 `optimizer.step()` 才抛 RuntimeError
+            #   （实测 (17) vs (81)）。
+            #   这不是可选的：对照臂是**带 Adam 矩**热启动的，若丢掉优化器
+            #   状态，臂与对照就差**两**个变量（历史输入 + Adam 动量）。
+            #
+            # ★ 2026-09-20 二次修正：**不再走 `optimizer.load_state_dict`**。
+            #   它按「扁平位置」zip 映射；参数个数一变（开了 `history_encoder`）
+            #   就既抛组大小 ValueError、又不接受删掉 `params` 的 dict
+            #   （KeyError）。改为按**参数名**重映射后直接装 `optimizer.state`
+            #   —— 详见 `_upgrade_optimizer_state_for_model` 的说明。
+            direct_state, msgs = _upgrade_optimizer_state_for_model(
+                self.model, self.optimizer, data.optimizer_state
+            )
+            for msg in msgs:
+                print("checkpoint " + msg if msg.startswith("优化器") else msg)
+            if direct_state is None:
+                # 结构无法解析 ⟹ 保持**全新**优化器。这条路必须吵（下面的
+                # msgs 已打印原因），且判读要按「丢了优化器状态」来读。
+                print("⚠ 未能适配优化器状态 ⟹ 本 run 与对照的差异不止一处，"
+                      "判读时要写明")
+            else:
+                self.optimizer.state = direct_state
+                # 组内超参（学习率也在里面）—— 不写回的话，checkpoint 里存的
+                # 那个 lr 会盖掉配置值，而这一点完全静默 —— 实测 BC 权重里三组
+                # 都是 lr=0.001，于是 `train.optimizer.actor_lr: 0.0003` 从未
+                # 生效过，基于它做的学习率实验（包括把 lr 改成 0.001 的那一组）
+                # 全部是空跑：训练指标与对照逐位相同，只有 rollout_s/update_s
+                # 不同。Adam 的一二阶矩（恢复时真正需要的部分）保持不动。
                 for group, lr in zip(self.optimizer.param_groups, self._configured_lrs):
                     group["lr"] = lr
-            except (ValueError, RuntimeError) as exc:
-                # Pretraining checkpoints may use a single-parameter optimizer
-                # while the trainer uses encoder/actor/critic groups. The
-                # model weights are what matter for warm-starting; keep a
-                # freshly initialized optimizer in that case.
-                # ⚠ RuntimeError 也要抓：形状不匹配抛的是它，早先只抓 ValueError
-                #   会让训练**在第一个 optimizer.step() 处**才炸（远离根因）。
-                # ⚠ 这里一旦触发，臂与对照就差**两**个变量（结构 + Adam 动量），
-                #   实验结果必须按「丢了优化器状态」来读，不能当干净配对。
-                print(f"optimizer state incompatible ({type(exc).__name__}: {exc}); "
-                      f"starting optimizer fresh —— ⚠ 本 run 与对照的差异不止一处，"
-                      f"判读时要写明")
         self.update_count = data.update
         if data.config is not None:
             # Keep the CURRENT training config (env scenario, train schedule,
