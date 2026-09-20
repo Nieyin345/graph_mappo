@@ -146,10 +146,14 @@ def _upgrade_optimizer_state_for_model(
     except (TypeError, KeyError):
         return ["!! 优化器状态结构无法解析（param_groups 里没有 params），整体丢弃"]
 
-    # 检查：索引必须连续覆盖 [0, len(target))
-    if sorted(flat) != list(range(len(target))):
-        return ["!! 优化器状态索引不是 0..%d 的排列 ⟹ 无法可靠映射，整体丢弃"
-                % (len(target) - 1)]
+    # 检查：索引必须**互不重复**。
+    # ★ 不要求恰好覆盖 [0, len(target))：热启动时模型可以比优化器**多**参数
+    #   ——例如旧 checkpoint 的模型没开 `history_encoder`，而当前配置开了它。
+    #   那些多出来的参数本来就没有优化器状态（Adam 首次 `step()` 从零起点补齐），
+    #   是**正常**情形。要求全覆盖会把它误判成"结构无法解析 ⟹ 整体丢弃"，
+    #   而那等于静默清空整个 Adam 状态（回到未热身），却只打印一行含糊的话。
+    if len(set(flat)) != len(flat):
+        return ["!! 优化器状态索引有重复 ⟹ 无法可靠映射，整体丢弃"]
 
     # 名字表只为打印用；顺序与 target 一致（见 _torch_names 的说明）。
     names: list[str] = []
@@ -157,8 +161,10 @@ def _upgrade_optimizer_state_for_model(
         if not g["params"]:
             continue
         root = g["params"][0]
-        # 优化器的三组依次绑在 encoder / actor / critic 上（见 __init__）
-        for attr in ("encoder", "actor", "critic"):
+        # 优化器的三组依次绑在 encoder / actor / critic 上（见 __init__）；
+        # ★ 2026-09-20：开了 `history_encoder` 时 encoder 组还含它的参数，
+        #   名字表要一起列上，否则 len(names) != len(target) ⟹ 打印退化成 <参数 i>。
+        for attr in ("encoder", "history_encoder", "actor", "critic"):
             sub = getattr(model, attr, None)
             if sub is not None and next(sub.parameters(), None) is root:
                 names.extend(_torch_names(sub, attr + "."))
@@ -209,7 +215,11 @@ def _upgrade_optimizer_state_for_model(
         else:
             opt_state["state"][idx] = fixed
 
-    # 新参数（如 history_encoder.*）本来就没有优化器状态：Adam 会补齐，无需处理。
+    # 新参数（如刚开启的 `history_encoder.*`）本来就没有优化器状态 —— 它们
+    # 已经进了 `param_groups`，Adam 会在第一次 `step()` 时从零起点补齐。
+    # ★ 原注释写的是「Adam 会补齐，无需处理」，但那是**在参数已注册进优化器**
+    #   的前提下才成立；2026-09-20 发现 `history_encoder` 根本没被注册
+    #   （见 `__init__` 的守卫），所以"无需处理"曾被读成"没问题"。
     msgs.insert(0, "优化器状态适配：形状相同 %d / 加宽 %d / 丢弃 %d"
                 % (n_ok, n_widen, n_drop))
     return msgs
@@ -334,20 +344,54 @@ class MAPPOTrainer:
             float(opt_cfg["actor_lr"]),    # actor
             float(opt_cfg["critic_lr"]),   # critic
         ]
-        self.optimizer = torch.optim.Adam(
-            [
-                {"params": self.model.encoder.parameters(), "lr": self._configured_lrs[0]},
-                {"params": self.model.actor.parameters(), "lr": self._configured_lrs[1]},
-                {"params": self.model.critic.parameters(), "lr": self._configured_lrs[2]},
-            ]
-        )
+        # ★★ 2026-09-20 修：`history_encoder` 曾**不在**这个列表里。
+        #   它是 `graph_mappo.py:768` 的**兄弟模块**，而这里只注册 encoder/actor/critic
+        #   ⟹ 打开 `features.history_encoder.enabled` 时，它的 37,760 个参数
+        #   （LSTM + 三个投影，占模型 3.44%）**从不被 Adam 更新**，
+        #   输出的是**固定随机特征** —— 整条 hist 实验线付了 2.3× 内存却没换来能力。
+        #   实测装置：`.tmp/audit_hist_optimizer.py`（正对照 = 基线链「未注册 0 个参数」）。
+        _param_groups = [
+            {"params": self.model.encoder.parameters(), "lr": self._configured_lrs[0]},
+            {"params": self.model.actor.parameters(), "lr": self._configured_lrs[1]},
+            {"params": self.model.critic.parameters(), "lr": self._configured_lrs[2]},
+        ]
+        if getattr(self.model, "history_encoder", None) is not None:
+            # 与 encoder 同组同 lr：两者都以"给节点/边造表示"为职责，共享策略侧 lr。
+            _param_groups[0] = {
+                "params": list(self.model.encoder.parameters())
+                + list(self.model.history_encoder.parameters()),
+                "lr": self._configured_lrs[0],
+            }
+        self.optimizer = torch.optim.Adam(_param_groups)
         # Gradient clipping is applied per role by default: see the note in
         # ``update``. Set ``train.ppo.clip_per_role: false`` to clip the whole
         # model together (the previous behaviour, kept for ablation).
         self.clip_per_role = bool(self.ppo_cfg.get("clip_per_role", True))
         # The encoder is shared, so it belongs to the policy group.
         self._policy_params = list(self.model.encoder.parameters()) + list(self.model.actor.parameters())
+        if getattr(self.model, "history_encoder", None) is not None:
+            # 同样属于策略侧：它只喂 actor/encoder，不喂 critic。
+            self._policy_params += list(self.model.history_encoder.parameters())
         self._value_params = list(self.model.critic.parameters())
+
+        # ★★ 守卫：模型的**每一个**参数都必须落进优化器。
+        #    上面那个 bug 静默活了一整条实验线，就是因为没有任何东西检查它。
+        #    「漏一个子模块」和「配置没开那个子模块」在读数上长得一模一样，
+        #    所以这里**必须**主动问一次世界（不靠人读代码）。
+        _registered = {id(p) for g in self.optimizer.param_groups for p in g["params"]}
+        _unreg = [p for p in self.model.parameters() if id(p) not in _registered]
+        if _unreg:
+            _n = sum(p.numel() for p in _unreg)
+            _owners = sorted({
+                n for n, m in self.model.named_children()
+                if any(id(q) in {id(x) for x in _unreg} for q in m.parameters())
+            }) if _unreg else []
+            raise RuntimeError(
+                "★ 有 %d 个模型参数（%s 个张量）未被注册进优化器：%s —— "
+                "它们将永不更新，而症状与「配置没开」无法区分。"
+                "请把它们加进 __init__ 的 param_groups。"
+                % (_n, len(_unreg), _owners or "顶层参数")
+            )
 
         seed = int(config["seed"]["global_seed"])
         torch.manual_seed(seed)
