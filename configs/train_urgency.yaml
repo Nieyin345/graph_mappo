@@ -20,35 +20,40 @@
 #   urgency **都不敏感**（服务 1 个 key 恒定给 5e-4，不管多急），
 #   所以那两项定的是「水平」，只有这一项定「方向」。
 #
-# 二、量级（推导见 docs/实验日志.md 第二节）
+# 二、量级（★ 2026-09-21 修正：先前版本多除了一个 served_reference）
 # ══════════════════════════════════════════════════════════════════════════
 #
 # 一个请求活满 `deadline_steps=30` 步，urgency 从 0 线性涨到 1，
-# 它**一生累计**的加权量 = Σ_{k=0}^{30} (k/30) = 30×31/2/30 = **15.5**
+# 它**一生累计**的加权量（相对自身量 A）= Σ_{k=0}^{29} k/30 = **14.5**
 #
-# 令「一生的等待惩罚」=「过期一次罚的量」（w_f × 该请求的量）：
+# 令「一生的等待惩罚」=「过期一次罚的量」：
 #
-#     urgency_wait_weight × (量 × 15.5)  =  w_f × 量
-#     ⟹ urgency_wait_weight = w_f / 15.5
+#     w × A × 14.5 / served_reference  =  failed_weight × A / served_reference
+#     ↑ 两边分母相同，**约掉**                              ↑ 同一个分母
+#     ⟹ w × 14.5 = failed_weight = 5
+#     ⟹ **w = 5 / 14.5 ≈ 0.345**
 #
-# ★ 这里 w_f 取**每 key 的失败罚**（= failed_weight / served_reference），
-#   与 served / failed 同一单位。基线 w_f = 5/1e5 = 5e-5 每 key：
-#
-#     urgency_wait_weight = 5e-5 / 15.5 ≈ 3.2e-6
+# ⚠ 先前写的 3.2e-6 是错的：把 `failed_weight/served_reference` 当成"每 key 罚"
+#   后又除以 15.5，等于**多除了一次 1e5**。被造反证抓到（手算 vs env 差 549 倍）。
 #
 # 三、剂量臂（同一机制，只改强度）
 # ══════════════════════════════════════════════════════════════════════════
 #
-#   u0（对照）  urgency_wait_enabled: false          ← 现状，不加新项
-#   u1（0.5×）  urgency_wait_weight: 1.6e-6
-#   u2（1×）    urgency_wait_weight: 3.2e-6          ← 上面推的平衡点
-#   u3（2×）    urgency_wait_weight: 6.4e-6
+#   u0（对照）  urgency_wait_enabled: false             ← 现状，不加新项
+#   u1（0.5×）  urgency_wait_weight: 0.17
+#   u2（1×）    urgency_wait_weight: 0.35               ← 上面推的平衡点
+#   u3（2×）    urgency_wait_weight: 0.70
+#   u4（4×）    urgency_wait_weight: 1.40               ← 上界，测"过强会不会伤成功率"
 #
-# ⚠ **起跑值是推导的，不是实测的**。必须先用探针量出真实量级
-#   （`.tmp/probe_urgency_magnitude.py`），再定死数字。
+# ⚠ **起跑值是推导的，不是实测的**。实测（`.tmp/probe_urgency_magnitude.py`，
+#   专家策略）给出 `Σ urgency×剩余量 / 平量积压 = 0.36`，与「年龄均匀」的
+#   预期一致 ⟹ 机制确实有区分度（不是恒 0）。
 #
 # ⚠ 与 `waiting_enabled` **互斥**：两个都开会让「积压」被罚两次。
 #   本组实验保持 `waiting_enabled: false` 不动。
+#
+# ⚠ `reward_scale` 暂不重标：1× 时新项约占 served 项的 3%（未缩放 0.97 vs 33.5），
+#   不改变总尺度。若最高剂量臂仍偏弱，再考虑调 scale。
 #
 # ⚠ 本文件必须排在 `train_ent01.yaml` **之后**（后覆盖前）。
 
@@ -58,4 +63,4 @@ reward:
   #   failed_weight: 5.0         （过期失败惩罚）
   #   waiting_enabled: false     （平量积压惩罚，与本项互斥）
   urgency_wait_enabled: true
-  urgency_wait_weight: 3.2e-6
+  urgency_wait_weight: 0.35

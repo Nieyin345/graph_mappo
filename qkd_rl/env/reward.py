@@ -110,7 +110,11 @@ class RewardFunction:
 
     # RewardDetail fields that are key COUNTS, not reward amounts, and must not
     # be rescaled with the reward.
-    _COUNT_FIELDS = ("attributed_served", "history_utilized")
+    _COUNT_FIELDS = (
+        "attributed_served",
+        "history_utilized",
+        "urgency_weighted_keys",
+    )
 
     def _scaled(self, detail: RewardDetail) -> RewardDetail:
         """Apply the global reward scale to every reward component, keeping the
