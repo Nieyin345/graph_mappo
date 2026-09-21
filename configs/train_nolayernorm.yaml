@@ -1,0 +1,20 @@
+# `model.encoder.layer_norm: true → false`（**去掉层归一化**）
+# ══════════════════════════════════════════════════════════════════════════
+# 一、为什么是这条
+# ══════════════════════════════════════════════════════════════════════════
+#
+# `graph_mappo.py:226/244`：
+#     self.norm      = nn.LayerNorm(hidden_dim) if layer_norm else nn.Identity()
+#     self.edge_norm = nn.LayerNorm(hidden_dim) if layer_norm else nn.Identity()
+#
+# 全库 **78/78 条臂 `layer_norm: true`** ⟹ **从未扫过**。
+#
+# ⚠ 但它是**会丢权重的**改动（每层 2 个 `norm.*` 张量），**不是"不改维度"那一类**。
+#    ⟹ 起臂前必须跑预检确认：丢的是否**只**是 `*.norm.*`（那些是随层一起丢的）。
+#
+# 机理（若成立）：LayerNorm 在多跳消息传递里抑制**尺度漂移**。
+# 去掉它 ⟹ 深层表示的量级无约束 ⟹ 可能影响 `num_layers=3` 的稳定性。
+# 与 `nograph`（去消息传递本身）是**不同的**问题：这个是"传递的数值稳不稳"。
+model:
+  encoder:
+    layer_norm: false
