@@ -4,7 +4,7 @@ from pathlib import Path
 
 REPO = Path("/opt/qkd/graph_mappo")
 ARMS = [("%s_s%d" % (a, s)) for a in ("u0ctl", "u1half", "u2bal", "u3two", "u4quad")
-        for s in (42, 43, 44, 45, 46)]
+        for s in range(42, 56)]
 
 # 哪些在跑（问进程表，不问账本）
 out = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True).stdout
