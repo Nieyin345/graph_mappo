@@ -1,0 +1,6 @@
+# urgency-weighted waiting penalty: 1x
+# Full rationale: configs/train_urgency.yaml + docs/实验日志.md section 4.
+# Single variable = reward.urgency_wait_weight (everything else locked).
+reward:
+  urgency_wait_enabled: true
+  urgency_wait_weight: 0.35

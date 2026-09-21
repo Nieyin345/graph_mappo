@@ -1,0 +1,5 @@
+# urgency-weighted waiting penalty: control arm (explicitly off)
+# Only difference from the arms = this switch.
+reward:
+  urgency_wait_enabled: false
+  urgency_wait_weight: 0.0
