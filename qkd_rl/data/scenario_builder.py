@@ -86,8 +86,17 @@ class ScenarioBuilder:
         * SAT: the N satellites with an inclined orbit (``Mid``/``MEO``) first,
           skipping equatorial (``Eq``), polar (``Pol``) and GEO satellites when
           enough inclined ones exist.
+
+        ``exclude`` (list of node names) drops those nodes unconditionally,
+        before the count limits are applied.  A GS listed here disappears from
+        the request pairs as well, since the generator is built from the
+        surviving ``scenario.nodes``.  Dropping an isolated GS also drops any
+        HAP left with no GS in range.
         """
         cfg = self.config.get("scenario", {}).get("active_nodes", {}) or {}
+        exclude = {str(name) for name in (cfg.get("exclude") or [])}
+        if exclude:
+            nodes = [node for node in nodes if node.node_id not in exclude]
         limits = {
             NodeType.GS: int(cfg.get("gs_count", 0) or 0),
             NodeType.HAP: int(cfg.get("hap_count", 0) or 0),

@@ -46,6 +46,18 @@ scenario:
     gs_count: 30
     hap_count: 30
     sat_count: 30
+    # Unconditionally dropped before the counts above are applied.
+    #
+    # Stockholm is topologically isolated: all 30 of its GS-SAT candidate links
+    # were rejected upstream as `zero_rate_all_year`, and every HAP-GS pair it
+    # could form exceeds the 700 km static prefilter, so its degree in the
+    # candidate-edge graph is 0. Its 29 GS-GS pairs (6.67% of all pairs) were
+    # still being sampled as requests, making them permanently unservable and
+    # depressing every success_rate reading by an algorithm-independent ~8% of
+    # arrived key volume. Dropping the GS removes those pairs from the request
+    # generator (built from scenario.nodes); HAP_Stockholm then has no GS in
+    # range and is dropped by smart mode's own rule.
+    exclude: [Stockholm]
     # gs_center: [35.0, 110.0]   # optional smart-mode center [lat, lon]
     # hap_gs_max_km: 700.0      # smart-mode HAP-GS threshold (km); HAPs without a nearby GS are dropped
   # Global time-window cap shared by every algorithm (RL + all baselines):
