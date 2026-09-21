@@ -75,6 +75,7 @@ _ROLLOUT_DEBUG_DETAIL_KEYS: tuple[tuple[str, str], ...] = (
     ("reward_keep_active", "keep_active_reward"),
     ("reward_failed", "failed_penalty"),
     ("reward_waiting", "waiting_penalty"),
+    ("reward_urgency_wait", "urgency_wait_penalty"),
     ("reward_switch", "switch_penalty"),
     ("reward_expired", "expired_key_penalty"),
     ("reward_conflict", "conflict_penalty"),

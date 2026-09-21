@@ -24,6 +24,7 @@ _ENABLED_FLAG_KEYS = {
     "overflow_enabled",
     "expired_key_enabled",
     "conflict_enabled",
+    "urgency_wait_enabled",
 }
 
 
@@ -47,6 +48,13 @@ class RewardDetail:
     attributed_served: float = 0.0
     history_utilized: float = 0.0
     storage_reward: float = 0.0
+    # Deadline-urgency weighted backlog penalty (see ``urgency_wait_enabled``).
+    # Split out from ``waiting_penalty`` so the flat and urgency-shaped backlog
+    # terms can be compared in the reward decomposition.
+    urgency_wait_penalty: float = 0.0
+    # Raw urgency-weighted backlog (key-flow units, pre-normalization), kept for
+    # diagnostics: it says how much demand is "about to be lost".
+    urgency_weighted_keys: float = 0.0
 
 
 class RewardFunction:
@@ -370,6 +378,20 @@ class RewardFunction:
             if self._enabled(self.config, "overflow")
             else 0.0
         )
+        # Deadline-urgency weighted backlog: penalize *which* backlog is about
+        # to expire, not just how much there is. ``serve()`` reports
+        # ``urgency_weighted_keys = sum(urgency(req) * remaining)`` where
+        # urgency rises from 0 (just arrived) to ~1 (about to expire), so the
+        # penalty grows as a request's remaining lifetime shrinks. This is the
+        # only reward term that distinguishes "serve the urgent one" from
+        # "serve the fresh one" -- served and failed rewards are both flat in
+        # urgency, so they shape the level but not the choice.
+        urgency_wait_penalty = (
+            float(self.config.get("urgency_wait_weight", 0.0))
+            * max(0.0, float(getattr(serve_result, "urgency_weighted_keys", 0.0)))
+            if self._enabled(self.config, "urgency_wait", default=False)
+            else 0.0
+        )
         expired_key_penalty = (
             float(self.config["expired_key_weight"]) * expired_keys
             if self._enabled(self.config, "expired_key")
@@ -398,7 +420,8 @@ class RewardFunction:
         raw_n = 0.0
         key_total = (
             served_reward + raw_generation
-            - failed_penalty - waiting_penalty - overflow_penalty - expired_key_penalty - conflict_penalty
+            - failed_penalty - waiting_penalty - urgency_wait_penalty
+            - overflow_penalty - expired_key_penalty - conflict_penalty
         )
         total = key_total - switch_penalty + keep_active_reward
         fixed_reference = float(self.config.get("served_reference", 0.0) or 0.0)
@@ -412,6 +435,7 @@ class RewardFunction:
             raw_n = raw_generation / fixed_reference
             failed_penalty /= fixed_reference
             waiting_penalty /= fixed_reference
+            urgency_wait_penalty /= fixed_reference
             overflow_penalty /= fixed_reference
             expired_key_penalty /= fixed_reference
             conflict_penalty /= fixed_reference
@@ -438,6 +462,7 @@ class RewardFunction:
             raw_n = raw_generation / denom
             failed_penalty /= denom
             waiting_penalty /= denom
+            urgency_wait_penalty /= denom
             overflow_penalty /= denom
             expired_key_penalty /= denom
             conflict_penalty /= denom
@@ -472,6 +497,7 @@ class RewardFunction:
             generated_reward = self._clip(generated_reward)
             failed_penalty = self._clip(failed_penalty)
             waiting_penalty = self._clip(waiting_penalty)
+            urgency_wait_penalty = self._clip(urgency_wait_penalty)
             overflow_penalty = self._clip(overflow_penalty)
             expired_key_penalty = self._clip(expired_key_penalty)
             conflict_penalty = self._clip(conflict_penalty)
@@ -491,4 +517,8 @@ class RewardFunction:
             attributed_served=attributed_served,
             history_utilized=history_utilized,
             storage_reward=storage_reward,
+            urgency_wait_penalty=urgency_wait_penalty,
+            urgency_weighted_keys=max(
+                0.0, float(getattr(serve_result, "urgency_weighted_keys", 0.0))
+            ),
         ))

@@ -182,7 +182,10 @@ class QKDEnv:
         # Mark this slot's new keys so the serve phase can attribute each
         # request's consumption between history stock and current activation.
         self.qkp.set_slot_new(allocation.added_by_edge)
-        serve_result = self.requests.serve(self.qkp, self.routing, self.t)
+        serve_result = self.requests.serve(
+            self.qkp, self.routing, self.t,
+            deadline_steps=float(self.config.get("requests", {}).get("deadline_steps", 0) or 0),
+        )
         self.qkp.clear_slot_new()
         expired_requests = self.requests.expire(self.t)
         self.request_history.record_served(serve_result.served_requests, self.t)

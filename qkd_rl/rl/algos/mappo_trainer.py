@@ -771,6 +771,7 @@ class MAPPOTrainer:
             "mean_reward_keep_active": debug.get("reward_keep_active", 0.0) / n,
             "mean_reward_failed": debug.get("reward_failed", 0.0) / n,
             "mean_reward_waiting": debug.get("reward_waiting", 0.0) / n,
+            "mean_reward_urgency_wait": debug.get("reward_urgency_wait", 0.0) / n,
             "mean_reward_switch": debug.get("reward_switch", 0.0) / n,
             "mean_reward_expired": debug.get("reward_expired", 0.0) / n,
             "mean_reward_conflict": debug.get("reward_conflict", 0.0) / n,

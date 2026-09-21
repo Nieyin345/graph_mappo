@@ -27,6 +27,15 @@ class ServeResult:
     serve_events: list[tuple[str, float, float]] = field(default_factory=list)
     # Total this-slot new keys consumed, per edge (for the storage reward).
     from_new_by_edge: dict[str, float] = field(default_factory=dict)
+    # Deadline-urgency weighted backlog: ``sum over waiting requests of
+    # urgency(req) * remaining``, where urgency rises from 0 (just arrived) to
+    # ~1 (about to expire). Unlike ``waiting_keys`` (a flat stock) this tells
+    # the policy *which* backlog is about to be lost, so it can be rewarded for
+    # serving the most urgent requests first without any hard-coded ordering.
+    # 0.0 when ``deadline_steps`` is not supplied.
+    urgency_weighted_keys: float = 0.0
+    # Flat count of the same set, for diagnostics.
+    urgency_weighted_count: float = 0.0
 
 
 @dataclass
@@ -154,7 +163,13 @@ class RequestQueue:
             )
         return stats
 
-    def serve(self, qkp: LinkQKPPool, routing: "RoutingPolicy", t: int) -> ServeResult:
+    def serve(
+        self,
+        qkp: LinkQKPPool,
+        routing: "RoutingPolicy",
+        t: int,
+        deadline_steps: float = 0.0,
+    ) -> ServeResult:
         """Serve pending requests with per-hop partial service.
 
         A request is served as much as the bottleneck hop of a usable path
@@ -163,6 +178,10 @@ class RequestQueue:
         step; the remainder is re-queued with an updated ``served_amount``.
         Deadline-reached requests stay in the pending queue so that
         ``expire()`` reports them as expired in the same step.
+
+        ``deadline_steps`` is the per-request lifetime used to normalize the
+        urgency weight (``urgency = 1 - remaining/deadline_steps``). Passing 0
+        leaves ``urgency_weighted_keys`` at 0 and costs nothing.
         """
         from dataclasses import replace
 
@@ -211,15 +230,32 @@ class RequestQueue:
                 next_pending.append(req)
 
         self.pending = next_pending
+        waiting_keys = sum(max(0.0, req.amount - req.served_amount) for req in waiting)
+        # Urgency-weighted backlog: each waiting request contributes its
+        # remaining demand scaled by how close it is to its deadline, so a
+        # request with 2 slots left weighs ~1.0 and a fresh one ~0.0. With the
+        # fixed-lifetime generator (deadline = arrival + deadline_steps) this
+        # is exactly ``1 - (t - arrival)/deadline_steps``, and the sum over a
+        # request's whole lifetime integrates to deadline_steps/2.
+        urgency_weighted_keys = 0.0
+        if deadline_steps > 0.0:
+            for req in waiting:
+                remaining_slots = max(0.0, float(req.deadline_t - t))
+                urgency = 1.0 - remaining_slots / deadline_steps
+                urgency_weighted_keys += max(0.0, urgency) * max(
+                    0.0, req.amount - req.served_amount
+                )
         return ServeResult(
             served_requests=served,
             waiting_requests=waiting,
             failed_requests=[],
             served_keys=served_keys,
-            waiting_keys=sum(max(0.0, req.amount - req.served_amount) for req in waiting),
+            waiting_keys=waiting_keys,
             failed_keys=0.0,
             serve_events=serve_events,
             from_new_by_edge=from_new_by_edge,
+            urgency_weighted_keys=urgency_weighted_keys,
+            urgency_weighted_count=float(len(waiting)),
         )
 
 
