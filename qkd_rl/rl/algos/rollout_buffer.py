@@ -25,34 +25,6 @@ from qkd_rl.env.graph_builder import GraphObservation
 # list and the accumulation here means the two paths cannot drift apart --
 # historically that drift is what made n_rollout_workers>1 lose the breakdown
 # and the pin to 1 stick.
-_ROLLOUT_DEBUG_KEYS: tuple[str, ...] = (
-    "steps",
-    "activated_edges",
-    "generated_keys",
-    "served_keys",
-    "failed_keys",
-    "waiting_keys",
-    "qkp_utilization",
-    "conflict_count",
-    "arrived_keys",
-    "reward_total",
-    "reward_served",
-    "reward_generated",
-    "reward_dense",
-    "reward_storage",
-    "reward_keep_active",
-    "reward_failed",
-    "reward_waiting",
-    "reward_switch",
-    "reward_expired",
-    "reward_conflict",
-    # attribution split: how much of the served volume earned the full
-    # served reward (keys generated this slot) vs the discounted
-    # history-stock part vs nothing at all (pure stock service).
-    "attributed_served",
-    "history_utilized",
-)
-
 # Scalar info fields copied straight from the env step.
 _ROLLOUT_DEBUG_INFO_KEYS: tuple[str, ...] = (
     "generated_keys",
@@ -81,6 +53,16 @@ _ROLLOUT_DEBUG_DETAIL_KEYS: tuple[tuple[str, str], ...] = (
     ("reward_conflict", "conflict_penalty"),
     ("attributed_served", "attributed_served"),
     ("history_utilized", "history_utilized"),
+)
+
+# Derived from the two lists above rather than hand-maintained: a key added to
+# either source must not also be added here, or `accumulate_rollout_debug`
+# raises KeyError on the first step (this drifted once already).
+_ROLLOUT_DEBUG_KEYS: tuple[str, ...] = (
+    "steps",
+    "activated_edges",
+    *_ROLLOUT_DEBUG_INFO_KEYS,
+    *(key for key, _attr in _ROLLOUT_DEBUG_DETAIL_KEYS),
 )
 
 
