@@ -21,6 +21,13 @@ model:
     edge_scorer_hidden_dims: [128, 128]
     idle_scorer_hidden_dims: [128]
     temperature: 1.0
+    # Opt-in per-arc demand-conditioned residual on the edge score:
+    #   s_a = edge_scorer(pair_emb_a) + DemandResidual(pair_emb_a, demand_emb)
+    # The residual's last layer is zero-initialised, so `enabled: false`
+    # (default) and `enabled: true` are bit-identical at the first forward.
+    demand_residual:
+      enabled: false
+      num_heads: 4
   critic:
     pooling: typed_mean
     hidden_dims: [128, 128]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -424,6 +425,93 @@ class GraphEncoder(nn.Module):
         return node_emb, self.merge_edges(phys_emb, demand_emb)
 
 
+class DemandResidual(nn.Module):
+    """Per-arc demand-conditioned residual on the base edge score.
+
+    Adds ``Δs_a = MLP(CrossAttn(Q=arc, K/V=demand))`` on top of the existing
+    ``edge_scorer`` output, so the base scorer (and the BC warm start that
+    trained it) is left untouched:
+
+        s_a = edge_scorer(pair_emb_a) + Δs_a
+
+    Attention direction is **arc as Query, demand as Key/Value**. The reverse
+    (demand as Query) is the textbook formulation, but it yields one output
+    *per demand* -- and the sampler needs one score *per arc*. Querying from
+    the arc gives the required ``(n_arcs, hidden)`` shape directly, with no
+    scatter step.
+
+    The final residual layer is zero-initialised, so at step 0 ``Δs_a == 0``
+    and the forward pass is bit-identical to the base model. That is what
+    makes this a single-variable experiment and keeps the BC warm start valid.
+
+    A learnable scalar gate (``s = base + α·Δ``, ``α=0``) is deliberately NOT
+    used: with ``α = 0`` the residual branch receives ``∂L/∂θ ∝ α = 0`` and
+    cannot start learning. Zeroing only the last layer keeps the branch's own
+    parameters in the graph while still producing zero output.
+    """
+
+    def __init__(
+        self,
+        arc_dim: int,
+        hidden_dim: int,
+        num_heads: int,
+        activation: str,
+        dropout: float,
+    ):
+        super().__init__()
+        self.hidden_dim = int(hidden_dim)
+        self.num_heads = int(num_heads)
+        if hidden_dim % self.num_heads != 0:
+            raise ValueError(
+                f"demand_residual.hidden_dim ({hidden_dim}) must be divisible by "
+                f"num_heads ({self.num_heads})."
+            )
+        self.arc_proj = nn.Linear(arc_dim, hidden_dim)
+        self.demand_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.value_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.out = build_mlp(hidden_dim, [hidden_dim], 1, activation, dropout)
+        # Zero the last layer so the residual contributes exactly 0 at init.
+        last = self.out[-1]
+        if isinstance(last, nn.Linear):
+            nn.init.zeros_(last.weight)
+            nn.init.zeros_(last.bias)
+
+    def forward(
+        self,
+        pair_emb: torch.Tensor,
+        demand_emb: torch.Tensor,
+        demand_valid: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """``pair_emb`` (n_arcs, arc_dim); ``demand_emb`` (n_demand, hidden).
+
+        Returns ``(n_arcs,)``. An empty demand set (or all-masked demand)
+        yields exactly 0 -- not NaN -- so slots with no pending request leave
+        the base score unchanged.
+        """
+        if demand_emb.size(0) == 0 or pair_emb.size(0) == 0:
+            return pair_emb.new_zeros((pair_emb.size(0),))
+
+        h = self.hidden_dim
+        nh = self.num_heads
+        dh = h // nh
+
+        q = self.arc_proj(pair_emb).view(-1, nh, dh)              # (n_arcs, nh, dh)
+        k = self.demand_proj(demand_emb).view(-1, nh, dh)         # (n_dem, nh, dh)
+        v = self.value_proj(demand_emb).view(-1, nh, dh)
+
+        # (n_arcs, nh, n_dem): each arc attends over the demand tokens.
+        logits = torch.einsum("ahd,thd->aht", q, k) / math.sqrt(dh)
+        if demand_valid is not None:
+            # (n_dem,) bool; -inf on invalid tokens so softmax ignores them.
+            mask = demand_valid.view(1, 1, -1).to(logits.dtype)
+            logits = logits.masked_fill(mask <= 0, float("-inf"))
+            # A row whose every entry is masked would give NaN; those rows
+            # have zero demand tokens, which the caller handles above.
+        attn = torch.softmax(logits, dim=-1)
+        ctx = torch.einsum("aht,thd->ahd", attn, v).reshape(-1, h)  # (n_arcs, h)
+        return self.out(ctx).squeeze(-1)
+
+
 class SharedNodeActor(nn.Module):
     def __init__(self, hidden_dim: int, config: dict, invalid_logit_value: float):
         super().__init__()
@@ -458,6 +546,20 @@ class SharedNodeActor(nn.Module):
             activation,
             dropout,
         )
+        # Opt-in per-arc demand-conditioned residual (see ``DemandResidual``).
+        # Disabled by default so every existing arm stays bit-identical; when
+        # enabled its last layer is zero-initialised, so the first forward pass
+        # still equals the base model and the BC warm start remains valid.
+        self.demand_residual = None
+        dr_cfg = config["actor"].get("demand_residual", {}) or {}
+        if dr_cfg.get("enabled", False):
+            self.demand_residual = DemandResidual(
+                arc_dim=edge_scorer_input_dim,
+                hidden_dim=hidden_dim,
+                num_heads=int(dr_cfg.get("num_heads", 4)),
+                activation=activation,
+                dropout=dropout,
+            )
         self.invalid_logit_value = invalid_logit_value
         self.temperature = float(config["actor"].get("temperature", 1.0))
         # Learnable STOP logit for the sequential global matching sampler: at
@@ -651,6 +753,7 @@ class SharedNodeActor(nn.Module):
         edge_emb_directed: torch.Tensor,
         action_space: NodeActionSpace,
         build_logits_dict: bool = True,
+        demand_emb: torch.Tensor | None = None,
     ) -> tuple[dict[str, torch.Tensor], torch.Tensor, list[str], list[int], dict[str, torch.Tensor]]:
         plan = getattr(obs, "_actor_plan", None)
         if plan is None:
@@ -668,6 +771,8 @@ class SharedNodeActor(nn.Module):
                 dim=-1,
             )
             edge_scores = self.edge_scorer(pair_emb).squeeze(-1)
+            if self.demand_residual is not None:
+                edge_scores = edge_scores + self.demand_residual(pair_emb, demand_emb)
         else:
             edge_scores = torch.zeros((0,), dtype=torch.float32, device=device)
         if idle_srcs.size:
@@ -903,8 +1008,17 @@ class GraphMAPPOActorCritic(nn.Module):
             if device.type == "cpu":
                 setattr(obs, "_tensors_cache", (device_key, tensors))
         node_emb, edge_emb = self.encoder(tensors)
+        # Demand tokens are the tail of the merged edge tensor (physical edges
+        # come first, see ``GraphEncoder.merge_edges``). Only needed by the
+        # optional demand residual; slicing costs nothing when it is off.
+        demand_emb = None
+        if self.actor.demand_residual is not None:
+            n_phys = int(tensors.num_physical_directed)
+            demand_emb = edge_emb[n_phys:]
         logits, logits_padded, node_order, lengths, edge_scores = self.actor(
-            obs, node_emb, edge_emb, self.action_space, build_logits_dict=build_logits_dict
+            obs, node_emb, edge_emb, self.action_space,
+            build_logits_dict=build_logits_dict,
+            demand_emb=demand_emb,
         )
         return ActorCriticOutput(
             logits=logits,
@@ -1031,6 +1145,15 @@ class GraphMAPPOActorCritic(nn.Module):
                 perm_parts.append(torch.arange(edge_off[i] + n_phys[i], edge_off[i] + n_phys[i] + n, device=device))
         perm = torch.cat(perm_parts) if perm_parts else torch.zeros((0,), dtype=torch.long, device=device)
         num_phys_total = sum(n_phys)
+        # Offset of each graph's demand block inside `demand_emb`. `perm` lays
+        # out all physical edges first (graph by graph) then all demand edges
+        # (also graph by graph, same order), so the demand blocks are
+        # contiguous and start at the running sum of `n_demand`.
+        demand_off: list[int] = []
+        dem_acc = 0
+        for n in n_demand:
+            demand_off.append(dem_acc)
+            dem_acc += n
         edge_index_p = edge_index_all[:, perm]
         edge_features_p = edge_features_all[perm]
 
@@ -1079,6 +1202,26 @@ class GraphMAPPOActorCritic(nn.Module):
             pos_t = torch.from_numpy(np.concatenate(pos_parts)).to(device)
             pair_emb = torch.cat([node_emb[src_t], node_emb[dst_t], edge_emb[pos_t]], dim=-1)
             edge_scores = self.actor.edge_scorer(pair_emb).squeeze(-1)
+            if self.actor.demand_residual is not None:
+                # Per-graph blocks: an arc must only attend over its OWN graph's
+                # demand tokens. `pair_emb` and `demand_emb` are both laid out
+                # graph-by-graph, so slicing by the recorded offsets keeps the
+                # two aligned without materialising a block-diagonal mask.
+                resid_parts: list[torch.Tensor] = []
+                for i in range(len(plans)):
+                    n_arc_i = int(plans[i][0].size)
+                    if n_arc_i == 0:
+                        continue
+                    arc_lo, arc_hi = edge_score_off[i], edge_score_off[i] + n_arc_i
+                    dem_lo = demand_off[i]
+                    dem_hi = dem_lo + n_demand[i]
+                    resid_parts.append(
+                        self.actor.demand_residual(
+                            pair_emb[arc_lo:arc_hi], demand_emb[dem_lo:dem_hi]
+                        )
+                    )
+                if resid_parts:
+                    edge_scores = edge_scores + torch.cat(resid_parts, dim=0)
         else:
             edge_scores = torch.zeros((0,), dtype=torch.float32, device=device)
         if idle_parts:
