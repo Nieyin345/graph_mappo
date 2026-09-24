@@ -56,11 +56,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start-day", type=int, default=None)
     parser.add_argument("--end-day", type=int, default=None)
     parser.add_argument("--workers", type=int, default=6)
+    parser.add_argument("--extra-config", action="append", default=[],
+                        help="extra config merged into the env (repeatable); "
+                             "paths with / resolve from repo root (e.g. model_zoo/v3/config.yaml)")
     return parser.parse_args()
 
 
-def build_base_config(config_path: str) -> dict:
+def build_base_config(config_path: str, extras: list[str] | None = None) -> dict:
     """Per-day independent episodes over the global training window."""
+    extras = list(extras or [])
     raw = yaml.safe_load((ROOT / config_path).read_text(encoding="utf-8")) or {}
     ev = raw.get("evaluation", {}) or {}
     global_raw = yaml.safe_load((ROOT / "configs" / "global.yaml").read_text(encoding="utf-8")) or {}
@@ -71,6 +75,11 @@ def build_base_config(config_path: str) -> dict:
     episode_steps = int(ev.get("episode_steps", 0) or 0) or DAY_STEPS
     config = load_default_config(ROOT)
     config = deep_merge(config, load_config([ROOT / "configs" / "env_full.yaml"]))
+    # Extra configs (e.g. model_zoo/v3/config.yaml) select which graph builder
+    # the env wires — v3 observations must carry pair_path masks for BC.
+    for extra in extras:
+        path = (ROOT / extra) if ("/" in extra or "\\" in extra) else (ROOT / "configs" / extra)
+        config = deep_merge(config, load_config([path]))
     config["rate_provider"]["provider"] = "h5"
     config["env"]["episode_start_mode"] = "random_day"
     config["env"]["episode_steps"] = episode_steps
@@ -84,8 +93,13 @@ def build_base_config(config_path: str) -> dict:
 
 def _obs_record(obs) -> dict:
     """Minimal model-input fields of one observation (state not needed for
-    the model forward and is the heaviest part of the object)."""
-    return {
+    the model forward and is the heaviest part of the object).
+
+    pair_path_edge_masks/weights are stored when the observation carries them
+    (model_zoo/v3 graph builder): without them the v3 scorer sees empty masks,
+    takes the zero-context branch, and BC gradients never reach the attention
+    (measured 2026-09-24: 14/20 attention params get no gradient)."""
+    record = {
         "node_features": np.asarray(obs.node_features, dtype=np.float32),
         "edge_index": np.asarray(obs.edge_index, dtype=np.int64),
         "edge_features": np.asarray(obs.edge_features, dtype=np.float32),
@@ -99,6 +113,10 @@ def _obs_record(obs) -> dict:
         "raw_action_masks": obs.raw_action_masks,
         "flat_action_masks": obs.flat_action_masks,
     }
+    if getattr(obs, "pair_path_edge_masks", None):
+        record["pair_path_edge_masks"] = obs.pair_path_edge_masks
+        record["pair_path_weights"] = obs.pair_path_weights
+    return record
 
 
 def collect_day(day: int, base_config: dict, out_dir: Path) -> dict:
@@ -149,7 +167,7 @@ def collect_day(day: int, base_config: dict, out_dir: Path) -> dict:
 
 def main() -> None:
     args = parse_args()
-    base_config = build_base_config(args.config)
+    base_config = build_base_config(args.config, args.extra_config)
     start_day = int(args.start_day if args.start_day is not None else base_config["env"]["activation_window_start_day"])
     end_day = int(args.end_day if args.end_day is not None else start_day + base_config["env"]["activation_window_days"])
     out_dir = ROOT / args.out_dir

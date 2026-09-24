@@ -105,8 +105,10 @@ def train_one(args, model: str, seed: int) -> Path:
             if bc_episodes is not None:
                 cmd += ["--episodes", str(bc_episodes)]
             if args.bc_data:
-                if model != "v2":
-                    raise ValueError("Stored BC trajectories currently contain v2 observations only; use live BC for v3")
+                # Trajectories collected with collect_pg_phased_trajectories.py
+                # --extra-config <model>/config.yaml carry the model's own
+                # observation fields (v3: pair_path masks), so any model whose
+                # collector output matches is fine. rebuild_obs backfills them.
                 cmd += ["--data-dir", args.bc_data]
             _run(cmd, bc_dir / "process.log", env)
             checkpoint = str(bc_dir / "supervised_pg_phased.pt")

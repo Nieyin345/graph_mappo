@@ -68,11 +68,11 @@ def _run_name(spec: str) -> str:
     return spec.split(":", 1)[1] if spec.startswith("rl:") else spec
 
 
-def eval_rl(spec: str, window: str, device: str) -> dict:
+def eval_rl(spec: str, window: str, device: str, checkpoint_override: str | None = None) -> dict:
     run_dir = Path(_run_name(spec))
     config = load_config([run_dir / "experiment_config.yaml"])
     config["validation"] = _window_cfg(window)
-    checkpoint = run_dir / "checkpoint_final.pt"
+    checkpoint = Path(checkpoint_override) if checkpoint_override else run_dir / "checkpoint_final.pt"
     device_obj = torch.device(device)
     torch.set_num_threads(int(config.get("experiment", {}).get("cpu_threads", 4)))
     env = build_env_from_config(config)
@@ -148,6 +148,9 @@ def main() -> None:
     ap.add_argument("--window", nargs="+", default=["A"], choices=sorted(WINDOWS))
     ap.add_argument("--out", default="outputs/frozen_eval")
     ap.add_argument("--device", default="cpu")
+    ap.add_argument("--checkpoint", default=None,
+                    help="override the checkpoint (default <run>/checkpoint_final.pt); "
+                         "e.g. the BC-only weights for a pre-PPO reading")
     args = ap.parse_args()
 
     out_dir = ROOT / args.out
@@ -158,14 +161,14 @@ def main() -> None:
         for spec in args.policies:
             name = spec.replace(":", "_").replace("/", "_")
             out_path = out_dir / f"{name}_{window}.json"
-            if out_path.exists():
+            if out_path.exists() and not args.checkpoint:
                 print(f"skip existing {out_path}", flush=True)
                 continue
             t0 = time.perf_counter()
             if spec == "expert":
                 result = eval_expert(window, args.device)
             elif spec.startswith("rl:"):
-                result = eval_rl(spec, window, args.device)
+                result = eval_rl(spec, window, args.device, args.checkpoint)
             else:
                 raise SystemExit(f"unknown policy spec: {spec} (use 'expert' or 'rl:<run_dir>')")
             result.update({

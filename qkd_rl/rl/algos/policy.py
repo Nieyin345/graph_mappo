@@ -308,6 +308,9 @@ class MAPPOPolicy:
         in the default ``mutual_choice`` mode the resolver ignores it entirely, so
         a rollout was paying ~300 syncs per step for nothing.
         """
+        # The arc dict is required here: _sample_matching consumes it. The
+        # model-level want_edge_map=False flag only helps callers that sample
+        # from arrays (act_batched) or recompute from stored arcs (PPO).
         output = self.model(obs, self.device, build_logits_dict=False)
         node_ids = output.logits_node_order if output.logits_node_order is not None else list(output.logits.keys())
         if not node_ids:

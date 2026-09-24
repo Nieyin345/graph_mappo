@@ -997,6 +997,7 @@ class SharedNodeActor(nn.Module):
         edge_emb_directed: torch.Tensor,
         action_space: NodeActionSpace,
         build_logits_dict: bool = True,
+        want_edge_map: bool = True,
         demand_emb: torch.Tensor | None = None,
         physical_emb: torch.Tensor | None = None,
         path_edge_mask: torch.Tensor | None = None,
@@ -1082,7 +1083,11 @@ class SharedNodeActor(nn.Module):
             # slice+contiguous ops per step (tests request the dict via the
             # default flag).
             logits = {}
-        edge_map = _edge_score_map(plan, self._node_idx, edge_scores)
+        edge_map = (
+            _edge_score_map(plan, self._node_idx, edge_scores)
+            if want_edge_map
+            else {}
+        )
         arc_embeddings = pair_emb if edge_srcs.size else node_emb.new_zeros((0, 3 * node_emb.size(-1)))
         return logits, masked, list(obs.node_ids), lengths, edge_map, arc_embeddings
 
@@ -1212,6 +1217,7 @@ class GraphMAPPOActorCritic(nn.Module):
         obs: GraphObservation,
         device: torch.device | str = "cpu",
         build_logits_dict: bool = True,
+        want_edge_map: bool = True,
     ) -> ActorCriticOutput:
         # Empty-graph fallback must use the base edge dim (without history)
         # because history embeddings are concatenated below.
@@ -1311,6 +1317,7 @@ class GraphMAPPOActorCritic(nn.Module):
         logits, logits_padded, node_order, lengths, edge_scores, arc_embeddings = self.actor(
             obs, node_emb, edge_emb, self.action_space,
             build_logits_dict=build_logits_dict,
+            want_edge_map=want_edge_map,
             demand_emb=demand_emb,
             physical_emb=physical_emb,
             path_edge_mask=path_edge_mask,

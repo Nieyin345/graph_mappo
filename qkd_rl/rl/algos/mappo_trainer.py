@@ -965,7 +965,10 @@ class MAPPOTrainer:
                 done = [False] * num_episodes
                 while not all(done):
                     outs = self.policy.act_batched(
-                        obs_list, deterministic=True, build_scores=self._needs_edge_scores
+                        obs_list, deterministic=True, build_scores=self._needs_edge_scores,
+                        # Same arrays path as the training rollout: skips the
+                        # ~300-entry arc dict rebuild per graph per step.
+                        use_edge_arrays=not self._needs_edge_scores,
                     )
                     for i, env in enumerate(envs):
                         if done[i]:
@@ -1097,7 +1100,10 @@ class MAPPOTrainer:
         with torch.no_grad():
             while not all(done):
                 outs = self.policy.act_batched(
-                    obs_list, deterministic=True, build_scores=self._needs_edge_scores
+                    obs_list, deterministic=True, build_scores=self._needs_edge_scores,
+                    # Same arrays path as the training rollout: skips the
+                    # ~300-entry arc dict rebuild per graph per step.
+                    use_edge_arrays=not self._needs_edge_scores,
                 )
                 for i, env in enumerate(envs):
                     if done[i]:

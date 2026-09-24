@@ -55,6 +55,15 @@ from qkd_rl.env.factory import build_env_from_config, load_default_config
 from qkd_rl.env.graph_builder import GraphObservation
 from qkd_rl.model_zoo import build_model
 
+
+def _obs_class(model_name: str):
+    """v3 observations carry pair_path fields the base class lacks."""
+    if model_name == "v3":
+        from qkd_rl.model_zoo.v3.graph_builder import GraphObservation as V3Obs
+        return V3Obs
+    from qkd_rl.env.graph_builder import GraphObservation
+    return GraphObservation
+
 # numpy 2.x pickle 引用 ``numpy._core`` 命名空间；本环境若装的是 numpy 1.x
 # （如 CUDA torch 环境自带 numpy 1.24），该命名空间不存在会导致反序列化失败。
 # 将 ``numpy.core`` 别名到 ``numpy._core``，保证预收集轨迹在任意环境都能加载。
@@ -141,14 +150,15 @@ def build_config(profile: dict) -> dict:
     return config
 
 
-def rebuild_obs(rec: dict) -> GraphObservation:
+def rebuild_obs(rec: dict, obs_cls=None) -> GraphObservation:
     """Rebuild a GraphObservation from a minimal stored record.
 
     The model forward only reads the feature/indices/mask fields; ``state`` is
     not needed (it was dropped by the collector) and the history fields stay at
     their empty defaults (history encoder is disabled in this preset).
     """
-    return GraphObservation(
+    obs_cls = obs_cls or GraphObservation
+    kwargs = dict(
         node_features=rec["node_features"],
         edge_index=rec["edge_index"],
         edge_features=rec["edge_features"],
@@ -163,6 +173,12 @@ def rebuild_obs(rec: dict) -> GraphObservation:
         raw_action_masks=rec.get("raw_action_masks"),
         flat_action_masks=rec.get("flat_action_masks"),
     )
+    if obs_cls is not GraphObservation:
+        # v3 scorer needs these; empty masks = zero-context branch = no BC
+        # gradient into the attention (2026-09-24 measured).
+        kwargs["pair_path_edge_masks"] = rec.get("pair_path_edge_masks", [])
+        kwargs["pair_path_weights"] = rec.get("pair_path_weights", [])
+    return obs_cls(**kwargs)
 
 
 def main() -> None:
@@ -305,10 +321,11 @@ def main() -> None:
         if not files:
             raise SystemExit(f"no day_*.pkl.gz under {args.data_dir}")
         log(f"[data] training from {len(files)} day files in {args.data_dir}")
+        obs_cls = _obs_class(str(config.get("experiment", {}).get("model", "v2")))
         for episode, path in enumerate(files, start=1):
             with gzip.open(path, "rb") as fh:
                 records = pickle.load(fh)
-            expert_data = [(rebuild_obs(rec), list(rec["arcs"])) for rec in records]
+            expert_data = [(rebuild_obs(rec, obs_cls), list(rec["arcs"])) for rec in records]
             episode_bc_loss, episode_samples = train_episode(expert_data)
             avg_episode_loss = episode_bc_loss / max(1, episode_samples)
             log(
