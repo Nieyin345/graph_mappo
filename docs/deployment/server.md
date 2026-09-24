@@ -137,9 +137,10 @@ ssh qinglong@<新地址> 'bash ~/deployment/setup.sh'
 改完代码要传到节点上，用这个。它**不是复制文件，是 git 推送**：
 
 ```bash
-bash deployment/sync.sh              # 同步（含未提交的改动）
-bash deployment/sync.sh --dry-run    # 先看会改哪些文件，不推送
-bash deployment/sync.sh --with-tmp   # 连 .tmp/ 里的探针脚本一起送
+bash deployment/sync.sh                         # 同步（含未提交的改动）
+bash deployment/sync.sh --dry-run               # 先看会改哪些文件，不推送
+bash deployment/sync.sh --tmp-file .tmp/probe.py # 只同步一个指定探针（推荐）
+bash deployment/sync.sh --with-tmp              # 批量同步 .tmp 顶层 *.py / *.sh
 ```
 
 **为什么不用 rsync**：Windows 的 Git Bash 不带 rsync，而 git 两端都有。
@@ -174,9 +175,11 @@ bash deployment/sync.sh --setup
 > 而下次同步的树里没有它 —— `git checkout` 就会把这个文件删掉，训练直接静默退化成
 > `p99 = 10.0`。
 
-> **`--with-tmp` 的坑**：`.tmp/` 在 `.gitignore` 里，默认不同步。用了 `--with-tmp` 之后，
-> **下次不带这个参数的同步会把节点上的 `.tmp/` 删掉**（那些文件不在新的同步树里）。
-> 探针脚本用完就删，或者一直带着 `--with-tmp`。
+> **`.tmp/` 同步规则**：普通同步不会强制加入未跟踪的 `.tmp/` 探针；仓库中原本已跟踪的
+> `.tmp` 文件仍会按 Git 正常同步。日常调试优先用 `--tmp-file .tmp/xxx.py` 精确带一个脚本。
+> `--with-tmp` 只保留为批量兼容模式：它会加入 `.tmp` **顶层**全部 `*.py` / `*.sh`，候选超过
+> 100 个时会警告；`_archive/`、`nodecode/` 等子目录不会被递归打进部署快照。日志、yaml 和
+> 运行产物仍不带。
 
 > **之前用 tar 打包上传的 CRLF 问题**：本机 git 的 `core.autocrlf=true`（装在
 > `C:/Program Files/Git/etc/gitconfig`），工作区是 CRLF，但 git 里存的 blob 是 LF。

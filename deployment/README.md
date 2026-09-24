@@ -38,6 +38,8 @@ bash deployment/bootstrap.sh <user@host> --no-smoke
 ```bash
 bash deployment/sync.sh
 bash deployment/sync.sh --dry-run
+bash deployment/sync.sh --tmp-file .tmp/probe.py   # 只带当前探针（推荐）
+bash deployment/sync.sh --with-tmp                 # 批量带 .tmp 顶层脚本
 ```
 
 数据单独同步：

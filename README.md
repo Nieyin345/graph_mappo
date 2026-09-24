@@ -76,7 +76,7 @@ conda run -n pytorch python scripts/smoke_test_env.py
   --checkpoint outputs/supervised_pg_phased/supervised_pg_phased_latest.pt `
   --run-name rl_smoke_day0
 
-# 鈶?鍚屽彛寰勮瘎浼?checkpoint锛堜笌璁粌 success_rate 鐩存帴鍙瘮锛?conda run -n pytorch python scripts/evaluate/eval_fixed_scenario.py `
+# 鈶?鍚屽彛寰勮瘎浼?checkpoint锛堜笌璁粌 success_rate 鐩存帴鍙瘮锛?conda run -n pytorch python scripts/eval/eval_fixed_scenario.py `
   --checkpoint outputs/rl_smoke_day0/checkpoint_final.pt `
   --steps 1440 --seeds 7-14 --device cuda
 ```

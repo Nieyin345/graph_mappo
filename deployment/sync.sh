@@ -2,10 +2,13 @@
 # 把本地工作区同步到实验节点 —— 用 git 语义，不是复制文件。
 #
 #   bash deployment/sync.sh --setup      # 一次性：在节点上建受管仓库（幂等）
-#   bash deployment/sync.sh              # 同步（含未提交改动 + .tmp/ 下的探针脚本）
+#   bash deployment/sync.sh              # sync working tree; ignored .tmp probes stay local
+#   bash deployment/sync.sh --tmp-file .tmp/probe.py  # sync one specific probe
+#   bash deployment/sync.sh --with-tmp   # bulk-sync top-level .tmp/*.py and *.sh
 #   bash deployment/sync.sh --dry-run    # 只报将要改哪些文件
 #
-# `.tmp/` 下只有 *.py / *.sh 会同步（那是探针脚本）；日志和中间产物不带。
+# `.tmp/` ignored probes are excluded by default. Prefer --tmp-file for one probe;
+# --with-tmp is the bulk compatibility path and only includes top-level scripts.
 #
 # 为什么不是 rsync：Windows 的 Git Bash 不带 rsync，而 git 两端都有。用 git
 # 还顺带解决了三件事 —— 传输是增量的（只发变化的对象）、节点上 `git log`
@@ -60,18 +63,34 @@ REMOTE_URL="${HOST_ALIAS}:${REMOTE_DIR}"
 
 # ---------------------------------------------------------------- 参数
 MODE=sync
-for arg in "$@"; do
-    case "$arg" in
-        --setup)     MODE=setup ;;
-        --dry-run)   MODE=dry ;;
-        # 保留旧参数不报错：探针脚本现在总是跟着走，这个开关已经没有作用了。
-        --with-tmp)  echo "(--with-tmp 已废弃：.tmp/ 下的脚本现在总是同步)" >&2 ;;
-        -h|--help)   sed -n '2,20p' "$0"; exit 0 ;;
-        *) echo "未知参数: $arg" >&2; exit 2 ;;
+WITH_TMP=0
+TMP_FILES=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --setup)     MODE=setup; shift ;;
+        --dry-run)   MODE=dry; shift ;;
+        --with-tmp)  WITH_TMP=1; shift ;;
+        --tmp-file)
+            shift
+            [ "$#" -gt 0 ] || { echo "--tmp-file 需要一个路径" >&2; exit 2; }
+            TMP_FILES+=("$1")
+            shift ;;
+        -h|--help)   sed -n '2,22p' "$0"; exit 0 ;;
+        *) echo "未知参数: $1" >&2; exit 2 ;;
     esac
 done
 
 die() { echo "错误: $*" >&2; exit 1; }
+
+# Validate explicit probe paths before creating the temporary Git index. This
+# keeps bad CLI input from leaving a half-built .git/qkd-sync-index behind.
+for tmp_file in "${TMP_FILES[@]}"; do
+    case "$tmp_file" in
+        "${SCRATCH_DIR}/"*.py|"${SCRATCH_DIR}/"*.sh) ;;
+        *) die "--tmp-file 仅允许 ${SCRATCH_DIR}/ 下的 .py/.sh: $tmp_file" ;;
+    esac
+    [ -f "$tmp_file" ] || die "--tmp-file 不存在: $tmp_file"
+done
 
 check_reachable() {
     "$SSH_BIN" -o BatchMode=yes -o ConnectTimeout=15 "$HOST_ALIAS" true 2>/dev/null \
@@ -131,20 +150,24 @@ fi
 # 临时索引：从 HEAD 起手（这样删除能被识别），再把工作区整体盖上去。
 SNAP_INDEX=".git/qkd-sync-index"
 rm -f "$SNAP_INDEX"
+trap 'rm -f "$SNAP_INDEX"' EXIT
 export GIT_INDEX_FILE="$SNAP_INDEX"
 git read-tree HEAD
 git add -A -- .
-# .tmp 下的**脚本**永远跟着走（*.py / *.sh），日志、yaml、运行产物不带。
-#
-# 这里踩过两次坑，所以不再做成开关：
-#   1. 一开始是整个 .tmp/ 强制加入，节点上跑的探针会改写自己那份被跟踪的日志
-#      和 yaml，工作区变脏，而 receive.denyCurrentBranch=updateInstead 要求工作区
-#      干净 —— 之后每次推送都被静默拒掉。
-#   2. 改成"只加脚本、且要 --with-tmp 才加"之后，一次不带参数的同步就会把节点上
-#      的探针脚本从树里移掉、checkout 顺手删掉它们，下次跑探针就是
-#      "No such file or directory"。
-# 脚本是节点从不改写的东西，所以永远带上最省事。
-git add -f -- "${SCRATCH_DIR}/*.py" "${SCRATCH_DIR}/*.sh"
+# `.tmp/` may contain thousands of historical probes; exclude it normally.
+# `:(top,glob)` is deliberate: plain Git pathspec *.py also matches recursively.
+if [ "$WITH_TMP" -eq 1 ]; then
+    TMP_COUNT="$(find "$SCRATCH_DIR" -maxdepth 1 -type f \( -name '*.py' -o -name '*.sh' \) | wc -l | tr -d ' ')"
+    if [ "$TMP_COUNT" -gt 100 ]; then
+        echo "警告: --with-tmp 将加入 ${TMP_COUNT} 个顶层探针；日常请优先用 --tmp-file .tmp/xxx.py" >&2
+    fi
+    git add -f -- \
+        ":(top,glob)${SCRATCH_DIR}/*.py" \
+        ":(top,glob)${SCRATCH_DIR}/*.sh"
+fi
+for tmp_file in "${TMP_FILES[@]}"; do
+    git add -f -- "$tmp_file"
+done
 TREE="$(git write-tree)"
 unset GIT_INDEX_FILE
 rm -f "$SNAP_INDEX"

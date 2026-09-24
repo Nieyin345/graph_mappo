@@ -14,31 +14,45 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 并行跑 run 前先算内存，不是先看 load
 
-**每个训练 run 实测 23.3 GB（PSS）**：父进程 14.5 GB + 8 个 spawn worker
-× 1.1 GB。**而且不是稳态——还在缓慢增长**（多点线性拟合：+0.085 ~ +0.298，
-**均值约 +0.21 GB/轮**），外推到 u30 约 27 GB/run。
+> ⚠ **本节所有绝对数都是「当次节点的实测」，不是常数。** CloudLab 节点随时换，
+> 每次换 CPU/内存/磁盘都变（历史上就换过：AMD EPYC 7543 128 vCPU →
+> Intel Xeon 8360Y）。**别引用绝对数，按「先测再算」现测。**
+> 值得留下的是**判据与比例**——那些与机器无关。
 
-- 判据是 **`MemAvailable / 30`**（按跑满算），**不是 CPU 核数**，也不是
-  启动时的内存。每个 run 只吃 ~3 核，32 核"看起来"能跑 10 个——
-  照 load 判断铺 6 个，被 OOM 杀掉 4 个
-- 125 GB 机器上**并发 3 稳、4 勉强（108 GB，余 17 GB）、5 一定 OOM**。
-  按启动时的 23 GB 排 5 个（116 GB）看似可行，涨到 u15 就顶格
+**判据是 `MemAvailable / 30`**（按跑满算），**不是 CPU 核数**，也不是
+启动时的内存。每个 run 只吃约 3 核，核多"看起来"能跑几十个——
+照 load 判断铺 6 个，被 OOM 杀掉 4 个。
 - `load average` 和 `%CPU` 都看不见这个墙。过载的症状是**每轮耗时上涨**
-  （`rollout_s` 46→82s、`update_s` 145→196s），不是进程变慢
+  （`rollout_s`、`update_s` 一起涨），不是进程变慢
 - 分波启动用 `.tmp/wave_launch.sh`（按内存预算排队，不是一次全铺）
 - **并发本身不吃速度**：同一份 buffer 在 5 个训练并发下测得 12.41 ms/步，
-  与机器空闲时的 12.41 ms/步完全相同。**约束是内存，不是核心数**
+  与机器空闲时的完全相同。**约束是内存，不是核心数**
+- **★ 磁盘是常被忘掉的硬约束，且常比内存先见底**。专家轨迹很占地方
+  （带 pair_path masks 的 60 天 ≈ 2 GB，外推 295 天 ≈ 11 GB）⟹
+  **铺全量轨迹前先 `df -h /opt/qkd`**
 
-**★★ 每 run 的 PSS 是「配置相关」的，不是一个常数**（2026-09-20 实测）：
+**★★ 每 run 的 PSS 是「配置相关」的 —— 这是比例关系，与机器无关，是稳的：**
 
-| 配置 | 稳态 PSS | 说明 |
+| 配置 | 相对基线 | 说明 |
 |---|---|---|
-| `minibatch_size: 256`（基线） | **25.0 GB** | |
-| `minibatch_size: 512` | **29.5 GB** | +19%；缓存分配器留下更高的激活高水位 |
-| **`history_encoder.enabled: true`** | **52–60 GB** | **2.3×**；LSTM 每步对 90 实体跑一次 |
+| `minibatch_size: 256`（基线） | **1.0×** | 参照点（绝对值须现测） |
+| `minibatch_size: 512` | **≈1.19×** | 缓存分配器留下更高的激活高水位 |
+| **`history_encoder.enabled: true`** | **≈2.3×** | LSTM 每步对全部实体跑一次 |
 
-并发上限 = `(250 − 17) / PSS(该配置)` ⟹ **先按配置查表，再算上限**；
-**同型重臂不能全铺**：三条 hist（~55 GB 各）就能把 7 个 run 推到 252 GB。
+### ★ 先测再算（唯一可靠的做法）
+
+```bash
+# 1) 机器余量
+grep MemAvailable /proc/meminfo && df -h /opt/qkd && nproc
+# 2) 一个在跑的 run 的真实 PSS（父 + 所有 worker）
+#    ★ 用 PSS 不用 RSS —— RSS 把共享页重复计数，误导性极强
+for p in <run父pid> $(pgrep -P <run父pid>); do
+    awk '/^Pss:/{s+=$2} END{print s}' /proc/$p/smaps_rollup
+done
+# 3) 并发上限 = (MemAvailable − 安全余量) / PSS(该配置)
+```
+
+**同型重臂不能全铺**：三条 hist 就能把并发推到 OOM。
 停损判据是**已投入轮数 + 未来增长量**，**不是**启动时间
 （"杀最晚启动的"被证明是破坏性的，见下）。
 
@@ -77,6 +91,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 共享页重复计数，误导性极强）。
 
 ## 常用命令（都在服务器上执行）
+
+**★ 起 run 必须带齐这两项，缺任一项都会静默出事**（2026-09-24 两条都实测踩过）：
+
+```bash
+ulimit -n 65535                                          # 默认只有 1024
+OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 nohup setsid \
+    /opt/qkd/venv/bin/python -u scripts/train/train_graph_mappo.py ...
+```
+
+- **漏 `ulimit -n`**：8 个 worker + torch 线程撞 `Errno 24`。症状**不是干脆地崩**
+  ——一个 worker 变 zombie，父进程卡死在 `pipe_read`，**永不退出也永不报错**，
+  `metrics.jsonl` 冻在 update 1（实测三条 run 各卡 8 小时）。此时 `update_s`
+  会是 4900s 之类的大数，那是**死锁时长，不是计算量**
+- **漏 `OMP/MKL_NUM_THREADS`**：分到 **72 个 torch 线程**（`nproc` 的一半），
+  三组 run 的线程总数就能把整台机器压到过载。run 的 `launch.out` 里会打印
+  `Threads: torch=72 OMP=None MKL=None`——**这一行要读**
+- ⚠ `configs` 里的 `runtime.num_threads: 4` **会被启动入口的环境变量逻辑覆盖**，
+  写配置文件里没用（这正是被误导的地方：以为配置管住了）
+- 不必手写：**从能跑通的脚本 `cp` 再改**（如
+  `pairhist-v3-attention-only-20260923/run_matched_screen.sh`，两项都有）。
+  **不要凭印象重写**——2026-09-24 我重写时正是漏掉了这两项
 
 ```bash
 # 训练（主入口；build_config() 可被探针复用）
@@ -123,14 +158,38 @@ default → rate_provider → features → env_small → graph_mappo → train_m
 |---|---|---|
 | 天数窗口 | 0–295（`activation_window` 限制回合**起始日**，回合可跑出窗） | 330–365 |
 | 回合长度 | 1440 步 | 240 步 |
-| 种子 | 训练种子 `--seed` | 15 个请求种子（`global.yaml` validation 段） |
+| 种子 | 训练种子 `--seed` | 15 个请求种子（**但见下方警告**） |
 
-训练窗口侧成功率 ~0.86 已近饱和（专家 0.869）—— **训练侧确实看不出差距**，差距在验证 regime（专家 0.6979）。验证侧的方向取决于 `entropy_coef`：
+> ⚠ **`global.yaml` 里的种子数因树而异，不要假定是 15 个。** 2026-09-24 实测：
+> `pairhist-v3-attention-only-20260923/configs/global.yaml` 只有 **7–11（5 个）**，
+> 而对照 `matched240` 用的是 **100–114**。在别处直接跑会拿到 5 个不同种子的读数、
+> **无法配对**。跨臂比较前先 `grep -A8 '^  validation:' configs/global.yaml`，
+> 不一致就在臂自己的配置里显式覆盖 `validation`。
+
+训练窗口侧成功率 ~0.86 已近饱和（专家 0.869）—— **训练侧确实看不出差距**，差距在验证 regime。⚠ 专家锚的值**取决于环境**：删 Stockholm 前是 **0.6979**，删后（现环境）是 **0.7674**（2026-09-21 实测，见 `实验日志.md` §2.2）。**引用旧值会得到错误结论**。
+
+验证侧的方向取决于 `entropy_coef`：
 
 - `0.001`（旧的错误值，如 `r6_base`）：RL ≈ **0.653**，比专家**低** 4.5 点 —— 就是这一条常被引用成"RL 打不过专家"
-- `0.01`（现用值，`configs/train_ent01.yaml`）：RL ≈ **0.7178**，比专家**高**约 2 点
+- `0.01`（现用值，`configs/train_ent01.yaml`）：RL ≈ **0.7178**
 
 后者 3/3 种子同向，但 n=3（df=2，临界值 4.303）下 t=3.46、**p=0.074，未达显著**——只能说"方向一致、未测出"。判据与预注册（补种子 45/46 到 n=5）见 `docs/训练诊断记录.md` 的对应节。训练器内置 `eval_interval` 轮的 `evaluate_validation` 并存 `checkpoint_best_val.pt`。
+
+**★ 2026-09-24 补：同协议下的现役参考点**（15 种子，240 步，`matched240` 一套配置）
+
+| 策略 | 验证 SR |
+|---|---|
+| v3-fixed 的 **BC 产物（ep-32 快照）** | **0.7971** |
+| v3-fixed BC 训满 60 轮 | 0.7822（**反而更差**） |
+| `matched240_v2_cold`（RL 20 轮） | 0.7707 |
+| 专家锚 | 0.7674 |
+
+> 这几个数**不是机器相关的**（验证 regime 固定 15 种子 / 240 步），但**是配置相关的**：
+> 只在这套 `matched240` 配置与协议下可比。换环境（如再删节点）或换 config 就要重测。
+>
+> ⚠ **BC 不是越久越好**：ep32 = 0.7971、ep60 = 0.7822（15 种子里 12 个下降）
+> ⟹ 第 32 轮后对 60 天专家数据过拟合。起 RL 用 ep-32 快照是最优截断。
+> 评测产物在 `pairhist-v3-attention-only-20260923/experiments/v3fixed/`。
 
 ### 核心数据流
 
