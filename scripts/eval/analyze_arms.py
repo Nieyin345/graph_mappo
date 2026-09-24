@@ -13,8 +13,10 @@ The two record kinds in metrics.jsonl need different treatment:
 For each series this prints the least-squares slope per step with its standard
 error, so "no trend" can be stated with a number rather than eyeballed.
 
-    python .tmp/analyze_arms.py outputs/full_rnd15/metrics.jsonl outputs/full_d8/metrics.jsonl
+    python scripts/eval/analyze_arms.py outputs/full_rnd15/metrics.jsonl outputs/full_d8/metrics.jsonl
 """
+
+from __future__ import annotations
 import json
 import math
 import sys

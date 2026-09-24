@@ -17,8 +17,10 @@ functions, so the scalar is on a different scale by construction -- a lower
 total for the heavier penalty is expected and is not evidence about the policy.
 Success rate and the physical counters (served keys) are the comparable ones.
 
-    python .tmp/compare_arms.py outputs/rwd_ctrl/metrics.jsonl outputs/rwd_fail40/metrics.jsonl [--field mean_success_rate]
+    python scripts/eval/compare_arms.py outputs/rwd_ctrl/metrics.jsonl outputs/rwd_fail40/metrics.jsonl [--field mean_success_rate]
 """
+
+from __future__ import annotations
 import json
 import math
 import sys

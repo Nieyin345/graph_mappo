@@ -4,8 +4,10 @@ metrics.jsonl interleaves two record kinds: per-update training records
 (`"update": N`) and held-out validation records (`"eval_validation": {...}`).
 Counting lines therefore overstates the update count -- read the keys.
 
-    python .tmp/show_evals.py outputs/full_rnd15/metrics.jsonl outputs/full_d8/metrics.jsonl
+    python scripts/eval/show_evals.py outputs/full_rnd15/metrics.jsonl outputs/full_d8/metrics.jsonl
 """
+
+from __future__ import annotations
 import json
 import sys
 
