@@ -17,6 +17,35 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
     return result
 
 
+def resolve_config_path(config_root: str | Path, name: str | Path) -> Path:
+    """Resolve a config path without allowing it to escape ``config_root``.
+
+    Archived presets remain loadable through their explicit relative path. If a
+    legacy top-level name was moved into ``archive/``, report its new location
+    instead of failing with an opaque FileNotFoundError.
+    """
+    root = Path(config_root).resolve()
+    requested = Path(name)
+    if requested.is_absolute():
+        raise ValueError(f"Config path must be relative to {root}: {name}")
+
+    candidate = (root / requested).resolve()
+    if candidate != root and root not in candidate.parents:
+        raise ValueError(f"Config path escapes {root}: {name}")
+    if candidate.is_file():
+        return candidate
+
+    archived = sorted((root / "archive").rglob(requested.name))
+    archived = [p for p in archived if p.is_file()]
+    if len(archived) == 1 and requested.parent == Path("."):
+        rel = archived[0].relative_to(root)
+        raise FileNotFoundError(
+            f"Config '{name}' was archived at '{rel}'. "
+            "Use that explicit path only when reproducing the legacy experiment."
+        )
+    raise FileNotFoundError(f"Config not found under {root}: {name}")
+
+
 def load_yaml(path: str | Path) -> dict[str, Any]:
     with Path(path).open("r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}

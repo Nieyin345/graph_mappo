@@ -44,11 +44,14 @@ dataset/global/*
 *.h5
 weather/
 ref_work/
+# Local third-party source mirrors used only for comparison/profiling.
+reference/
 
 # Editors / OS
 .vscode/
 .idea/
 .DS_Store
+._*
 Thumbs.db
 
 .reasonix/
@@ -59,6 +62,9 @@ Thumbs.db
 agent/
 .agents/
 skills-lock.json
+# Downloaded Claude skill packs are workstation tooling. Existing tracked skill
+# files remain tracked; new packs stay out of status/sync unless explicitly forced.
+.claude/skills/*/
 
 # Rescued server run records (kept locally on purpose, not versioned -- see
 # server_results/README.md; it is experiment data, not source)

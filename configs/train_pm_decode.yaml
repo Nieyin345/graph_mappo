@@ -98,7 +98,7 @@
 # 五、机器判据：唯一变量必须**由 `build_config()` 自证**
 # ══════════════════════════════════════════════════════════════════════════
 #
-# 不读 yaml 猜。启动器（`.tmp/wave_pm.py` 的预检）直接调训练的
+# 不读 yaml 猜。启动器（`scripts/diag/archive/2026-09/wave_pm.py` 的预检）直接调训练的
 # `build_config()` 逐字段比对两条链：
 #
 #   对照 = rl_algorithm.yaml train_full_rl.yaml train_ent01.yaml train_v2_bottleneck.yaml

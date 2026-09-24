@@ -1,6 +1,6 @@
 # DemandResidual 实验臂：打开弧级需求条件残差。
 # 唯一变量 = model.actor.demand_residual.enabled（对照 u0ctl 为 false）
-# 依据：QKD_MAPPO_Attention_Implementation_Final.md 第 47 节决策表
+# 依据：docs/research/attention/QKD_MAPPO_Attention_Implementation_Final.md 第 47 节决策表
 # 本文件必须排在 train_ent01.yaml 之后（后覆盖前）
 model:
   actor:

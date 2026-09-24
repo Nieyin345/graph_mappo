@@ -26,6 +26,24 @@
 | `baselines.yaml` | 鍩虹嚎绛栫暐寮€鍏充笌鍙傛暟锛坓reedy 绯诲垪锛?| `run_baselines.py` / `supervised_train_bfs_greedy.py` | 鍩虹嚎瀵规瘮 | 绂荤嚎鐞嗘兂涓婄晫鐢?`scripts/milp/compute_milp_upper_bound.py` 鍗曠嫭杩愯锛圲I "milp" 鍕鹃€夛級 |
 | `supervised_train.yaml` | 鐩戠潱棰勭儹锛欱FS+greedy expert 鐨勮瘎浼扮獥鍙ｄ笌杈撳嚭 | `supervised_train_bfs_greedy.py` | 鍙€夐鐑伐浣滄祦 | 鐙珛宸ヤ綔娴侊紝涓?RL 璁粌鏃犲叧 |
 
+| `rl_algorithm.yaml` | RL 共享 PPO/optimizer 参数 | `--configs` 显式叠加 | 正式 RL/诊断 | 必须排在具体训练 preset 前 |
+| `train_full_rl.yaml` | 1440×8 正式训练窗口与 15-seed validation | `--configs` 显式叠加 | 正式 RL | 排在算法参数后 |
+| `train_ent01.yaml` | `entropy_coef=0.01` 消融后保留的探索覆盖 | `--configs` 显式叠加 | 当前正式栈 | 后加载覆盖前值 |
+| `train_joint_ppo_fix.yaml` | joint matching log-prob 修正后的 `actor_lr=5e-5` / joint KL 标尺 | `--configs` 显式叠加 | 当前正式栈 | 旧 3e-4 只适用于错误的 mean-logprob 标尺 |
+| `train_stocked_graph.yaml` | 库存边进入观测图、但不进入生成动作集 | `--configs` 显式叠加 | 当前正式栈 | 仅改变可观测性，不放宽 action mask |
+
+### 当前正式联合 PPO 配置栈
+
+按下面顺序加载；本项目使用后加载覆盖前加载的 deep-merge 语义：
+
+```bash
+--configs rl_algorithm.yaml train_full_rl.yaml train_ent01.yaml \
+          train_joint_ppo_fix.yaml train_stocked_graph.yaml
+```
+
+这组顺序由 `tests/test_formal_training_stack.py` 锁定关键值，避免以后调整 preset 时静默把
+`actor_lr`、`entropy_coef`、joint `target_kl` 或 `include_stocked_edges` 覆盖回旧值。
+
 ## 璋冨弬鎻愰啋
 
 - 鏀?`train` 鐩稿叧鍙傛暟鍓嶅厛纭鐢熸晥鏂囦欢锛氶粯璁ら摼鍔犺浇鍚庯紝`train_graph_mappo.py` 浼氱敤 `env_full.yaml`銆乣global.yaml`銆乣train_profiles.yaml`锛坄--mode`锛?*渚濇瑕嗙洊**鈥斺€斾緥濡?`entropy_coef` 鍦?`train_mappo.yaml` 涓?0.01锛岃€屽悇 profile 缁熶竴瑕嗙洊涓?0.001銆?- `env_small.yaml` 涓?`env_full.yaml` 鐨勮姹傚弬鏁版棌涓嶅悓锛坉eadline 960 vs 30 姝ワ級锛岃窇瀹為獙鏃朵笉瑕佹贩鐢ㄤ袱濂楀弬鏁扮殑缁忛獙鍊笺€?- `value_target` 榛樿 `gae`锛堟帹鑽愶級锛沗mc` 浠呬繚鐣欑敤浜庢秷铻嶃€俙replay_days` 榛樿 0锛圥PO 淇濇寔 on-policy锛夈€?
@@ -33,3 +51,12 @@
 ## 閰嶇疆缁存姢瑙勫垯
 
 - `train_profiles.yaml` 鏄敮涓€鐨?RL 璁粌妯″紡娉ㄥ唽琛紱CLI 涓庢闈?UI 鍏辩敤瀹冦€?- `configs/archive/` 鍙繚瀛樺巻鍙查厤缃紝涓嶅弬涓庨粯璁ゅ姞杞介摼锛屼篃涓嶄綔涓哄疄楠屽叆鍙ｃ€?- UI 淇濆瓨妯″紡鏃跺彧鏇存柊鐣岄潰鏆撮湶鐨勮缁冨弬鏁帮紝淇濈暀杩炵画璁粌銆佽绋嬪涔犮€侀渶姹傝竟绛夋ā寮忎笓灞炲瓧娈点€?- `env.episode_steps` 涓?`train.rollout_steps` 涓嶅啀鐢?UI 寮鸿浜掔浉瑕嗙洊锛涜繛缁ā寮忕瓑閰嶇疆鍙互淇濇寔鑷繁鐨勯暱浼氳瘽璇箟銆?
+
+## Config lifecycle
+
+- Top-level `configs/*.yaml` contains default configs plus **active/recent experiment overlays**. A preset can be active even when no source file references it; many experiments are launched manually.
+- `configs/archive/` contains reproducibility-only presets. They are not recommendations for new training runs.
+- Archived presets must be referenced with their explicit relative path, for example `archive/experiments_legacy/var2_smoke.yaml`. Passing an old top-level basename produces a migration hint instead of silently loading legacy settings.
+- Do not archive a preset based on reference count alone. Require explicit evidence in its header/log that the experiment is obsolete or superseded.
+
+The two generic presets moved to `archive/experiments_legacy/` are intentionally narrow cleanup: an old CPU/16GB speed overlay and a one-off validation smoke overlay. Current PPO/server tuning remains in `rl_algorithm.yaml` and the formal stack above.
