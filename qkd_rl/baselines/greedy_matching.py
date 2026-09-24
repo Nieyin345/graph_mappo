@@ -42,7 +42,7 @@ class GreedyMatchingPolicy:
         endpoints, _pair_to_edge = edge_map(obs)
         pair_demand, incident = pending_demand(obs)
         windows = obs.state.edge_windows
-        rates = {edge_id: windows[edge_id].rates[0] for edge_id in obs.physical_edge_ids}
+        rates = {edge_id: windows[edge_id].rates[0] for edge_id in obs.generation_edge_ids}
         levels = dict(obs.state.qkp_snapshot)
         max_rate = max(rates.values(), default=1.0) or 1.0
         max_level = max(levels.values(), default=1.0) or 1.0
@@ -53,7 +53,7 @@ class GreedyMatchingPolicy:
         last_activated = set(obs.state.last_activated_edges)
 
         edge_scores: dict[str, float] = {}
-        for edge_id in obs.physical_edge_ids:
+        for edge_id in obs.generation_edge_ids:
             src, dst = endpoints[edge_id]
             rate_norm = rates.get(edge_id, 0.0) / max_rate
             level_norm = levels.get(edge_id, 0.0) / max_level

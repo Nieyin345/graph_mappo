@@ -68,7 +68,7 @@ class GreedyStaticRelayPolicy:
                 "GreedyStaticRelayPolicy requires edges and gs_ids at construction "
                 "so the static relay importance can be computed once."
             )
-        active_ids = list(obs.physical_edge_ids)
+        active_ids = list(obs.generation_edge_ids)
         if not active_ids:
             return greedy_matching_actions(obs, {})
         rates = {

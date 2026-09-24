@@ -31,7 +31,7 @@ Baseline optics/detector parameters are JOCN Table 1 (λ=843.9 nm, D_r=0.6 m, η
 """
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict
 
 

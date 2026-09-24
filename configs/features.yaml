@@ -27,6 +27,10 @@ features:
     include_position: false
     position_dim: 3
   edge:
+    # Observation-only extension: include unavailable edges holding keys.
+    # Keep historical experiments unchanged; train_stocked_graph.yaml enables
+    # the corrected inventory view without changing legal generation actions.
+    include_stocked_edges: false
     include_link_type_one_hot: true
     link_type_dim: 4
     include_available_now: true

@@ -36,7 +36,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from qkd_rl.rl.algos.checkpoint import load_checkpoint, save_checkpoint
-from qkd_rl.rl.algos.mappo_trainer import build_param_groups
+from qkd_rl.rl.algos.checkpoint_compat import build_param_groups
 from qkd_rl.core.config import ConfigValidator, deep_merge, load_config
 from qkd_rl.env.factory import load_default_config
 from qkd_rl.env.action_space import NodeActionSpace
@@ -121,6 +121,7 @@ def step_to_obs(step: dict) -> GraphObservation:
         node_ids=list(step["node_ids"]),
         edge_ids=list(step["edge_ids"]),
         physical_edge_ids=list(step["physical_edge_ids"]),
+        actionable_edge_ids=step.get("actionable_edge_ids"),
         demand_edge_ids=[],
         action_candidates=step["action_candidates"],
         action_masks=step["action_masks"],

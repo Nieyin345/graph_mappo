@@ -92,6 +92,7 @@ def _obs_record(obs) -> dict:
         "node_ids": list(obs.node_ids),
         "edge_ids": list(obs.edge_ids),
         "physical_edge_ids": list(obs.physical_edge_ids),
+        "actionable_edge_ids": list(obs.generation_edge_ids),
         "demand_edge_ids": list(obs.demand_edge_ids),
         "action_candidates": obs.action_candidates,
         "action_masks": obs.action_masks,

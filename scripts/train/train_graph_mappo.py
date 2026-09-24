@@ -40,10 +40,10 @@ sys.path.insert(0, str(ROOT))
 
 from qkd_rl.rl.algos.mappo_trainer import MAPPOTrainer
 from qkd_rl.rl.algos.policy import MAPPOPolicy
-from qkd_rl.core.config import ConfigValidator, deep_merge, load_config
+from qkd_rl.core.config import ConfigValidator, deep_merge, load_config, resolve_config_path
 from qkd_rl.env.factory import build_env_from_config, load_default_config
 from qkd_rl.evaluation import plot_learning_curve, read_train_history
-from qkd_rl.rl.models.graph_mappo import GraphMAPPOActorCritic
+from qkd_rl.model_zoo import build_model
 
 
 def parse_args() -> argparse.Namespace:
@@ -65,10 +65,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=None, help="Override global/env seed.")
     parser.add_argument("--checkpoint", default=None, help="Resume from a checkpoint .pt file.")
     parser.add_argument("--device", default=None, help="Override runtime.device (cpu/cuda).")
+    parser.add_argument("--resolved-config", default=None, help="Use a fully resolved experiment YAML.")
     return parser.parse_args()
 
 
 def build_config(args: argparse.Namespace) -> dict:
+    if getattr(args, "resolved_config", None):
+        config = load_config([Path(args.resolved_config)])
+        ConfigValidator().validate(config)
+        return config
     config = load_default_config(ROOT)
     # Training reads the H5 dataset only: default to the full-scale scenario.
     config = deep_merge(config, load_config([ROOT / "configs" / "env_full.yaml"]))
@@ -100,7 +105,7 @@ def build_config(args: argparse.Namespace) -> dict:
         config["validation"] = validation_global
     if args.configs:
         for name in args.configs:
-            config = deep_merge(config, load_config([ROOT / "configs" / name]))
+            config = deep_merge(config, load_config([resolve_config_path(ROOT / "configs", name)]))
     if args.seed is not None:
         config["seed"]["global_seed"] = args.seed
         config["seed"]["env_seed"] = args.seed
@@ -117,6 +122,9 @@ def build_config(args: argparse.Namespace) -> dict:
 def main() -> None:
     args = parse_args()
     config = build_config(args)
+    configured_threads = int(config.get("experiment", {}).get("cpu_threads", _cpu_threads))
+    if configured_threads != torch.get_num_threads():
+        torch.set_num_threads(configured_threads)
 
     seed = int(config["seed"]["global_seed"])
     torch.manual_seed(seed)
@@ -141,7 +149,7 @@ def main() -> None:
         f"cudnn.benchmark={torch.backends.cudnn.benchmark}"
     )
     env = build_env_from_config(config)
-    model = GraphMAPPOActorCritic(env.action_resolver.action_space, config)
+    model = build_model(env.action_resolver.action_space, config)
     policy = MAPPOPolicy(model, device)
 
     output_dir = ROOT / config["project"]["output_dir"] / config["project"]["run_name"]
@@ -156,7 +164,7 @@ def main() -> None:
     # and the startup log did not print it either: the only surviving evidence
     # was whichever shell script happened to launch the run.
     config.setdefault("runtime", {})
-    config["runtime"]["num_threads"] = _cpu_threads
+    config["runtime"]["num_threads"] = configured_threads
     config["runtime"]["torch_num_threads"] = torch.get_num_threads()
     config["runtime"]["omp_num_threads_env"] = os.environ.get("OMP_NUM_THREADS")
     config["runtime"]["mkl_num_threads_env"] = os.environ.get("MKL_NUM_THREADS")
@@ -194,4 +202,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

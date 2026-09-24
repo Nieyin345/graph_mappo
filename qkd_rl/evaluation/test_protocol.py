@@ -9,6 +9,7 @@ and scenario time limit.
 
 from __future__ import annotations
 
+from copy import deepcopy
 import math
 from pathlib import Path
 
@@ -102,6 +103,29 @@ def build_validation_env_config(
         )
     else:
         config["scenario"]["time_limit"]["days"] = end_day
+    return config
+
+
+def checkpoint_validation_config(
+    checkpoint_config: dict | None, validation_config: dict
+) -> dict:
+    """Use checkpoint model/observation settings on one canonical validation env.
+
+    Validation must keep physical dynamics identical across policies. Only the
+    sections that define the policy input/output contract are copied from the
+    checkpoint; request generation, QKP dynamics, routing, scenario, reward and
+    dataset/window settings stay canonical. Older checkpoints without a saved
+    config simply use the validation config unchanged.
+    """
+    config = deepcopy(validation_config)
+    if checkpoint_config:
+        for section in ("features", "model", "action_resolver"):
+            if section in checkpoint_config:
+                config[section] = deep_merge(
+                    config.get(section, {}), checkpoint_config[section]
+                )
+    # Validation episodes are always finite, even for continuous-training runs.
+    config.setdefault("env", {})["continuous"] = False
     return config
 
 

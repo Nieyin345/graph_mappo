@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import json
+import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import mean, stdev
@@ -47,13 +48,20 @@ class Evaluator:
         seeds: list[int] | None = None,
         collect_steps: bool = False,
         start_seed: int | None = None,
+        env_builder: Callable[[int], object] | None = None,
     ) -> tuple[list[EpisodeRecord], list[dict] | None]:
-        """Run one policy and return episode records + optional step records."""
+        """Run one policy and return episode records + optional step records.
+
+        ``env_builder`` lets a policy preserve observation/model feature contracts
+        that differ from the shared baseline environment (for example an RL
+        checkpoint trained with inventory-only physical edges visible to the GNN).
+        """
         episodes: list[EpisodeRecord] = []
         step_rows: list[dict] = []
+        builder = env_builder or self.env_builder
         for ep in range(num_episodes):
             seed = seeds[ep % len(seeds)] if seeds else (ep + 1) * 1000
-            env = self.env_builder(seed)
+            env = builder(seed)
             episode_start_seed = start_seed + seed if start_seed is not None else None
             obs = env.reset(seed=seed, start_seed=episode_start_seed)
             total_reward = 0.0
@@ -92,10 +100,17 @@ class Evaluator:
         seeds: list[int] | None = None,
         collect_steps: bool = False,
         start_seed: int | None = None,
+        env_builders: dict[str, Callable[[int], object]] | None = None,
     ) -> tuple[list[EpisodeRecord], dict[str, list[dict]]]:
-        """Run several policies and return all episode records + step records per policy."""
+        """Run several policies and return all episode records + step records per policy.
+
+        ``env_builders`` optionally overrides the environment builder for named
+        policies. This is required when an RL checkpoint changes observation
+        features while the physical validation protocol remains identical.
+        """
         all_episodes: list[EpisodeRecord] = []
         all_steps: dict[str, list[dict]] = {}
+        env_builders = env_builders or {}
         for name, policy in policies.items():
             episodes, steps = self.run_policy(
                 policy,
@@ -104,6 +119,7 @@ class Evaluator:
                 seeds=seeds,
                 collect_steps=collect_steps,
                 start_seed=start_seed,
+                env_builder=env_builders.get(name),
             )
             all_episodes.extend(episodes)
             if steps:
@@ -220,8 +236,10 @@ def merge_eval_summary(
     if path.is_file():
         try:
             existing = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            existing = {}
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"refusing to overwrite unreadable evaluation summary: {path}"
+            ) from exc
 
     by_policy: dict[str, list[EpisodeRecord]] = {}
     for record in records:
@@ -242,12 +260,22 @@ def merge_eval_summary(
         blob["runs"].append(run_meta)
         # Re-aggregate across ALL episodes of this policy (all runs)
         all_items: list[EpisodeRecord] = []
+        invalid_episode_logs = 0
         for run in blob.get("runs", []):
             for e in run.get("episode_log", []):
                 try:
                     all_items.append(EpisodeRecord(**e))
-                except Exception:
-                    pass
+                except TypeError:
+                    invalid_episode_logs += 1
+        if invalid_episode_logs:
+            blob["invalid_episode_logs"] = invalid_episode_logs
+            warnings.warn(
+                f"{policy_name}: skipped {invalid_episode_logs} malformed episode_log entries",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        else:
+            blob.pop("invalid_episode_logs", None)
         if all_items:
             agg = aggregate_episodes(all_items)
             for k, v in agg[policy_name].items():

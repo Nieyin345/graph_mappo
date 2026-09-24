@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT))
 from qkd_rl.rl.algos.checkpoint import load_checkpoint
 from qkd_rl.rl.algos.policy import MAPPOPolicy
 from qkd_rl.env.factory import build_env_from_config
-from qkd_rl.evaluation.test_protocol import build_validation_env_config
+from qkd_rl.evaluation.test_protocol import build_validation_env_config, checkpoint_validation_config
 from qkd_rl.rl.models.graph_mappo import GraphMAPPOActorCritic
 
 
@@ -61,7 +61,7 @@ def load_settings(args: argparse.Namespace) -> dict:
         "start_seed": 0,
         "start_mode": "random_day",
         "out": "outputs/eval/test_default.json",
-        "device": "cuda",
+        "device": None,
     }
     config_path = Path(ROOT) / args.config
     if config_path.exists():
@@ -89,7 +89,7 @@ def load_settings(args: argparse.Namespace) -> dict:
                 "start_seed": int(ev.get("start_seed", settings["start_seed"])),
                 "start_mode": str(ev.get("start_mode", settings["start_mode"])),
                 "out": str(ev.get("out", settings["out"])),
-                "device": str(ev.get("device", settings["device"])),
+                "device": ev.get("device", settings["device"]),
             }
         )
 
@@ -147,14 +147,13 @@ def main() -> None:
     settings = load_settings(args)
     if not settings["checkpoints"]:
         raise SystemExit("No checkpoints configured. Add them to configs/global.yaml or pass paths on CLI.")
-    config, seeds = build_env_config(settings)
+    validation_config, seeds = build_env_config(settings)
     device = settings["device"] or ("cuda" if torch.cuda.is_available() else "cpu")
-    env = build_env_from_config(config)
     output: dict = {
         "start_mode": settings["start_mode"],
         "window_start_day": settings["window_start_day"],
         "window_end_day": settings["window_end_day"],
-        "episode_steps": int(config["env"]["episode_steps"]),
+        "episode_steps": int(validation_config["env"]["episode_steps"]),
         "seeds": seeds,
         "checkpoints": {},
     }
@@ -167,9 +166,11 @@ def main() -> None:
 
     for ckpt_path in settings["checkpoints"]:
         ckpt = Path(ckpt_path)
+        data = load_checkpoint(ckpt, device)
+        config = checkpoint_validation_config(data.config, validation_config)
+        env = build_env_from_config(config)
         model = GraphMAPPOActorCritic(env.action_resolver.action_space, config)
         policy = MAPPOPolicy(model, device)
-        data = load_checkpoint(ckpt, device)
         model.load_state_dict(data.model_state)
         model.eval()
 
@@ -195,6 +196,8 @@ def main() -> None:
             summary = env.metrics.episode_summary()
             rows.append(
                 {
+                    "checkpoint": str(ckpt),
+                    "update": data.update,
                     "seed": seed,
                     "start_t": start_t,
                     "end_t": int(env.t),

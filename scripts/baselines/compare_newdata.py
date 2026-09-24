@@ -98,7 +98,7 @@ def run_v3(profile, seed, start_seed, steps, w):
     n_act = 0
     for _ in range(steps):
         edge_scores = scorer.score_edges(obs)
-        rates = {e: float(obs.state.edge_windows[e].rates[0]) for e in obs.physical_edge_ids}
+        rates = {e: float(obs.state.edge_windows[e].rates[0]) for e in obs.generation_edge_ids}
         actions, _ = greedy_matching_actions(obs, edge_scores, tie_rates=rates)
         dual = {n: (NodeActionSpace.IDLE, NodeActionSpace.IDLE) for n in obs.node_ids}
         for u, t in actions.items():

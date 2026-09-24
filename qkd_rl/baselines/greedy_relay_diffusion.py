@@ -32,7 +32,7 @@ def compute_dynamic_relay_importance(
     """Dynamic relay importance shared by heuristic and MILP baselines."""
     return compute_relay_importance(
         node_ids=obs.node_ids,
-        physical_edge_ids=obs.physical_edge_ids,
+        physical_edge_ids=obs.generation_edge_ids,
         pending_requests=obs.state.pending_requests,
         qkp_snapshot=obs.state.qkp_snapshot,
         qkp_capacity=obs.state.qkp_capacity,
@@ -68,7 +68,7 @@ class GreedyRelayDiffusionPolicy:
         self.include_stocked_unavailable = bool(include_stocked_unavailable)
 
     def act(self, obs: GraphObservation) -> tuple[dict[str, str], dict[str, dict[str, float]]]:
-        active_ids = list(obs.physical_edge_ids)
+        active_ids = list(obs.generation_edge_ids)
         if not active_ids:
             return greedy_matching_actions(obs, {})
         importance = compute_dynamic_relay_importance(
@@ -124,7 +124,7 @@ class GreedyRelayDiffusionPolicyV2:
 
     def score_edges(self, obs: GraphObservation) -> dict[str, float]:
         """Return a score for every legal physical edge (before matching)."""
-        active_ids = list(obs.physical_edge_ids)
+        active_ids = list(obs.generation_edge_ids)
         if not active_ids:
             return {}
         endpoints, pair_to_edge = edge_map(obs)
@@ -196,7 +196,7 @@ class GreedyRelayDiffusionPolicyV2:
         edge_scores = self.score_edges(obs)
         rates = {
             edge_id: float(obs.state.edge_windows[edge_id].rates[0])
-            for edge_id in obs.physical_edge_ids
+            for edge_id in obs.generation_edge_ids
         }
         return greedy_matching_actions(obs, edge_scores, tie_rates=rates)
 

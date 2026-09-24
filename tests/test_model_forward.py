@@ -84,7 +84,7 @@ def test_flat_action_masks_reuse_matches_dict_path():
     speedup only)."""
     config = load_default_config(".")
     env = build_test_env(".")
-    obs = env.reset()
+    env.reset()
     model = GraphMAPPOActorCritic(env.action_resolver.action_space, config)
 
     state = env._build_state()
@@ -115,6 +115,23 @@ def test_flat_action_masks_reuse_matches_dict_path():
             assert np.array_equal(a, b)
         else:
             assert a == b
+
+
+
+def test_cached_actor_plan_is_safe_across_model_instances():
+    config = load_default_config(".")
+    env = build_test_env(".")
+    obs = env.reset()
+    first = GraphMAPPOActorCritic(env.action_resolver.action_space, config)
+    second = GraphMAPPOActorCritic(env.action_resolver.action_space, config)
+
+    first_out = first(obs)
+    assert hasattr(obs, "_actor_plan")
+    assert second.actor._node_idx is None
+
+    second_out = second(obs)
+    assert second.actor._node_idx is not None
+    assert set(second_out.edge_scores) == set(first_out.edge_scores)
 
 
 def test_mappo_policy_produces_env_compatible_actions():

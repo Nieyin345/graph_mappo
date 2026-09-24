@@ -97,7 +97,7 @@ class PathGreedyPairPolicy:
         }
 
         raw_rates: dict[str, float] = {}
-        for eid in obs.physical_edge_ids:
+        for eid in obs.generation_edge_ids:
             w = obs.state.edge_windows.get(eid)
             if w is not None:
                 raw_rates[eid] = float(w.rates[0]) if w.rates else 0.0
@@ -123,7 +123,7 @@ class PathGreedyPairPolicy:
             adj[src].append((dst, eid, is_free))
             adj[dst].append((src, eid, is_free))
 
-        for eid in obs.physical_edge_ids:
+        for eid in obs.generation_edge_ids:
             u, v = edge_endpoints(eid)
             _add(u, v, eid, eid in stocked)
         for eid in stocked:  # stocked-but-currently-unavailable free relays

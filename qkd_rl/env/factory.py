@@ -7,7 +7,7 @@ from qkd_rl.data.scenario_builder import ScenarioBuilder
 from qkd_rl.env.action_resolver import ActionResolver
 from qkd_rl.env.action_space import NodeActionSpace
 from qkd_rl.env.env import QKDEnv
-from qkd_rl.env.graph_builder import GraphBuilder
+from qkd_rl.model_zoo import graph_builder_class
 from qkd_rl.env.history_buffer import HistoryBuffer
 from qkd_rl.env.masks import ActionMaskBuilder
 from qkd_rl.env.metrics import MetricsTracker
@@ -70,7 +70,7 @@ def build_env_from_config(config: dict) -> QKDEnv:
     history_buffer = (
         HistoryBuffer(scenario.nodes, scenario.edges, config) if history_cfg.get("enabled", False) else None
     )
-    graph_builder = GraphBuilder(
+    graph_builder = graph_builder_class(config)(
         scenario.nodes,
         scenario.edges,
         action_space,

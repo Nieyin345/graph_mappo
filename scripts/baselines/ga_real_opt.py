@@ -52,11 +52,11 @@ def weighted_actions(obs, w: tuple[float, float, float, float, float]) -> dict[s
     from qkd_rl.env.relay_importance import compute_relay_importance
     rate_weight, importance_weight, completion_weight, keep_weight, switch_weight = w
 
-    active_ids = list(obs.physical_edge_ids)
+    active_ids = list(obs.generation_edge_ids)
     endpoints, pair_to_edge = edge_map(obs)
     importance = compute_relay_importance(
         node_ids=obs.node_ids,
-        physical_edge_ids=obs.physical_edge_ids,
+        physical_edge_ids=obs.generation_edge_ids,
         pending_requests=obs.state.pending_requests,
         qkp_snapshot=obs.state.qkp_snapshot,
         qkp_capacity=obs.state.qkp_capacity,

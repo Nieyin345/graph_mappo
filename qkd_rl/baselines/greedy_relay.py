@@ -58,7 +58,7 @@ class GreedyRelayPolicy:
         levels = dict(obs.state.qkp_snapshot)
         last_activated = set(obs.state.last_activated_edges)
         windows = obs.state.edge_windows
-        rates = {edge_id: windows[edge_id].rates[0] for edge_id in obs.physical_edge_ids}
+        rates = {edge_id: windows[edge_id].rates[0] for edge_id in obs.generation_edge_ids}
         max_rate = max(rates.values(), default=1.0) or 1.0
 
         # Aggregate remaining demand per unordered GS pair, keeping the most
@@ -119,7 +119,7 @@ class GreedyRelayPolicy:
 
         max_credit = max(credit.values(), default=1.0) or 1.0
         edge_scores: dict[str, float] = {}
-        for edge_id in obs.physical_edge_ids:
+        for edge_id in obs.generation_edge_ids:
             rate_norm = rates.get(edge_id, 0.0) / max_rate
             credit_norm = credit.get(edge_id, 0.0) / max_credit
             score = self.rate_weight * rate_norm + self.demand_weight * credit_norm

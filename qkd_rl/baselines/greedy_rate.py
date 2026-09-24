@@ -22,8 +22,8 @@ class GreedyRatePolicy:
         if self.use_future_mean_rate:
             edge_rate = {
                 edge_id: sum(windows[edge_id].rates[1:]) / max(1, len(windows[edge_id].rates) - 1)
-                for edge_id in obs.physical_edge_ids
+                for edge_id in obs.generation_edge_ids
             }
         else:
-            edge_rate = {edge_id: windows[edge_id].rates[0] for edge_id in obs.physical_edge_ids}
+            edge_rate = {edge_id: windows[edge_id].rates[0] for edge_id in obs.generation_edge_ids}
         return greedy_matching_actions(obs, edge_rate, tie_rates=edge_rate)

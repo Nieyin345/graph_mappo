@@ -124,6 +124,45 @@ def _solve_highs(
     return status, np.asarray(solution.col_value, dtype=np.float64), dual_bound, mip_gap
 
 
+def _require_finite_capacities(
+    capacity_map: dict[str, float] | None, edge_ids: list[str]
+) -> dict[str, float]:
+    """Return finite per-edge capacities or fail loudly.
+
+    Treating a missing capacity as ``inf`` silently loosens the MILP and can
+    invalidate an advertised upper bound, so every modeled edge must carry a
+    real finite capacity.
+    """
+    raw = capacity_map or {}
+    missing: list[str] = []
+    invalid: list[str] = []
+    out: dict[str, float] = {}
+    for edge_id in edge_ids:
+        if edge_id not in raw:
+            missing.append(edge_id)
+            continue
+        try:
+            value = float(raw[edge_id])
+        except (TypeError, ValueError):
+            invalid.append(edge_id)
+            continue
+        if not np.isfinite(value):
+            invalid.append(edge_id)
+            continue
+        out[edge_id] = value
+    if missing or invalid:
+        parts = []
+        if missing:
+            parts.append(f"missing={missing[:8]}")
+        if invalid:
+            parts.append(f"non_finite_or_invalid={invalid[:8]}")
+        raise ValueError(
+            "MILP requires a finite QKP capacity for every modeled edge: "
+            + "; ".join(parts)
+        )
+    return out
+
+
 def _enumerate_paths(
     src: str,
     dst: str,
@@ -317,7 +356,7 @@ class RecedingHorizonMILPPolicy:
         windows = getattr(obs.state, "edge_windows", None)
         all_edges = list(windows.keys()) if hasattr(windows, "keys") else []
         if not all_edges:
-            all_edges = list(obs.physical_edge_ids)
+            all_edges = list(obs.generation_edge_ids)
         self._edge_ids = all_edges[: self.max_edges]
         if self._provider is not None:
             self._edge_link_ids = self._provider.edge_link_ids(self._edge_ids)
@@ -384,6 +423,7 @@ class RecedingHorizonMILPPolicy:
         rates = rates_all[:, sel]  # (W, n_edges)
         avail = avail_all[:, sel]  # (W, n_edges)
         edge_endpoints = [self._parse_edge(eid) for eid in edges]
+        cap = _require_finite_capacities(obs.state.qkp_capacity, edges)
 
         # ---- request set ------------------------------------------------------
         pending: list[KeyRequest] = [
@@ -577,7 +617,6 @@ class RecedingHorizonMILPPolicy:
         # ---- constraints --------------------------------------------------------
         constraints: list[tuple[np.ndarray, np.ndarray, float, float]] = []  # A_row x, lower <= A x <= upper
         gen = rates * self.slot_seconds  # (W, E); no switch decay (upper bound)
-        cap = obs.state.qkp_capacity or {}
         init_level = obs.state.qkp_snapshot
 
         # per-arc availability: slots with avail < 0.5 get no arc variable (fixed
@@ -859,7 +898,7 @@ class RecedingHorizonMILPPolicy:
             rx_source.setdefault(dst, src)
         obs_pair_to_edge = {
             tuple(sorted((u, v))): eid
-            for eid in obs.physical_edge_ids
+            for eid in obs.generation_edge_ids
             for u, v in [self._parse_edge(eid)]
             if u is not None
         }

@@ -31,7 +31,7 @@ from qkd_rl.rl.algos.rollout_buffer import (
     state_free_obs,
 )
 from qkd_rl.env.factory import build_env_from_config
-from qkd_rl.rl.models.graph_mappo import GraphMAPPOActorCritic
+from qkd_rl.model_zoo import build_model
 
 
 def _run_episode(
@@ -126,7 +126,7 @@ def _worker_entry(config: dict, device: str, task_queue, result_queue, job_dir: 
     """Long-lived worker: build env + model once, then run episodes on demand."""
     torch.set_num_threads(1)
     env = build_env_from_config(config)
-    model = GraphMAPPOActorCritic(env.action_resolver.action_space, config).to(device)
+    model = build_model(env.action_resolver.action_space, config).to(device)
     policy = MAPPOPolicy(model, device)
     policy.model.eval()
     gamma = float(config["train"]["gamma"])

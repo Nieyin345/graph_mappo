@@ -43,6 +43,14 @@ class GraphObservation:
     physical_edge_history: list[list[list[float]]] = field(default_factory=list)
     demand_edge_history: list[list[list[float]]] = field(default_factory=list)
     history_valid: list[list[int]] = field(default_factory=lambda: [[], [], []])
+    # Generation candidates are a subset of the message-passing physical
+    # graph when inventory-only edges are included. None supports old/manual
+    # observations whose physical graph was already filtered by action masks.
+    actionable_edge_ids: list[str] | None = None
+
+    @property
+    def generation_edge_ids(self) -> list[str]:
+        return self.physical_edge_ids if self.actionable_edge_ids is None else self.actionable_edge_ids
 
 
 class GraphBuilder:
@@ -180,10 +188,15 @@ class GraphBuilder:
             )
         demand_pairs = self.build_demand_pairs(env_state, requests, request_history, demand_stats=demand_stats)
         demand_edge_ids = [demand_edge_id(pair) for pair in demand_pairs]
-        # Mask-first filtering: links that are not legal for either endpoint are
-        # dropped from the graph entirely (edge_index / edge_features /
-        # physical_edge_ids), so the GNN only sees currently usable links.
+        # Masks govern generation actions, not whether stored keys can serve
+        # a request. Optionally expose inventory-only edges to message passing
+        # while retaining the exact original generation candidate set.
         active_edges, active_pos = self._active_edges(masks, flat_masks)
+        actionable_edge_ids = [edge.edge_id for edge in active_edges]
+        if self.config["features"]["edge"].get("include_stocked_edges", False):
+            stocked_pos = [self._edge_pos[eid] for eid in self.qkp.positive]
+            active_pos = np.union1d(active_pos, np.asarray(stocked_pos, dtype=np.int64))
+            active_edges = [self.edges[i] for i in active_pos]
         action_candidates: dict[str, list[str]] = {}
         action_masks: dict[str, list[bool]] = {}
         for node in self.nodes:
@@ -220,6 +233,7 @@ class GraphBuilder:
             physical_edge_history=phys_history,
             demand_edge_history=demand_history,
             history_valid=history_valid,
+            actionable_edge_ids=actionable_edge_ids,
         )
 
     def _flat_mask(

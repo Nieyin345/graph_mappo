@@ -27,10 +27,10 @@ class GreedyQKPPolicy:
 
     def act(self, obs: GraphObservation) -> tuple[dict[str, str], dict[str, dict[str, float]]]:
         edge_level = dict(obs.state.qkp_snapshot)
-        edge_rate = {edge_id: obs.state.edge_windows[edge_id].rates[0] for edge_id in obs.physical_edge_ids}
+        edge_rate = {edge_id: obs.state.edge_windows[edge_id].rates[0] for edge_id in obs.generation_edge_ids}
         max_level = max(edge_level.values(), default=0.0)
         edge_scores: dict[str, float] = {}
-        for edge_id in obs.physical_edge_ids:
+        for edge_id in obs.generation_edge_ids:
             level = edge_level.get(edge_id, 0.0)
             edge_scores[edge_id] = (
                 level

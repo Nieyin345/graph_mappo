@@ -18,10 +18,9 @@ class PolicyStep:
     log_probs: dict[str, torch.Tensor]
     entropies: dict[str, torch.Tensor]
     value: torch.Tensor
-    # Log probability / entropy of the whole sampled matching action, both
-    # normalized PER DECISION (see ``_sample_matching``). These are the PPO
-    # policy terms; node-level dictionaries below are kept for compatibility
-    # with older tests/callers.
+    # Joint log probability of the ordered matching sequence (SUM of its
+    # conditional log probabilities). The historical field name is retained
+    # for callers; only entropy is averaged per decision.
     mean_log_prob: torch.Tensor
     mean_entropy: torch.Tensor
     # Raw edge-scorer outputs keyed by directed arc ``(src, dst)``, used by the
@@ -52,6 +51,19 @@ class PolicyStep:
 #: sequence as-is*, so sampling and execution are identical by construction and
 #: the check is a meaningful invariant.
 DETERMINISTIC_RESOLVER_MODES = ("max_weight_matching", "priority_matching")
+
+
+def _finalize_matching_log_prob(total, *, n_decisions: int, average: bool):
+    """Apply the single matching log-prob reduction contract.
+
+    ``total`` may be a Python/NumPy scalar during rollout or a torch scalar
+    during differentiable replay. PPO always passes ``average=False`` because
+    the ordered matching is one joint action. Behaviour cloning alone may opt
+    into the historical per-decision mean weighting.
+    """
+    if not average:
+        return total
+    return total / max(1, int(n_decisions))
 
 
 class MAPPOPolicy:
@@ -211,18 +223,13 @@ class MAPPOPolicy:
                 | (dst_code == dst_code[sel])
                 | (pair_code == pair_code[sel])
             )
-        # Report the matching's log-probability PER DECISION, exactly like the
-        # entropy below. The sequential sampler makes one decision per matched
-        # arc plus a final STOP, so the raw sum over D decisions is D times more
-        # sensitive to a parameter change than a single decision is. PPO's
-        # clip_eps / target_kl are meant to bound "how much did one decision's
-        # probability move", so they must be applied to the per-decision mean.
-        # Measured with the sum: clip_eps=0.1 and target_kl=0.02 were exceeded
-        # after a single optimizer step (kl 0.03-0.17), so the KL early stop
-        # fired every update and the actor advanced one step at a time.
+        # PPO needs the probability of the sampled SEQUENCE. Averaging log
+        # probabilities would turn its importance ratio into the D-th root
+        # of the true ratio and reweight policy gradients by sequence length.
+        # Entropy remains a per-decision regularizer with its own coefficient.
         n_decisions = max(1, len(matched_edges) + (1 if stopped else 0))
         mean_entropy = mean_entropy / n_decisions
-        mean_lp = mean_lp / n_decisions
+        mean_lp = _finalize_matching_log_prob(mean_lp, n_decisions=n_decisions, average=False)
         mean_lp_t = torch.tensor(mean_lp, dtype=torch.float32, device=self.device)
         mean_entropy_t = torch.tensor(mean_entropy, dtype=torch.float32, device=self.device)
 
@@ -507,11 +514,14 @@ class MAPPOPolicy:
             actions, action_scores = self._actions_from_index_pairs(node_ids, pairs)
             matched_edges = [(node_ids[s], node_ids[d]) for s, d in pairs]
             divisor = max(1, int(n_dec[g]))
+            joint_lp = _finalize_matching_log_prob(
+                float(lp_sum[g]), n_decisions=divisor, average=False
+            )
             results.append(
                 (
                     (actions, action_scores),
                     matched_edges,
-                    torch.as_tensor(float(lp_sum[g]) / divisor, dtype=torch.float32, device=self.device),
+                    torch.as_tensor(joint_lp, dtype=torch.float32, device=self.device),
                     torch.as_tensor(float(ent_sum[g]) / divisor, dtype=torch.float32, device=self.device),
                 )
             )
@@ -703,7 +713,7 @@ class MAPPOPolicy:
         used_tx: set[str] = set()
         used_rx: set[str] = set()
         used_pair: set[tuple[str, str]] = set()
-        mean_lp = torch.zeros((), dtype=torch.float32, device=self.device)
+        selected_log_probs: list[torch.Tensor] = []
         mean_entropy = torch.zeros((), dtype=torch.float32, device=self.device)
 
         def _is_feasible(i: int) -> bool:
@@ -728,7 +738,7 @@ class MAPPOPolicy:
                 pos = next(i for i, a in enumerate(avail) if arcs[a] == arc)
             except StopIteration as exc:
                 raise ValueError(f"Stored matching arc {arc!r} is not available for evaluation.") from exc
-            mean_lp = mean_lp + logp[pos]
+            selected_log_probs.append(logp[pos])
             used_tx.add(cur_src)
             used_rx.add(cur_dst)
             used_pair.add(pair)
@@ -743,16 +753,22 @@ class MAPPOPolicy:
             )
             logp = torch.log_softmax(raw_scores, dim=0)
             mean_entropy = mean_entropy - (logp.exp() * logp).sum()
-            mean_lp = mean_lp + logp[-1]  # STOP chosen
+            selected_log_probs.append(logp[-1])  # STOP chosen
         n_decisions = max(1, len(matched_edges) + (1 if stopped else 0))
         mean_entropy = mean_entropy / n_decisions
-        mean_lp = mean_lp / n_decisions
-        return mean_lp, mean_entropy
+        selected = torch.stack(selected_log_probs) if selected_log_probs else mean_entropy.new_empty(0)
+        total_log_prob = selected.sum()
+        joint_log_prob = _finalize_matching_log_prob(
+            total_log_prob, n_decisions=n_decisions, average=False
+        )
+        return joint_log_prob, mean_entropy
 
     def _matching_log_prob_entropy_fast(
         self,
         arc_scores: dict[tuple[str, str], torch.Tensor],
         matched_edges: list[tuple[str, str]],
+        *,
+        average_log_prob: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Vectorized twin of ``_matching_log_prob_entropy`` (identical math).
 
@@ -848,10 +864,12 @@ class MAPPOPolicy:
         )
         logp = torch.log_softmax(logits, dim=-1)
         choices_t = torch.tensor(choices, dtype=torch.long, device=self.device).unsqueeze(-1)
-        # Both terms are per-decision means (mean over the decision rows), the
-        # same normalization the sequential twin applies and the same one PPO's
-        # clip_eps / target_kl are calibrated against. See ``_sample_matching``.
-        mean_lp = logp.gather(-1, choices_t).mean()
+        # BC may explicitly average its NLL to preserve the historical
+        # per-demonstration weighting. PPO must always use the joint sum.
+        selected = logp.gather(-1, choices_t)
+        mean_lp = _finalize_matching_log_prob(
+            selected.sum(), n_decisions=selected.numel(), average=average_log_prob
+        )
         # -inf padding would turn into 0 * -inf = nan, so only finite logits
         # contribute to the entropy.
         safe = torch.where(torch.isfinite(logits), logp, torch.zeros_like(logp))
@@ -958,7 +976,10 @@ class MAPPOPolicy:
         )
         logp = torch.log_softmax(logits, dim=-1)
         choices_t = torch.tensor(choices, dtype=torch.long, device=self.device).unsqueeze(-1)
-        mean_lp = logp.gather(-1, choices_t).mean()
+        selected = logp.gather(-1, choices_t)
+        mean_lp = _finalize_matching_log_prob(
+            selected.sum(), n_decisions=selected.numel(), average=False
+        )
         safe = torch.where(torch.isfinite(logits), logp, torch.zeros_like(logp))
         mean_entropy = -(safe.exp() * safe).sum(dim=-1).mean()
         return mean_lp, mean_entropy

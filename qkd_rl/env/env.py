@@ -262,7 +262,7 @@ class QKDEnv:
     def _active_edge_ids(self, masks: dict[str, list[bool]]) -> list[str]:
         """Edge ids legal for both endpoints at the current time step."""
         if self._obs_cache is not None and self._obs_cache[0] == self.t:
-            return list(self._obs_cache[1].physical_edge_ids)
+            return list(self._obs_cache[1].generation_edge_ids)
         active_edges, _ = self.graph_builder._active_edges(
             masks, self.mask_builder.last_flat_legal
         )

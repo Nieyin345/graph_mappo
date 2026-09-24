@@ -55,6 +55,7 @@ def _strip_obs(obs, actions):
         "edge_ids": obs.edge_ids,
         "node_ids": obs.node_ids,
         "physical_edge_ids": obs.physical_edge_ids,
+        "actionable_edge_ids": list(obs.generation_edge_ids),
         "action_candidates": obs.action_candidates,
         "action_masks": obs.action_masks,
         "raw_action_masks": obs.raw_action_masks,

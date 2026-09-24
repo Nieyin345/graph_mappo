@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from qkd_rl.rl.algos.checkpoint import load_checkpoint, save_checkpoint
-from qkd_rl.rl.algos.mappo_trainer import build_param_groups
+from qkd_rl.rl.algos.checkpoint_compat import build_param_groups
 from qkd_rl.baselines.greedy_relay_diffusion import GreedyRelayDiffusionPolicyV3
 from qkd_rl.core.config import ConfigValidator, deep_merge, load_config
 from qkd_rl.env.factory import build_env_from_config, load_default_config

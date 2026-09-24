@@ -3,13 +3,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from qkd_rl.baselines.random_policy import RandomPolicy
 from tests.helpers import build_test_env
 import json
 
 from qkd_rl.evaluation import Evaluator, plot_learning_curve, plot_policy_comparison, read_train_history
 from qkd_rl.evaluation.evaluator import (
+    EpisodeRecord,
     aggregate_episodes,
+    merge_eval_summary,
     write_episodes_csv,
     write_steps_csv,
     write_summary_json,
@@ -113,3 +117,64 @@ def test_rolling_smooth_short_series_does_not_create_triangle() -> None:
     values = [0.09] * 20
     smoothed = _rolling_smooth(values, window=20)
     np.testing.assert_allclose(smoothed, values, atol=1e-6)
+
+
+def test_compare_can_override_env_builder_per_policy() -> None:
+    class _Metrics:
+        def episode_summary(self):
+            return {"arrived_keys": 1.0, "served_keys": 1.0, "failed_keys": 0.0,
+                    "success_rate": 1.0, "conflict_count": 0}
+
+    class _Env:
+        def __init__(self, marker: str):
+            self.marker = marker
+            self.metrics = _Metrics()
+        def reset(self, seed=None, start_seed=None):
+            return {"marker": self.marker}
+        def step(self, actions, scores=None):
+            return {"marker": self.marker}, 0.0, True, False, {}
+
+    class _Policy:
+        def __init__(self, expected: str):
+            self.expected = expected
+        def act(self, obs):
+            assert obs["marker"] == self.expected
+            return {}, {}
+
+    evaluator = Evaluator(lambda seed: _Env("default"))
+    episodes, _ = evaluator.compare(
+        {"base": _Policy("default"), "rl": _Policy("checkpoint")},
+        num_episodes=1, seeds=[7],
+        env_builders={"rl": lambda seed: _Env("checkpoint")},
+    )
+    assert [ep.policy for ep in episodes] == ["base", "rl"]
+
+def _sample_episode() -> EpisodeRecord:
+    return EpisodeRecord(
+        policy="random", episode=0, seed=7, steps=1, total_reward=1.0,
+        arrived_keys=10.0, served_keys=8.0, failed_keys=2.0,
+        success_rate=0.8, conflict_count=0,
+    )
+
+
+def test_merge_eval_summary_refuses_to_overwrite_invalid_json(tmp_path: Path) -> None:
+    path = tmp_path / "summary.json"
+    original = "{not valid json"
+    path.write_text(original, encoding="utf-8")
+    with pytest.raises(ValueError, match="refusing to overwrite unreadable evaluation summary"):
+        merge_eval_summary([_sample_episode()], path)
+    assert path.read_text(encoding="utf-8") == original
+
+
+def test_merge_eval_summary_warns_on_malformed_historical_episode(tmp_path: Path) -> None:
+    path = tmp_path / "summary.json"
+    path.write_text(
+        json.dumps({"policies": {"random": {"runs": [{"episode_log": [{"bad": "shape"}]}]}}}),
+        encoding="utf-8",
+    )
+    with pytest.warns(RuntimeWarning, match="skipped 1 malformed episode_log entries"):
+        merge_eval_summary([_sample_episode()], path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    random_blob = payload["policies"]["random"]
+    assert random_blob["invalid_episode_logs"] == 1
+    assert random_blob["n_episodes"] == 1

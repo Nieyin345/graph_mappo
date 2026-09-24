@@ -38,6 +38,7 @@ from qkd_rl.core.config import load_config
 from qkd_rl.env.factory import build_env_from_config
 from qkd_rl.evaluation.test_protocol import (
     build_validation_env_config,
+    checkpoint_validation_config,
     load_validation_profile,
     resolve_seeds,
 )
@@ -83,13 +84,10 @@ def main() -> None:
             config["scenario"]["time_limit"]["days"] = args.time_limit_days
         return config
 
-    def env_builder(seed: int):
-        env = build_env_from_config(base_config())
-        env.reset(
-            seed=seed,
-            start_seed=int(profile.get("start_seed", 0)) + seed,
-        )
-        return env
+    def env_builder(_seed: int):
+        # Evaluator.run_policy owns reset/seed/start_seed semantics. Returning
+        # an already-reset env duplicates a full reset for every policy/seed.
+        return build_env_from_config(base_config())
 
     # Baseline configuration lives in configs/baselines.yaml; every policy is
     # independent of the training stack and each entry can be disabled.
@@ -109,6 +107,7 @@ def main() -> None:
             return bool(entry["_enabled"])
         return bool(entry.get("enabled", True))
     policies = {}
+    policy_env_builders = {}
     template_env = None
     if _enabled("random"):
         policies["random"] = RandomPolicy(seed=0)
@@ -158,11 +157,16 @@ def main() -> None:
     if args.rl_checkpoint:
         import torch
         device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
-        if template_env is None:
-            template_env = build_env_from_config(base_config())
-        model = GraphMAPPOActorCritic(template_env.action_resolver.action_space, base_config())
-        rl_policy = MAPPOPolicy(model, device)
         data = load_checkpoint(args.rl_checkpoint, device)
+
+        # Keep the checkpoint's policy input/output contract, but run it on
+        # the exact same physical validation environment as every baseline.
+        validation_cfg = base_config()
+        rl_cfg = checkpoint_validation_config(data.config, validation_cfg)
+
+        template_env = build_env_from_config(rl_cfg)
+        model = GraphMAPPOActorCritic(template_env.action_resolver.action_space, rl_cfg)
+        rl_policy = MAPPOPolicy(model, device)
         model.load_state_dict(data.model_state)
         model.eval()
 
@@ -174,8 +178,19 @@ def main() -> None:
                 step = self.policy.act(obs, deterministic=True)
                 return step.actions, step.action_scores
 
+        def _rl_env_builder(_seed: int):
+            # Evaluator owns episode reset/seed semantics. Build from a fresh
+            # merged dict so one environment can never mutate config seen by
+            # the next episode.
+            fresh_cfg = checkpoint_validation_config(data.config, validation_cfg)
+            return build_env_from_config(fresh_cfg)
+
         policies[args.rl_name] = _RLPolicyAdapter(rl_policy)
-        print(f"rl policy: loaded {args.rl_checkpoint} (update={data.update}) on {device}")
+        policy_env_builders[args.rl_name] = _rl_env_builder
+        print(
+            f"rl policy: loaded {args.rl_checkpoint} (update={data.update}) on {device}; "
+            f"checkpoint observation/model config preserved"
+        )
 
     # NOTE: the env-replay MILP baseline was removed — it produced poor results
     # (SR ~0.19) and is not a valid upper bound (solver ideal flow vs env replay
@@ -188,6 +203,7 @@ def main() -> None:
         seeds=seeds,
         collect_steps=True,
         start_seed=int(profile.get("start_seed", 0)),
+        env_builders=policy_env_builders,
     )
 
     # Per-policy output: each policy gets its own subdirectory

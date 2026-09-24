@@ -20,7 +20,7 @@ def edge_map(obs: GraphObservation) -> tuple[dict[str, tuple[str, str]], dict[tu
     """Parse `E_{src}__{dst}` edge ids into (endpoints, pair->edge) maps."""
     endpoints: dict[str, tuple[str, str]] = {}
     pair_to_edge: dict[tuple[str, str], str] = {}
-    for edge_id in obs.physical_edge_ids:
+    for edge_id in obs.generation_edge_ids:
         body = edge_id[2:] if edge_id.startswith("E_") else edge_id
         if "__" in body:
             src, dst = body.split("__", 1)

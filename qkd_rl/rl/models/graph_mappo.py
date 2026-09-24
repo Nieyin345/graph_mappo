@@ -490,6 +490,8 @@ class DemandResidual(nn.Module):
         """
         if demand_emb.size(0) == 0 or pair_emb.size(0) == 0:
             return pair_emb.new_zeros((pair_emb.size(0),))
+        if demand_valid is not None and not bool((demand_valid > 0).any()):
+            return pair_emb.new_zeros((pair_emb.size(0),))
 
         h = self.hidden_dim
         nh = self.num_heads
@@ -505,8 +507,7 @@ class DemandResidual(nn.Module):
             # (n_dem,) bool; -inf on invalid tokens so softmax ignores them.
             mask = demand_valid.view(1, 1, -1).to(logits.dtype)
             logits = logits.masked_fill(mask <= 0, float("-inf"))
-            # A row whose every entry is masked would give NaN; those rows
-            # have zero demand tokens, which the caller handles above.
+            # The all-masked case was handled before the softmax.
         attn = torch.softmax(logits, dim=-1)
         ctx = torch.einsum("aht,thd->ahd", attn, v).reshape(-1, h)  # (n_arcs, h)
         return self.out(ctx).squeeze(-1)
@@ -755,6 +756,10 @@ class SharedNodeActor(nn.Module):
         build_logits_dict: bool = True,
         demand_emb: torch.Tensor | None = None,
     ) -> tuple[dict[str, torch.Tensor], torch.Tensor, list[str], list[int], dict[str, torch.Tensor]]:
+        # A cached observation can be evaluated by a second model (e.g. a
+        # baseline/attention comparison). Its maps are model-local, not part
+        # of the observation's candidate-plan cache.
+        self._ensure_static(action_space)
         plan = getattr(obs, "_actor_plan", None)
         if plan is None:
             plan = self._build_plan(obs, action_space)

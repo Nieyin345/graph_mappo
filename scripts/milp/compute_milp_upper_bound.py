@@ -143,14 +143,22 @@ def main():
         if hasattr(env, "qkp"):
             for eid in obs.physical_edge_ids:
                 try:
-                    state.qkp_capacity[eid] = env.qkp.get_capacity(eid)
-                except Exception:
-                    pass
+                    capacity = float(env.qkp.get_capacity(eid))
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise RuntimeError(
+                        f"missing or invalid QKP capacity for physical edge {eid}"
+                    ) from exc
+                if not math.isfinite(capacity):
+                    raise RuntimeError(
+                        f"non-finite QKP capacity for physical edge {eid}: {capacity}"
+                    )
+                state.qkp_capacity[eid] = capacity
         state.edge_windows = obs.state.edge_windows
         holder = _Light()
         holder.state = state
         holder.node_ids = obs.node_ids
         holder.physical_edge_ids = obs.physical_edge_ids
+        holder.generation_edge_ids = obs.generation_edge_ids
 
         w0 = time.perf_counter()
         outcome = pol.solve_window(holder)

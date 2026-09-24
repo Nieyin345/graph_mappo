@@ -430,7 +430,7 @@ def test_update_stats_fields_are_all_populated(tmp_path):
     env = build_env_from_config(config)
     trainer = MAPPOTrainer(
         env,
-        MAPPOPolicy(GraphMAPPOActorCritic(env.action_resolver.action_space, config), config),
+        MAPPOPolicy(GraphMAPPOActorCritic(env.action_resolver.action_space, config), "cpu"),
         config,
         tmp_path,
     )

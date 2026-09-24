@@ -47,13 +47,13 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from qkd_rl.rl.algos.checkpoint import load_checkpoint, save_checkpoint
-from qkd_rl.rl.algos.mappo_trainer import build_param_groups
+from qkd_rl.rl.algos.checkpoint_compat import build_param_groups
 from qkd_rl.baselines.path_greedy import PathScoreGreedy
 from qkd_rl.baselines.serve_probe import ServeProbe
 from qkd_rl.core.config import ConfigValidator, deep_merge, load_config
 from qkd_rl.env.factory import build_env_from_config, load_default_config
 from qkd_rl.env.graph_builder import GraphObservation
-from qkd_rl.rl.models.graph_mappo import GraphMAPPOActorCritic
+from qkd_rl.model_zoo import build_model
 
 # numpy 2.x pickle 引用 ``numpy._core`` 命名空间；本环境若装的是 numpy 1.x
 # （如 CUDA torch 环境自带 numpy 1.24），该命名空间不存在会导致反序列化失败。
@@ -75,7 +75,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--cover-all-days", type=str, choices=("true", "false"), default=None)
+    parser.add_argument("--continuous", type=str, choices=("true", "false"), default=None)
     parser.add_argument("--checkpoint", type=str, default=None, help="Resume supervised training from this checkpoint.")
+    parser.add_argument("--resolved-config", type=str, default=None)
+    parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument(
         "--data-dir",
         type=str,
@@ -152,6 +155,7 @@ def rebuild_obs(rec: dict) -> GraphObservation:
         node_ids=rec["node_ids"],
         edge_ids=rec["edge_ids"],
         physical_edge_ids=rec["physical_edge_ids"],
+        actionable_edge_ids=rec.get("actionable_edge_ids"),
         demand_edge_ids=rec["demand_edge_ids"],
         action_candidates=rec["action_candidates"],
         action_masks=rec["action_masks"],
@@ -164,9 +168,13 @@ def rebuild_obs(rec: dict) -> GraphObservation:
 def main() -> None:
     args = parse_args()
     profile = load_profile(args.config)
+    if args.resolved_config:
+        experiment_config = load_config([Path(args.resolved_config)])
+        profile["episode_steps"] = int(experiment_config["env"]["episode_steps"])
+    if args.continuous is not None:
+        profile["continuous"] = args.continuous == "true"
     if args.episodes is not None:
         profile["episodes"] = args.episodes
-        profile["seeds"] = profile["seeds"][: args.episodes]
     if args.cover_all_days is not None:
         profile["cover_all_days"] = args.cover_all_days == "true"
     if profile["cover_all_days"]:
@@ -174,12 +182,27 @@ def main() -> None:
     if profile["continuous"]:
         profile["cover_all_days"] = True
         profile["seeds"] = list(range(profile["window_start_day"], profile["window_end_day"]))
+    if args.episodes is not None:
+        if not profile["cover_all_days"]:
+            profile["seeds"] = list(range(profile["window_start_day"], profile["window_start_day"] + args.episodes))
+        else:
+            profile["seeds"] = profile["seeds"][: args.episodes]
     config = build_config(profile)
+    if args.resolved_config:
+        resolved = load_config([Path(args.resolved_config)])
+        # BC owns its collection window and episode length. Share the model,
+        # graph features and runtime with PPO without replacing BC's schedule.
+        for section in ("experiment", "model", "features", "action_resolver", "runtime"):
+            if section in resolved:
+                config[section] = deep_merge(config.get(section, {}), resolved[section])
+        ConfigValidator().validate(config)
+    threads = int(config.get("experiment", {}).get("cpu_threads", torch.get_num_threads()))
+    torch.set_num_threads(threads)
     device = torch.device(args.device)
     torch.manual_seed(profile["seeds"][0])
 
     env = build_env_from_config(config)
-    model = GraphMAPPOActorCritic(env.action_resolver.action_space, config).to(device)
+    model = build_model(env.action_resolver.action_space, config).to(device)
     # Behavior cloning evaluates the expert matching deterministically.
     model.actor.temperature = 1.0
     from qkd_rl.rl.algos.policy import MAPPOPolicy
@@ -202,7 +225,7 @@ def main() -> None:
             except ValueError as exc:
                 print(f"optimizer state incompatible ({exc}); starting optimizer fresh")
         print(f"resumed supervised checkpoint: {args.checkpoint} (update={data.update})")
-    output_dir = ROOT / "outputs" / args.run_name
+    output_dir = Path(args.output_dir) if args.output_dir else ROOT / "outputs" / args.run_name
     output_dir.mkdir(parents=True, exist_ok=True)
     log_path = output_dir / "supervised_train.log"
 
@@ -244,7 +267,9 @@ def main() -> None:
             # Keep only arcs the model actually scored; empty expert
             # matchings stay as-is so the STOP probability is trained.
             arcs = [arc for arc in arcs if arc in edge_map]
-            mean_lp, _mean_entropy = policy._matching_log_prob_entropy_fast(edge_map, arcs)
+            mean_lp, _mean_entropy = policy._matching_log_prob_entropy_fast(
+                edge_map, arcs, average_log_prob=True,
+            )
             losses.append(-mean_lp)
         if not losses:
             return 0.0, 0

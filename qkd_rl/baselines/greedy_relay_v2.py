@@ -59,7 +59,7 @@ class GreedyRelayScheduler:
         }
         levels = dict(obs.state.qkp_snapshot)
         windows = obs.state.edge_windows
-        rates = {edge_id: windows[edge_id].rates[0] for edge_id in obs.physical_edge_ids}
+        rates = {edge_id: windows[edge_id].rates[0] for edge_id in obs.generation_edge_ids}
         max_rate = max(rates.values(), default=1.0) or 1.0
 
         # Aggregate remaining demand per pair.
@@ -145,7 +145,7 @@ class GreedyRelayScheduler:
         if self.fill_with_rate:
             free = [node_id for node_id in obs.node_ids if node_id not in used]
             remaining_scores: dict[str, float] = {}
-            for edge_id in obs.physical_edge_ids:
+            for edge_id in obs.generation_edge_ids:
                 src, dst = endpoints[edge_id]
                 if src in used or dst in used:
                     continue

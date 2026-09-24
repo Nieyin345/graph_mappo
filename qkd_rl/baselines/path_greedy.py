@@ -105,7 +105,7 @@ class PathGreedyPolicy:
         scoring so path choice reflects demand/importance/completion signals,
         not just link rate.
         """
-        active_ids = list(obs.physical_edge_ids)
+        active_ids = list(obs.generation_edge_ids)
         # adjacency over physical edges (node -> neighbor)
         adj: dict[str, list[str]] = {n: [] for n in obs.node_ids}
         edge_by_pair: dict[tuple[str, str], str] = {}
@@ -410,7 +410,7 @@ class PathScoreGreedy:
         return self._v3_scorer.score_edges(obs)
 
     def act(self, obs: GraphObservation) -> tuple[dict[str, str], dict[str, dict[str, float]]]:
-        active_ids = list(obs.physical_edge_ids)
+        active_ids = list(obs.generation_edge_ids)
         adj: dict[str, list[str]] = {n: [] for n in obs.node_ids}
         edge_by_pair: dict[tuple[str, str], str] = {}
         for eid in active_ids:
