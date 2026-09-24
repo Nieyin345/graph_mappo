@@ -75,3 +75,11 @@ server_results/
 
 # 本地大文件归档（服务器产物压缩包，可解回）
 _archive/
+
+# 节点回传产物：checkpoint/大文件不进 git（159MB），但评测 JSON 与报告要入库
+server_results_node342/**
+!server_results_node342/frozen_20260924/
+!server_results_node342/frozen_20260924/冻结评测报告.md
+!server_results_node342/frozen_20260924/frozen_eval/
+!server_results_node342/frozen_20260924/frozen_eval/*.json
+!server_results_node342/frozen_20260924/*.log

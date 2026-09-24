@@ -1,0 +1,72 @@
+[iso] frozen_isolated_s42 start 15:22
+Traceback (most recent call last):
+  File "/opt/qkd/graph_mappo/scripts/experiment.py", line 221, in <module>
+    main()
+  File "/opt/qkd/graph_mappo/scripts/experiment.py", line 194, in main
+    run = train_one(args, args.model, args.seed)
+  File "/opt/qkd/graph_mappo/scripts/experiment.py", line 76, in train_one
+    config = resolve_experiment(model, seed, args.updates, args.config, name, args.mode)
+  File "/opt/qkd/graph_mappo/scripts/experiment.py", line 47, in resolve_experiment
+    config = deep_merge(config, load_config([override_path]))
+  File "/opt/qkd/graph_mappo/qkd_rl/core/config.py", line 57, in load_config
+    config = deep_merge(config, load_yaml(path))
+  File "/opt/qkd/graph_mappo/qkd_rl/core/config.py", line 50, in load_yaml
+    with Path(path).open("r", encoding="utf-8") as f:
+  File "/usr/lib/python3.10/pathlib.py", line 1119, in open
+    return self._accessor.open(self, mode, buffering, encoding, errors,
+FileNotFoundError: [Errno 2] No such file or directory: '/opt/qkd/graph_mappo/model_zoo/v3/config_demand_isolated.yaml'
+[iso] frozen_isolated_s42 FAILED
+[iso] frozen_isolated_s43 start 15:22
+Traceback (most recent call last):
+  File "/opt/qkd/graph_mappo/scripts/experiment.py", line 221, in <module>
+    main()
+  File "/opt/qkd/graph_mappo/scripts/experiment.py", line 194, in main
+    run = train_one(args, args.model, args.seed)
+  File "/opt/qkd/graph_mappo/scripts/experiment.py", line 76, in train_one
+    config = resolve_experiment(model, seed, args.updates, args.config, name, args.mode)
+  File "/opt/qkd/graph_mappo/scripts/experiment.py", line 47, in resolve_experiment
+    config = deep_merge(config, load_config([override_path]))
+  File "/opt/qkd/graph_mappo/qkd_rl/core/config.py", line 57, in load_config
+    config = deep_merge(config, load_yaml(path))
+  File "/opt/qkd/graph_mappo/qkd_rl/core/config.py", line 50, in load_yaml
+    with Path(path).open("r", encoding="utf-8") as f:
+  File "/usr/lib/python3.10/pathlib.py", line 1119, in open
+    return self._accessor.open(self, mode, buffering, encoding, errors,
+FileNotFoundError: [Errno 2] No such file or directory: '/opt/qkd/graph_mappo/model_zoo/v3/config_demand_isolated.yaml'
+[iso] frozen_isolated_s43 FAILED
+[iso] frozen_isolated_s44 start 15:22
+Traceback (most recent call last):
+  File "/opt/qkd/graph_mappo/scripts/experiment.py", line 221, in <module>
+    main()
+  File "/opt/qkd/graph_mappo/scripts/experiment.py", line 194, in main
+    run = train_one(args, args.model, args.seed)
+  File "/opt/qkd/graph_mappo/scripts/experiment.py", line 76, in train_one
+    config = resolve_experiment(model, seed, args.updates, args.config, name, args.mode)
+  File "/opt/qkd/graph_mappo/scripts/experiment.py", line 47, in resolve_experiment
+    config = deep_merge(config, load_config([override_path]))
+  File "/opt/qkd/graph_mappo/qkd_rl/core/config.py", line 57, in load_config
+    config = deep_merge(config, load_yaml(path))
+  File "/opt/qkd/graph_mappo/qkd_rl/core/config.py", line 50, in load_yaml
+    with Path(path).open("r", encoding="utf-8") as f:
+  File "/usr/lib/python3.10/pathlib.py", line 1119, in open
+    return self._accessor.open(self, mode, buffering, encoding, errors,
+FileNotFoundError: [Errno 2] No such file or directory: '/opt/qkd/graph_mappo/model_zoo/v3/config_demand_isolated.yaml'
+[iso] frozen_isolated_s44 FAILED
+[iso] frozen_isolated_s42 start 15:36
+/opt/qkd/graph_mappo/outputs/experiments/v3/frozen_isolated_s42
+{"mean_reward": 14.103564888370551, "mean_success_rate": 0.8543829631687079, "mean_served_keys": 14232216.883012284, "seeds": [7, 8, 9, 10, 11], "per_seed_success": [0.8006377631672199, 0.8189378256430391, 0.8228823390744534, 0.9215157190259796, 0.9079411689328476], "per_seed_generated_keys": [1790533299.6192312, 2532895619.934519, 2539163511.504511, 2525011091.669333, 2492353483.9830637], "per_seed_served_keys": [12906173.018912034, 15518771.446245054, 11724913.952253968, 12286013.055239175, 18725212.942411188], "per_seed_waiting_keys_mean": [569670.2833674236, 599282.0334600803, 436965.460305849, 335049.50076337834, 513026.2111505192], "mean_key_efficiency": 166.94457517564527, "checkpoint": "/opt/qkd/graph_mappo/outputs/experiments/v3/frozen_isolated_s42/checkpoint_final.pt", "model": "v3"}
+[iso] frozen_isolated_s42 rc=0
+[B] rl:outputs/experiments/v3/frozen_isolated_s42: sr=0.8413 (39s) -> /opt/qkd/graph_mappo/outputs/frozen_eval/rl_outputs_experiments_v3_frozen_isolated_s42_B.json
+[iso] frozen_isolated_s42 windowB rc=0
+[iso] frozen_isolated_s43 start 15:40
+/opt/qkd/graph_mappo/outputs/experiments/v3/frozen_isolated_s43
+{"mean_reward": 14.005993428749708, "mean_success_rate": 0.8488355568665253, "mean_served_keys": 14145918.99944971, "seeds": [7, 8, 9, 10, 11], "per_seed_success": [0.7904263442012324, 0.8135982238729058, 0.8149729151173658, 0.9166881585971879, 0.9084921425439347], "per_seed_generated_keys": [1784014023.3689547, 2499280905.7906866, 2481723940.023279, 2502062128.0669713, 2526235739.6509943], "per_seed_served_keys": [12741566.319095265, 15417586.646996591, 11612215.804651171, 12221650.104907973, 18736576.121597547], "per_seed_waiting_keys_mean": [595633.7856829711, 586637.1326669458, 437201.39827616833, 314413.4869467846, 513070.82418711734], "mean_key_efficiency": 166.7380781320699, "checkpoint": "/opt/qkd/graph_mappo/outputs/experiments/v3/frozen_isolated_s43/checkpoint_final.pt", "model": "v3"}
+[iso] frozen_isolated_s43 rc=0
+[B] rl:outputs/experiments/v3/frozen_isolated_s43: sr=0.8350 (40s) -> /opt/qkd/graph_mappo/outputs/frozen_eval/rl_outputs_experiments_v3_frozen_isolated_s43_B.json
+[iso] frozen_isolated_s43 windowB rc=0
+[iso] frozen_isolated_s44 start 15:44
+/opt/qkd/graph_mappo/outputs/experiments/v3/frozen_isolated_s44
+{"mean_reward": 13.992382122474975, "mean_success_rate": 0.847336532344368, "mean_served_keys": 14136108.971388424, "seeds": [7, 8, 9, 10, 11], "per_seed_success": [0.7989633344925055, 0.8137008188928027, 0.8049454472137428, 0.9056858510298076, 0.9133872100929815], "per_seed_generated_keys": [1776270917.57383, 2524023581.2258816, 2523855439.7662783, 2477128769.6180215, 2498872895.7099295], "per_seed_served_keys": [12879181.453964854, 15419530.810052013, 11469338.514975458, 12074962.976712843, 18837531.101236947], "per_seed_waiting_keys_mean": [612368.5530516885, 611870.4769484218, 448326.0502368694, 365245.32189768285, 492667.3809175834], "mean_key_efficiency": 166.95049009281865, "checkpoint": "/opt/qkd/graph_mappo/outputs/experiments/v3/frozen_isolated_s44/checkpoint_final.pt", "model": "v3"}
+[iso] frozen_isolated_s44 rc=0
+[B] rl:outputs/experiments/v3/frozen_isolated_s44: sr=0.8392 (39s) -> /opt/qkd/graph_mappo/outputs/frozen_eval/rl_outputs_experiments_v3_frozen_isolated_s44_B.json
+[iso] frozen_isolated_s44 windowB rc=0

@@ -1,0 +1,113 @@
+[pipeline] start Thu Sep 24 02:22:15 PM UTC 2026
+[pipeline] frozen_s42 start 14:22
+/opt/qkd/graph_mappo/outputs/experiments/v2/frozen_s42
+{"mean_reward": 14.183769408705313, "mean_success_rate": 0.8598380353298289, "mean_served_keys": 14316871.95904876, "seeds": [7, 8, 9, 10, 11], "per_seed_success": [0.8329147516771892, 0.8055474777225063, 0.8236270811078447, 0.9230983207239437, 0.9140025454176605], "per_seed_generated_keys": [1755310396.7862546, 2367064940.2718925, 2516574025.986414, 2480488739.8525214, 2395675318.7302604], "per_seed_served_keys": [13426473.730923409, 15265025.99395595, 11735525.476944072, 12307112.928763831, 18850221.66465654], "per_seed_waiting_keys_mean": [454023.43972050457, 573226.0600252576, 432029.70384110534, 271475.7084859906, 416160.60997750115], "mean_key_efficiency": 160.8607446454027, "checkpoint": "/opt/qkd/graph_mappo/outputs/experiments/v2/frozen_s42/checkpoint_final.pt", "model": "v2"}
+[pipeline] frozen_s42 rc=0 14:25
+[B] rl:outputs/experiments/v2/frozen_s42: sr=0.8746 (31s) -> /opt/qkd/graph_mappo/outputs/frozen_eval/rl_outputs_experiments_v2_frozen_s42_B.json
+[pipeline] frozen_s42 windowB rc=0
+[pipeline] frozen_s43 start 14:25
+/opt/qkd/graph_mappo/outputs/experiments/v2/frozen_s43
+{"mean_reward": 14.459377066538428, "mean_success_rate": 0.8750126435134955, "mean_served_keys": 14569346.100861574, "seeds": [7, 8, 9, 10, 11], "per_seed_success": [0.8334664043051333, 0.8124325607630261, 0.8488728844582671, 0.9405796176523259, 0.939711750388725], "per_seed_generated_keys": [1721375142.6761591, 2339804944.489732, 2432759436.857786, 2435036614.5226407, 2383501397.731662], "per_seed_served_keys": [13435366.297062706, 15395497.473900529, 12095242.605242345, 12540180.512799866, 19380443.615302425], "per_seed_waiting_keys_mean": [441956.9186643478, 543866.7761821201, 426435.16934831993, 233518.98919670194, 389845.68634271336], "mean_key_efficiency": 155.29149294639936, "checkpoint": "/opt/qkd/graph_mappo/outputs/experiments/v2/frozen_s43/checkpoint_final.pt", "model": "v2"}
+[pipeline] frozen_s43 rc=0 14:28
+[B] rl:outputs/experiments/v2/frozen_s43: sr=0.8848 (31s) -> /opt/qkd/graph_mappo/outputs/frozen_eval/rl_outputs_experiments_v2_frozen_s43_B.json
+[pipeline] frozen_s43 windowB rc=0
+[pipeline] frozen_s44 start 14:29
+/opt/qkd/graph_mappo/outputs/experiments/v2/frozen_s44
+{"mean_reward": 14.221941637972856, "mean_success_rate": 0.8620263294646853, "mean_served_keys": 14344671.547202861, "seeds": [7, 8, 9, 10, 11], "per_seed_success": [0.8286909734352095, 0.8006971086949562, 0.8283276459393988, 0.9345957656355501, 0.9178201536183118], "per_seed_generated_keys": [1743097079.2957127, 2432906060.4868517, 2571046372.857478, 2567067036.5102577, 2459931805.781661], "per_seed_served_keys": [13358386.993959041, 15173112.095230618, 11802501.903050086, 12460401.424412278, 18928955.319362286], "per_seed_waiting_keys_mean": [474354.33378004277, 578166.3891912586, 449909.2297215366, 294270.7699661881, 427264.42674934026], "mean_key_efficiency": 164.15919062612264, "checkpoint": "/opt/qkd/graph_mappo/outputs/experiments/v2/frozen_s44/checkpoint_final.pt", "model": "v2"}
+[pipeline] frozen_s44 rc=0 14:32
+[B] rl:outputs/experiments/v2/frozen_s44: sr=0.8675 (31s) -> /opt/qkd/graph_mappo/outputs/frozen_eval/rl_outputs_experiments_v2_frozen_s44_B.json
+[pipeline] frozen_s44 windowB rc=0
+[pipeline] frozen_s42 start 14:32
+/opt/qkd/graph_mappo/outputs/experiments/v3/frozen_s42
+{"mean_reward": 14.271627000529108, "mean_success_rate": 0.8648063955099061, "mean_served_keys": 14389410.598190894, "seeds": [7, 8, 9, 10, 11], "per_seed_success": [0.8526889700024803, 0.8110173597256578, 0.8343822274128855, 0.9207468852354319, 0.9051965351730755], "per_seed_generated_keys": [1672613751.2109482, 2390444682.4659314, 2486005488.027978, 2449737514.9437723, 2395594689.921448], "per_seed_served_keys": [13745231.469766969, 15368679.587656036, 11888771.158595646, 12275762.65821072, 18668608.116725106], "per_seed_waiting_keys_mean": [437759.1803326992, 598125.5067688926, 418004.92918591364, 300946.88797171, 486853.42354030494], "mean_key_efficiency": 158.3719645612536, "checkpoint": "/opt/qkd/graph_mappo/outputs/experiments/v3/frozen_s42/checkpoint_final.pt", "model": "v3"}
+[pipeline] frozen_s42 rc=0 14:35
+[B] rl:outputs/experiments/v3/frozen_s42: sr=0.8593 (39s) -> /opt/qkd/graph_mappo/outputs/frozen_eval/rl_outputs_experiments_v3_frozen_s42_B.json
+[pipeline] frozen_s42 windowB rc=0
+[pipeline] frozen_s43 start 14:36
+/opt/qkd/graph_mappo/outputs/experiments/v3/frozen_s43
+{"mean_reward": 14.26068654834651, "mean_success_rate": 0.8627990868243526, "mean_served_keys": 14378840.158322781, "seeds": [7, 8, 9, 10, 11], "per_seed_success": [0.8429727130555116, 0.819030421438029, 0.8212384252029749, 0.9152614310471131, 0.9154924433781343], "per_seed_generated_keys": [1698747662.9963815, 2423632398.455565, 2485033062.9316845, 2470641338.214816, 2431388332.7004004], "per_seed_served_keys": [13588606.71507426, 15520526.125213757, 11701490.495736865, 12202628.407345379, 18880949.048243657], "per_seed_waiting_keys_mean": [452802.8688531324, 555750.7071226242, 421825.80455563834, 276786.2038077672, 490776.63652497216], "mean_key_efficiency": 160.0886117179199, "checkpoint": "/opt/qkd/graph_mappo/outputs/experiments/v3/frozen_s43/checkpoint_final.pt", "model": "v3"}
+[pipeline] frozen_s43 rc=0 14:39
+[B] rl:outputs/experiments/v3/frozen_s43: sr=0.8572 (39s) -> /opt/qkd/graph_mappo/outputs/frozen_eval/rl_outputs_experiments_v3_frozen_s43_B.json
+[pipeline] frozen_s43 windowB rc=0
+[pipeline] frozen_s44 start 14:40
+/opt/qkd/graph_mappo/outputs/experiments/v3/frozen_s44
+{"mean_reward": 14.244894876112857, "mean_success_rate": 0.8618865336314989, "mean_served_keys": 14363391.441743474, "seeds": [7, 8, 9, 10, 11], "per_seed_success": [0.8442601852359509, 0.8145759258597468, 0.8125508926170094, 0.920772670048168, 0.9172729943966195], "per_seed_generated_keys": [1741829975.731523, 2412400186.1763277, 2492692405.576272, 2477788604.2805853, 2419265049.653771], "per_seed_served_keys": [13609360.593397528, 15436113.97984315, 11577705.396469312, 12276106.431560824, 18917670.80744657], "per_seed_waiting_keys_mean": [450881.8665182741, 612873.459906754, 431998.5927415055, 284564.8991801927, 482496.07197471365], "mean_key_efficiency": 160.74165030229426, "checkpoint": "/opt/qkd/graph_mappo/outputs/experiments/v3/frozen_s44/checkpoint_final.pt", "model": "v3"}
+[pipeline] frozen_s44 rc=0 14:43
+[B] rl:outputs/experiments/v3/frozen_s44: sr=0.8511 (39s) -> /opt/qkd/graph_mappo/outputs/frozen_eval/rl_outputs_experiments_v3_frozen_s44_B.json
+[pipeline] frozen_s44 windowB rc=0
+[pipeline] frozen_isolated_s42 start 14:44
+Traceback (most recent call last):
+  File "/opt/qkd/graph_mappo/scripts/experiment.py", line 217, in <module>
+    main()
+  File "/opt/qkd/graph_mappo/scripts/experiment.py", line 190, in main
+    run = train_one(args, args.model, args.seed)
+  File "/opt/qkd/graph_mappo/scripts/experiment.py", line 72, in train_one
+    config = resolve_experiment(model, seed, args.updates, args.config, name, args.mode)
+  File "/opt/qkd/graph_mappo/scripts/experiment.py", line 43, in resolve_experiment
+    config = deep_merge(config, load_config([resolve_config_path(ROOT / "configs", name)]))
+  File "/opt/qkd/graph_mappo/qkd_rl/core/config.py", line 46, in resolve_config_path
+    raise FileNotFoundError(f"Config not found under {root}: {name}")
+FileNotFoundError: Config not found under /opt/qkd/graph_mappo/configs: model_zoo/v3/config_demand_isolated.yaml
+[pipeline] frozen_isolated_s42 FAILED
+[pipeline] frozen_isolated_s43 start 14:44
+Traceback (most recent call last):
+  File "/opt/qkd/graph_mappo/scripts/experiment.py", line 217, in <module>
+    main()
+  File "/opt/qkd/graph_mappo/scripts/experiment.py", line 190, in main
+    run = train_one(args, args.model, args.seed)
+  File "/opt/qkd/graph_mappo/scripts/experiment.py", line 72, in train_one
+    config = resolve_experiment(model, seed, args.updates, args.config, name, args.mode)
+  File "/opt/qkd/graph_mappo/scripts/experiment.py", line 43, in resolve_experiment
+    config = deep_merge(config, load_config([resolve_config_path(ROOT / "configs", name)]))
+  File "/opt/qkd/graph_mappo/qkd_rl/core/config.py", line 46, in resolve_config_path
+    raise FileNotFoundError(f"Config not found under {root}: {name}")
+FileNotFoundError: Config not found under /opt/qkd/graph_mappo/configs: model_zoo/v3/config_demand_isolated.yaml
+[pipeline] frozen_isolated_s43 FAILED
+[pipeline] frozen_isolated_s44 start 14:44
+Traceback (most recent call last):
+  File "/opt/qkd/graph_mappo/scripts/experiment.py", line 217, in <module>
+    main()
+  File "/opt/qkd/graph_mappo/scripts/experiment.py", line 190, in main
+    run = train_one(args, args.model, args.seed)
+  File "/opt/qkd/graph_mappo/scripts/experiment.py", line 72, in train_one
+    config = resolve_experiment(model, seed, args.updates, args.config, name, args.mode)
+  File "/opt/qkd/graph_mappo/scripts/experiment.py", line 43, in resolve_experiment
+    config = deep_merge(config, load_config([resolve_config_path(ROOT / "configs", name)]))
+  File "/opt/qkd/graph_mappo/qkd_rl/core/config.py", line 46, in resolve_config_path
+    raise FileNotFoundError(f"Config not found under {root}: {name}")
+FileNotFoundError: Config not found under /opt/qkd/graph_mappo/configs: model_zoo/v3/config_demand_isolated.yaml
+[pipeline] frozen_isolated_s44 FAILED
+  [A] expert seed 100: sr=0.8063
+  [A] expert seed 101: sr=0.8768
+  [A] expert seed 102: sr=0.8278
+  [A] expert seed 103: sr=0.7022
+  [A] expert seed 104: sr=0.4709
+  [A] expert seed 105: sr=0.5594
+  [A] expert seed 106: sr=0.8196
+  [A] expert seed 107: sr=0.9163
+  [A] expert seed 108: sr=0.7091
+  [A] expert seed 109: sr=0.8577
+  [A] expert seed 110: sr=0.8201
+  [A] expert seed 111: sr=0.8094
+  [A] expert seed 112: sr=0.5996
+  [A] expert seed 113: sr=0.8902
+  [A] expert seed 114: sr=0.8460
+[A] expert: sr=0.7674 (140s) -> /opt/qkd/graph_mappo/outputs/frozen_eval/expert_A.json
+  [B] expert seed 200: sr=0.8726
+  [B] expert seed 201: sr=0.8479
+  [B] expert seed 202: sr=0.9269
+  [B] expert seed 203: sr=0.8504
+  [B] expert seed 204: sr=0.8650
+  [B] expert seed 205: sr=0.8561
+  [B] expert seed 206: sr=0.8903
+  [B] expert seed 207: sr=0.8747
+  [B] expert seed 208: sr=0.8684
+  [B] expert seed 209: sr=0.9189
+  [B] expert seed 210: sr=0.8607
+  [B] expert seed 211: sr=0.9299
+  [B] expert seed 212: sr=0.8320
+  [B] expert seed 213: sr=0.6975
+  [B] expert seed 214: sr=0.9196
+[B] expert: sr=0.8674 (96s) -> /opt/qkd/graph_mappo/outputs/frozen_eval/expert_B.json
+[pipeline] expert rc=0
+[pipeline] done Thu Sep 24 02:48:35 PM UTC 2026
