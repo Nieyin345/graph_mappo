@@ -40,7 +40,11 @@ def resolve_experiment(model: str, seed: int, updates: int | None, overrides: li
     config = build_legacy_config(legacy_args)
     config = deep_merge(config, load_config([ROOT / "configs" / "experiment_base.yaml", model_config]))
     for name in overrides:
-        config = deep_merge(config, load_config([resolve_config_path(ROOT / "configs", name)]))
+        # Bare names resolve under configs/ (archive-aware); paths with a
+        # separator (e.g. model_zoo/v3/config_demand_isolated.yaml) are
+        # repo-relative so model dirs can own their variant configs.
+        override_path = (ROOT / name) if ("/" in name or "\\" in name) else resolve_config_path(ROOT / "configs", name)
+        config = deep_merge(config, load_config([override_path]))
     config.setdefault("experiment", {})["model"] = model
     config["seed"]["global_seed"] = seed
     config["seed"]["env_seed"] = seed
