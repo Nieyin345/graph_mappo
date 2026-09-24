@@ -14,7 +14,7 @@ def model_name(config: dict) -> str:
 
 def build_model(action_space, config: dict):
     if "model" not in config.get("experiment", {}):
-        from qkd_rl.rl.models.graph_mappo import GraphMAPPOActorCritic
+        from qkd_rl.model_zoo.v2.model_impl import GraphMAPPOActorCritic
         return GraphMAPPOActorCritic(action_space, config)
     module = import_module(f"qkd_rl.model_zoo.{model_name(config)}.model")
     return module.build_model(action_space, config)

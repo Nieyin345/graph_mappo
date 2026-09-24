@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 from qkd_rl.env.graph_builder import GraphObservation
-from qkd_rl.rl.models.graph_mappo import GraphMAPPOActorCritic
+from qkd_rl.model_zoo.v2.model_impl import GraphMAPPOActorCritic
 
 
 @dataclass
