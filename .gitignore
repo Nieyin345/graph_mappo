@@ -72,3 +72,6 @@ server_results/
 
 # Trae IDE local project docs
 .trae/
+
+# 本地大文件归档（服务器产物压缩包，可解回）
+_archive/
