@@ -1,0 +1,9 @@
+# Continue the old dminj architecture from update 30 with the same actor
+# learning rate and CPU thread count as pair-history v2. This isolates the
+# architecture/feature package from the extra 30 PPO updates.
+runtime:
+  num_threads: 4
+  torch_num_threads: 4
+train:
+  optimizer:
+    actor_lr: 0.00001

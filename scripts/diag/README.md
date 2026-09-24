@@ -4,10 +4,11 @@
 `docs/训练诊断记录.md` 里"用 `.tmp/xxx.py` 测出……"这类引用对读者是**死链**：
 结论在版本库里，得出它的工具不在。
 
-放在这里的东西判据是：**日志引用了它，或者它会被反复用**。一次性的探针
-仍然留在 `.tmp/`，写完就丢。
+放在这里的东西判据是：**日志引用了它，或者它会被反复用**。一次性的探针仍然留在 `.tmp/`，写完就丢，而且**不要加入 Git**。
 
-全部**在服务器上跑**（本机有 hook 拦 `python`，且本机内存装不下）：
+2026-09 之前曾有一批一次性脚本被误跟踪在 `.tmp/`；它们现已整体迁到 `scripts/diag/archive/2026-09/` 保留复现记录。archive 里的脚本不是当前推荐入口。
+
+运行约定：轻量静态检查、单元测试和小规模诊断可在本机 `pytorch` 环境运行；正式长 rollout、全量 H5 实验和大规模训练仍放到服务器：
 
 ```bash
 bash scripts/sync.sh                       # 或 deployment/sync.sh
@@ -24,6 +25,7 @@ ssh qkd 'cd /opt/qkd/graph_mappo && /opt/qkd/venv/bin/python scripts/diag/val_al
 | `rho_measure.py` | **量出真实 ρ**（同训练种子、同 BC、单调超参的 run 对，逐验证种子 Pearson）。本项目实测 ρ≈0.98 —— 这是配对设计为什么有效的量化依据，也是功效计算的输入。**ρ 不该假设该量** |
 | `cmp_val_envs.py` | 核对"专家"与"RL"的**验证环境是否同一任务**：截获 trainer 真正送给 `build_env_from_config` 的 config（用该 run 落盘的 `resolved_config.yaml`），与 `build_validation_env_config` 逐字段 diff；**并真建两边环境、15 个种子逐比特比观测**，再用专家策略走满一回合比服务量。两边口径不同时得出的"超过"是无效的 |
 | `local_summary.py` | 从 `outputs/`（或本地 `server_results/`）生成配对对照表 + 全部曲线 + 配置差异。`--roots outputs --out x.md` |
+| `check_repo_layout.py` | 纯静态仓库卫生门禁：禁止 Git 再跟踪实体 `.tmp` 文件、根目录堆研究文档、配置 YAML 解析失败或 basename 重名。整理目录/配置后先跑它。 |
 | `check_configs.py` | 校验 `configs/*.yaml` 能否 `yaml.safe_load`，报错时带行号 ±3 行上下文；未知顶层键只告警。**改完配置先跑它**——`train_ent01_off.yaml` 曾因注释头里的命令行样例没加 `#` 而解析失败，白等 8 分钟才在日志里发现 |
 | `train_tail.py` | 打印某 run 在 **u≥n** 的训练诊断量，用于判断"某轮验证值突变"是否伴随训练异常 |
 | `entropy_trace.py` | **对比两臂**的 entropy / 关键诊断量轨迹（用于看熵的收益是否只出现在早期，从而决定"调高固定系数"还是"退火"）。只读 `metrics.jsonl`，不训练 |
@@ -87,7 +89,7 @@ ssh qkd 'cd /opt/qkd/graph_mappo && /opt/qkd/venv/bin/python scripts/diag/val_al
    一行就能发现，但没人算过。后果是把"比基线差 0.07"报成"有效"。
    补的规矩：**每次改配对差的符号，先手算一个例子对一遍**，
    例如 `0.6889 − 0.7173` 必须是负的。修完用独立脚本
-   （`.tmp/vcoef1_verdict.py`）复算，两者到小数第 4 位一致才算过。
+   （`scripts/diag/archive/2026-09/vcoef1_verdict.py`）复算，两者到小数第 4 位一致才算过。
    同族：**基线也要显式写**。`vcoef1` 跑在 ent=0.001 上，基线该是
    `r8_base`；一律拿 `ent01` 当基线会把两项效应加在一起，读数偏大。
    现在 `ARM_BASE` 映射表里逐臂写明基线，并打进 VERDICT 行。

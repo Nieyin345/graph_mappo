@@ -1,0 +1,4 @@
+# Append after the attention preset to isolate the inventory-observation change.
+features:
+  edge:
+    include_stocked_edges: true

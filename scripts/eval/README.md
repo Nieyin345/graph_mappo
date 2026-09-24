@@ -30,3 +30,7 @@ python scripts/baselines/run_baselines.py --config configs/global.yaml \
 | `show_evals.py` | 浠?`metrics.jsonl` 閲屽垎鍑?`eval_validation` 搴忓垪 鈥斺€?璇ユ枃浠舵贩鐫€璁粌璁板綍鍜岄獙璇佽褰曪紝**鎸夎鏁版暟浼氭暟閿?*銆?|
 | `summarize_baselines.py` | 鎶?`run_baselines.py` 鐨?`summary.json` 姹囨€绘垚姣忕瓥鐣ヤ竴琛岀殑琛ㄣ€?|
 | `show_reward_breakdown.py` | 涓や釜 run 鐨勫鍔卞垎椤瑰苟鎺掑姣斻€俙rollout_debug.jsonl` 鐨勯敭閮芥槸 `mean_` 鍓嶇紑鐨勯€愭鍧囧€硷紱**鍔犱簡鏉冮噸鍚?`mean_reward` 璺ㄨ噦涓嶅彲姣?*锛岃兘姣旂殑鍙湁鎴愬姛鐜囦笌鐗╃悊閲忋€?|
+
+## Fixed-scenario checkpoint evaluation
+
+`eval_fixed_scenario.py` is the canonical fixed-scenario checkpoint evaluator. Legacy paths under `scripts/evaluate/` and `scripts/train/` are compatibility wrappers only.

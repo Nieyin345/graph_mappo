@@ -1,0 +1,13 @@
+# Shared execution settings. Model-specific config.yaml is merged after this.
+experiment:
+  model: v2
+  cpu_threads: 16
+  bc:
+    episodes: 8
+env:
+  episode_steps: 240
+train:
+  rollout_steps: 240
+  n_rollout_workers: 8
+  ppo:
+    batch_chunk: 16

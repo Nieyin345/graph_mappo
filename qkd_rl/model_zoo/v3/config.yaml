@@ -1,0 +1,17 @@
+experiment:
+  model: v3
+model:
+  actor:
+    attention_only: true
+    demand_residual:
+      enabled: false
+    path_edge_attention:
+      enabled: false
+    pair_path_attention:
+      enabled: true
+      arc_query: true
+      num_heads: 4
+      max_hops: 4
+train:
+  optimizer:
+    actor_lr: 0.00001

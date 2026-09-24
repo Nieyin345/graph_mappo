@@ -1,0 +1,5 @@
+experiment:
+  model: v3
+model:
+  encoder:
+    fuse_demand_to_node: false

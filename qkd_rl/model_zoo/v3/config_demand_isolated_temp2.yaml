@@ -1,0 +1,8 @@
+experiment:
+  model: v3
+model:
+  encoder:
+    fuse_demand_to_node: false
+  actor:
+    pair_path_attention:
+      logit_temperature: 2.0
