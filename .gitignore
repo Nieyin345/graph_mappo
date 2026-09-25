@@ -83,3 +83,7 @@ server_results_node342/**
 !server_results_node342/frozen_20260924/frozen_eval/
 !server_results_node342/frozen_20260924/frozen_eval/*.json
 !server_results_node342/frozen_20260924/*.log
+
+# Tool session transcripts and unrelated scratch files -- not project source
+.yfcode/
+pelican_bicycle_animation.html

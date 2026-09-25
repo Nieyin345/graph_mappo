@@ -3,6 +3,7 @@
 #
 #   bash deployment/fetch_results.sh <run-name> [...]      # 一个或多个 run
 #   bash deployment/fetch_results.sh --model v4            # 该模型的全部 run
+#   bash deployment/fetch_results.sh --all                 # 服务器上全部 run
 #   bash deployment/fetch_results.sh --list                # 只列服务器上有什么
 #   bash deployment/fetch_results.sh --eval <run-name>     # 连同冻结评测 JSON 一起拉
 #
@@ -31,6 +32,7 @@ DEST_ROOT="$ROOT/server_results"
 RUNS=()
 MODEL_FILTER=""
 LIST_ONLY=0
+ALL_RUNS=0
 WITH_EVAL=0
 WITH_CKPT=1
 
@@ -38,9 +40,10 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --list)      LIST_ONLY=1 ;;
         --model)     MODEL_FILTER="$2"; shift ;;
+        --all)       ALL_RUNS=1 ;;
         --eval)      WITH_EVAL=1 ;;
         --no-ckpt)   WITH_CKPT=0 ;;
-        -h|--help)   sed -n '2,25p' "$0"; exit 0 ;;
+        -h|--help)   sed -n '2,26p' "$0"; exit 0 ;;
         -*)          echo "未知选项: $1" >&2; exit 2 ;;
         *)           RUNS+=("$1") ;;
     esac
@@ -60,8 +63,14 @@ if [ "$LIST_ONLY" = 1 ]; then
 fi
 
 # ---------------------------------------------------------------- 选 run
+if [ "$ALL_RUNS" = 1 ]; then
+    while IFS= read -r r; do
+        [ -n "$r" ] && RUNS+=("$r")
+    done < <(remote_runs)
+fi
+
 if [ -z "$MODEL_FILTER" ] && [ ${#RUNS[@]} -eq 0 ]; then
-    echo "用法: bash deployment/fetch_results.sh <run-name> | --model v4 | --list" >&2
+    echo "用法: bash deployment/fetch_results.sh <run-name> | --model v4 | --all | --list" >&2
     exit 2
 fi
 
@@ -119,20 +128,33 @@ for spec in "${RUNS[@]}"; do
     done
 
     # ---------------------------------------------------------------- md5 核对
-    # 传输中途截断过（文件名没变，内容少了），所以逐文件比 md5，不只比大小。
+    # 传输中途截断过（文件名没变、内容少了，实测 20MB 的 .pt 被截成 9MB），
+    # 所以逐文件比 md5，不只比大小。
+    #
+    # 两次 ssh 会慢，所以**一次调用取全部远端 md5**（`find -exec md5sum` 输出
+    # 是 `<hash>  ./<relpath>`），在本地解析成表再比。原先每个文件开一次 ssh
+    # 的做法还有两个坑：`find -printf '%P\n'` 在含中文/空格路径上会给出空行，
+    # 而空行被当成"远端取不到"，被误报成 md5 不符。
     n_ok=0; n_bad=0
-    while IFS= read -r relf; do
+    remote_table="$(ssh "$HOST" "cd $REMOTE/outputs/experiments/$model/$run && \
+        find . -type f -exec md5sum {} \;" 2>/dev/null \
+        | sed 's|  \./|  |')"
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        remote_md5="${line%% *}"
+        relf="${line#*  }"
         [ -n "$relf" ] || continue
-        remote_md5="$(ssh "$HOST" "md5sum '$REMOTE/outputs/experiments/$model/$relf'" 2>/dev/null | awk '{print $1}')"
-        local_md5="$(md5sum "$dest/train/$run/$relf" 2>/dev/null | awk '{print $1}')"
+        # 本地用同一相对路径；--no-ckpt 时本地没有 .pt，跳过而不是报错
+        local_path="$dest/train/$run/$relf"
+        [ -f "$local_path" ] || continue
+        local_md5="$(md5sum "$local_path" 2>/dev/null | awk '{print $1}')"
         if [ -n "$remote_md5" ] && [ "$remote_md5" = "$local_md5" ]; then
             n_ok=$((n_ok+1))
         else
-            echo "  ✗ md5 不符: $relf (远端 $remote_md5 / 本地 $local_md5)" >&2
+            echo "  ✗ md5 不符: $relf (远端 ${remote_md5:-取不到} / 本地 ${local_md5:-无})" >&2
             n_bad=$((n_bad+1))
         fi
-    done < <(ssh "$HOST" "cd $REMOTE/outputs/experiments/$model/$run && \
-                          find . -type f -printf '%P\n' 2>/dev/null" | head -40)
+    done <<< "$remote_table"
 
     echo "  ✓ $n_ok 个文件 md5 一致${n_bad:+, ✗ $n_bad 个不符（重跑本命令）}"
     echo "  下一步：python scripts/diag/backfill_manifest.py --repo-root . --apply"

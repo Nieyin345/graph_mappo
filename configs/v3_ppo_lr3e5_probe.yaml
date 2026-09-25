@@ -1,0 +1,6 @@
+# Controlled PPO update-strength probe from the same v3 BC checkpoint.
+# All other rollout, reward, and evaluation settings inherit experiment_base
+# and qkd_rl/model_zoo/v3/config.yaml.
+train:
+  optimizer:
+    actor_lr: 0.00003

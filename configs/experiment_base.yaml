@@ -8,6 +8,10 @@ env:
   episode_steps: 240
 train:
   rollout_steps: 240
+  # The random_episode profile defaults to one episode. Worker count only
+  # controls parallel capacity; it does not increase collected episodes.
+  # Keep the unified short-run budget at 8 x 240 transitions per update.
+  episodes_per_update: 8
   n_rollout_workers: 8
   ppo:
     batch_chunk: 16
