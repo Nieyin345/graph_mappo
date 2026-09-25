@@ -12,6 +12,3 @@ model:
       arc_query: true
       num_heads: 4
       max_hops: 4
-train:
-  optimizer:
-    actor_lr: 0.00001

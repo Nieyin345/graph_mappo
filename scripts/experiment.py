@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -53,7 +54,40 @@ def resolve_experiment(model: str, seed: int, updates: int | None, overrides: li
     if updates is not None:
         config["train"]["num_updates"] = updates
     ConfigValidator().validate(config)
+    _check_training_budget(config)
     return config
+
+
+def _check_training_budget(config: dict) -> None:
+    """Refuse to start a run whose PPO budget is too small to train.
+
+    Gradient steps per update = ceil(N / minibatch_size), where
+    N = rollout_steps * episodes_per_update (the trainer chunks the buffer with
+    `range(0, N, minibatch_size)`, mappo_trainer.update). Below the floor the
+    policy barely moves: measured signature is clip_frac == 0 and kl ~ 1e-5 for
+    the whole run -- not "worse results", but *no training*, so the artifact is
+    just the BC starting point. Several archived batches are exactly this.
+
+    This is checked here, not only in tests, because the failure is silent:
+    nothing errors, metrics.jsonl fills with plausible-looking rows, and the
+    mistake surfaces weeks later when someone compares incomparable numbers.
+    """
+    train = config.get("train") or {}
+    ppo = train.get("ppo") or {}
+    n_samples = int(train.get("rollout_steps", 0)) * int(train.get("episodes_per_update", 0))
+    mb = int(ppo.get("minibatch_size", 0))
+    floor = int((config.get("training_budget") or {}).get("min_nb", 1))
+    nb = math.ceil(n_samples / mb) if (n_samples and mb) else 0
+    if nb >= floor:
+        return
+    raise ValueError(
+        f"训练预算不足：nb = ceil({train.get('rollout_steps')} * "
+        f"{train.get('episodes_per_update')} / {ppo.get('minibatch_size')}) = {nb} < "
+        f"training_budget.min_nb = {floor}。"
+        "这样 PPO 每轮只更新约一次参数（实测 clip_frac=0、kl~1e-5），产出的只是 "
+        "BC 起点，不是训练结果。调小 minibatch_size 或调大 episodes_per_update；"
+        "训练超参请在 configs/experiment_base.yaml 改（见 实验产物规范.md §3.6）。"
+    )
 
 
 def _run(cmd: list[str], log: Path, env: dict[str, str]) -> None:

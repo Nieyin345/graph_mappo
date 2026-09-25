@@ -1,17 +1,64 @@
-# Shared execution settings. Model-specific config.yaml is merged after this.
+# ============================================================================
+# 全局默认训练配置 —— 所有模型共用的**唯一**训练超参来源。
+#
+# 分层（详见 docs/实验产物规范.md §3.6）：
+#
+#   ① train_profiles.yaml   只决定**回合/环境结构**（起始模式、回合步长…）
+#   ② 本文件                 唯一的**训练超参**来源（预算、学习率、PPO 系数）
+#   ③ model_zoo/<v>/config.yaml  只写**模型结构**；训练超参一律不写
+#
+# 「什么都不写 = 走默认；写一个参数 = 覆盖那一个」—— 这是 ③ 的用法。
+# 但 ③ **只用于模型结构**：训练超参必须全体一致，否则不同模型不可比。
+#
+# ★ 为什么训练超参不能散落各处：曾经同一个键在 9 个文件里各写一份，
+#   靠 deep_merge 的先后决定谁赢 ⟹ 实测 v2/v3 的 actor_lr 差了 30 倍、
+#   三个模型的 nb 都只有 1.875（PPO 近乎不更新）而**没人察觉**。
+# ============================================================================
 experiment:
   model: v2
   cpu_threads: 16
   bc:
     episodes: 8
+
 env:
   episode_steps: 240
+
 train:
+  # ---- 采样预算 ----
+  # nb = ceil(rollout_steps * episodes_per_update / minibatch_size) = 每轮梯度步数。
+  # 采样器用 range(0, N, minibatch_size) 切分（mappo_trainer.update），最后一个
+  # 不满的 minibatch 同样算一步 ⟹ 取上整，不是除法。
+  # ceil(240 * 8 / 256) = ceil(1920/256) = 8。
+  #
+  # ★ nb 必须 >= MIN_NB（见下）。历史默认是 240*8/1024 ⟹ 比值 1.875、上整 2 步，
+  #   实测 clip_frac == 0、kl ~ 1e-5 —— 那不是"效果差"，是**几乎没训练**，
+  #   产出的只是 BC 起点。已有多批结果因此作废。
   rollout_steps: 240
-  # The random_episode profile defaults to one episode. Worker count only
-  # controls parallel capacity; it does not increase collected episodes.
-  # Keep the unified short-run budget at 8 x 240 transitions per update.
   episodes_per_update: 8
   n_rollout_workers: 8
   ppo:
+    epochs: 1
+    minibatch_size: 256
     batch_chunk: 16
+    clip_eps: 0.1
+    normalize_advantages: true
+    entropy_coef: 0.001
+    value_coef: 0.5
+    max_grad_norm: 0.5
+    target_kl: 0.02
+  optimizer:
+    type: adam
+    # ★ 全体模型统一。历史上 v2 用 3e-4、v3/v4 各写 1e-5（差 30 倍），
+    #   两者的读数因此不可比。
+    actor_lr: 0.00003
+    critic_lr: 0.0003
+  gamma: 0.99
+  gae_lambda: 0.95
+  value_target: gae
+  rollout_worker_device: cpu
+  rollout_batch: true
+
+# nb 下限：低于它启动即报错（见 tests/test_training_budget_contract.py）。
+# 目的：让"没训练"的配置**跑不起来**，而不是静默产出 BC 起点。
+training_budget:
+  min_nb: 8

@@ -1,5 +1,17 @@
 # Unified training mode profiles. Select with:
 #   python scripts/train/train_graph_mappo.py --mode continuous
+#
+# ⚠️ 训练超参的**权威来源是 configs/experiment_base.yaml**，不是本文件。
+#
+# 本文件只服务**旧入口** `scripts/train/train_graph_mappo.py`（复现历史实验用）。
+# 新统一入口 `scripts/experiment.py`（v2/v3/v4 都用它）的合并顺序是：
+#
+#     default → env_full → 本文件[mode] → experiment_base → model_zoo/<v>/config.yaml
+#                                       ^^^^^^^^^^^^^^^^ 训练超参在这里定稿
+#
+# ⟹ 本文件里的 `train:` 段在统一入口下**会被 experiment_base 覆盖**。
+#   改训练预算/学习率请改 experiment_base.yaml，否则改了不生效、还以为生效了
+#   （历史事故：同一个键散在 9 个文件里，v2/v3 的 actor_lr 差了 30 倍没人发现）。
 train_profiles:
   random_episode:
     env:
