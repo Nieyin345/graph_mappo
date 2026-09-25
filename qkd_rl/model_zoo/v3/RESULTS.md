@@ -31,18 +31,24 @@
 | 20260924-frozen-eval | v3-frozen-s43 | v3 | 43 | **0.7600** | 151.1327 | 否 | 9091810f |  |
 | 20260924-frozen-eval | v3-frozen-s44 | v3 | 44 | **0.7593** | 150.6941 | 否 | 9091810f |  |
 | 20260924-iso-attribution | expert | expert | — | **0.7674** | 206.7894 | — | 9091810f | 是 |
-| 20260924-iso-attribution | v3-frozen-isolated-s42 | v3 | 42 | **0.7478** | 160.8036 | 是 | 9091810f | 是 |
-| 20260924-iso-attribution | v3-frozen-isolated-s43 | v3 | 43 | **0.7498** | 160.2040 | 是 | 9091810f | 是 |
-| 20260924-iso-attribution | v3-frozen-isolated-s44 | v3 | 44 | **0.7533** | 158.7943 | 是 | 9091810f | 是 |
-| 20260924-iso-attribution | v3-frozen-s42 | v3 | 42 | **0.7691** | 148.6056 | 否 | 9091810f | 是 |
-| 20260924-iso-attribution | v3-frozen-s43 | v3 | 43 | **0.7600** | 151.1327 | 否 | 9091810f | 是 |
-| 20260924-iso-attribution | v3-frozen-s44 | v3 | 44 | **0.7593** | 150.6941 | 否 | 9091810f | 是 |
-| 20260924-iso-attribution | v3-iso-s42 | v3 | 42 | **0.7456** | 192.2320 | 是 | 9091810f |  |
-| 20260924-iso-attribution | v3-iso-s43 | v3 | 43 | **0.7534** | 189.9352 | 是 | 9091810f |  |
-| 20260924-iso-attribution | v3-iso-s44 | v3 | 44 | **0.7545** | 192.4333 | 是 | 9091810f |  |
-| 20260924-iso-attribution | v3-v3full-s42 | v3 | 42 | **0.7558** | 193.6706 | 否 | 9091810f |  |
-| 20260924-iso-attribution | v3-v3full-s43 | v3 | 43 | **0.7508** | 186.7326 | 否 | 9091810f |  |
-| 20260924-iso-attribution | v3-v3full-s44 | v3 | 44 | **0.7472** | 196.9729 | 否 | 9091810f |  |
+| 20260924-iso-attribution | frozen_eval_bc-v3-iso-s42 | v3 | 42 | **0.7456** | 192.2320 | 是 | 9091810f |  |
+| 20260924-iso-attribution | frozen_eval_bc-v3-iso-s43 | v3 | 43 | **0.7534** | 189.9352 | 是 | 9091810f |  |
+| 20260924-iso-attribution | frozen_eval_bc-v3-iso-s44 | v3 | 44 | **0.7545** | 192.4333 | 是 | 9091810f |  |
+| 20260924-iso-attribution | frozen_eval_bc-v3-v3full-s42 | v3 | 42 | **0.7558** | 193.6706 | 否 | 9091810f |  |
+| 20260924-iso-attribution | frozen_eval_bc-v3-v3full-s43 | v3 | 43 | **0.7508** | 186.7326 | 否 | 9091810f |  |
+| 20260924-iso-attribution | frozen_eval_bc-v3-v3full-s44 | v3 | 44 | **0.7472** | 196.9729 | 否 | 9091810f |  |
+| 20260924-iso-attribution | frozen_eval_ppo-v3-frozen-isolated-s42 | v3 | 42 | **0.7478** | 160.8036 | 是 | 9091810f | 是 |
+| 20260924-iso-attribution | frozen_eval_ppo-v3-frozen-isolated-s43 | v3 | 43 | **0.7498** | 160.2040 | 是 | 9091810f | 是 |
+| 20260924-iso-attribution | frozen_eval_ppo-v3-frozen-isolated-s44 | v3 | 44 | **0.7533** | 158.7943 | 是 | 9091810f | 是 |
+| 20260924-iso-attribution | frozen_eval_ppo-v3-frozen-s42 | v3 | 42 | **0.7691** | 148.6056 | 否 | 9091810f | 是 |
+| 20260924-iso-attribution | frozen_eval_ppo-v3-frozen-s43 | v3 | 43 | **0.7600** | 151.1327 | 否 | 9091810f | 是 |
+| 20260924-iso-attribution | frozen_eval_ppo-v3-frozen-s44 | v3 | 44 | **0.7593** | 150.6941 | 否 | 9091810f | 是 |
+| 20260924-iso-attribution | frozen_eval_ppo-v3-iso-s42 | v3 | 42 | **0.7479** | 191.1663 | 是 | 9091810f |  |
+| 20260924-iso-attribution | frozen_eval_ppo-v3-iso-s43 | v3 | 43 | **0.7550** | 189.1155 | 是 | 9091810f |  |
+| 20260924-iso-attribution | frozen_eval_ppo-v3-iso-s44 | v3 | 44 | **0.7553** | 193.0243 | 是 | 9091810f |  |
+| 20260924-iso-attribution | frozen_eval_ppo-v3-v3full-s42 | v3 | 42 | **0.7581** | 192.6773 | 否 | 9091810f |  |
+| 20260924-iso-attribution | frozen_eval_ppo-v3-v3full-s43 | v3 | 43 | **0.7492** | 188.2431 | 否 | 9091810f |  |
+| 20260924-iso-attribution | frozen_eval_ppo-v3-v3full-s44 | v3 | 44 | **0.7470** | 196.6844 | 否 | 9091810f |  |
 | 20260925-retrain-v3-8ep | v3-retrain8-iso-s42 | v3 | 42 | **0.7460** | 191.8142 | 是 | 9091810f |  |
 | 20260925-retrain-v3-8ep | v3-retrain8-iso-s43 | v3 | 43 | **0.7561** | 189.3007 | 是 | 9091810f |  |
 | 20260925-retrain-v3-8ep | v3-retrain8-iso-s44 | v3 | 44 | **0.7554** | 192.5703 | 是 | 9091810f |  |
@@ -70,12 +76,12 @@
 | 20260924-frozen-eval | v3-frozen-s43 | v3 | 43 | **0.8572** | 149.6655 | 否 | 9091810f |  |
 | 20260924-frozen-eval | v3-frozen-s44 | v3 | 44 | **0.8511** | 151.3319 | 否 | 9091810f |  |
 | 20260924-iso-attribution | expert | expert | — | **0.8674** | 197.8869 | — | 9091810f | 是 |
-| 20260924-iso-attribution | v3-frozen-isolated-s42 | v3 | 42 | **0.8413** | 157.5977 | 是 | 9091810f | 是 |
-| 20260924-iso-attribution | v3-frozen-isolated-s43 | v3 | 43 | **0.8350** | 159.2591 | 是 | 9091810f | 是 |
-| 20260924-iso-attribution | v3-frozen-isolated-s44 | v3 | 44 | **0.8392** | 157.2529 | 是 | 9091810f | 是 |
-| 20260924-iso-attribution | v3-frozen-s42 | v3 | 42 | **0.8593** | 148.3643 | 否 | 9091810f | 是 |
-| 20260924-iso-attribution | v3-frozen-s43 | v3 | 43 | **0.8572** | 149.6655 | 否 | 9091810f | 是 |
-| 20260924-iso-attribution | v3-frozen-s44 | v3 | 44 | **0.8511** | 151.3319 | 否 | 9091810f | 是 |
+| 20260924-iso-attribution | frozen_eval_ppo-v3-frozen-isolated-s42 | v3 | 42 | **0.8413** | 157.5977 | 是 | 9091810f | 是 |
+| 20260924-iso-attribution | frozen_eval_ppo-v3-frozen-isolated-s43 | v3 | 43 | **0.8350** | 159.2591 | 是 | 9091810f | 是 |
+| 20260924-iso-attribution | frozen_eval_ppo-v3-frozen-isolated-s44 | v3 | 44 | **0.8392** | 157.2529 | 是 | 9091810f | 是 |
+| 20260924-iso-attribution | frozen_eval_ppo-v3-frozen-s42 | v3 | 42 | **0.8593** | 148.3643 | 否 | 9091810f | 是 |
+| 20260924-iso-attribution | frozen_eval_ppo-v3-frozen-s43 | v3 | 43 | **0.8572** | 149.6655 | 否 | 9091810f | 是 |
+| 20260924-iso-attribution | frozen_eval_ppo-v3-frozen-s44 | v3 | 44 | **0.8511** | 151.3319 | 否 | 9091810f | 是 |
 | 20260925-retrain-v3-8ep | v3-retrain8-iso-s42 | v3 | 42 | **0.8292** | 188.2836 | 是 | 9091810f |  |
 | 20260925-retrain-v3-8ep | v3-retrain8-iso-s43 | v3 | 43 | **0.8250** | 189.4181 | 是 | 9091810f |  |
 | 20260925-retrain-v3-8ep | v3-retrain8-iso-s44 | v3 | 44 | **0.8382** | 189.6705 | 是 | 9091810f |  |
@@ -89,7 +95,7 @@
 
 ## 训练记录
 
-`PPO 更新` 列为「否」= 全程 `kl=0` 且 `clip_frac=0`，即 PPO 从未真正更新（预算配置错误），该次训练不构成架构结论。
+`PPO 更新` 列为「否」= 全程 `clip_frac=0` 且 `kl ≤ 1e-4`（浮点舍入使死掉的 run 也报正 kl，故不能用 `kl>0` 判断），即 PPO 从未真正更新，该次训练不构成架构结论。
 
 | 批次 | arm | 模型 | 轮数 | 是否多 minibatch | PPO 更新 | 每轮集数 | minibatch |
 |---|---|---|---|---|---|---|---|
@@ -106,13 +112,13 @@
 | 20260924-iso-attribution | v3full-s42 | v3 | 20 | 否 | **否** | 1 | 1024 |
 | 20260924-iso-attribution | v3full-s43 | v3 | 20 | 否 | **否** | 1 | 1024 |
 | 20260924-iso-attribution | v3full-s44 | v3 | 20 | 否 | **否** | 1 | 1024 |
-| 20260925-retrain-v3-8ep | retrain8-iso-s42 | v3 | 10 | 是 | 是 | 8 | 1024 |
-| 20260925-retrain-v3-8ep | retrain8-iso-s43 | v3 | 10 | 是 | 是 | 8 | 1024 |
-| 20260925-retrain-v3-8ep | retrain8-iso-s44 | v3 | 10 | 是 | 是 | 8 | 1024 |
-| 20260925-retrain-v3-8ep | retrain8-retry-v3full-s42 | v3 | 10 | 是 | 是 | 8 | 1024 |
-| 20260925-retrain-v3-8ep | retrain8-v3full-s43 | v3 | 10 | 是 | 是 | 8 | 1024 |
-| 20260925-retrain-v3-8ep | retrain8-v3full-s44 | v3 | 10 | 是 | 是 | 8 | 1024 |
-| 20260925-v3-diagnostics | probe-base-s42 | v3 | 30 | 是 | 是 | 8 | 1024 |
+| 20260925-retrain-v3-8ep | retrain8-iso-s42 | v3 | 10 | 是 | **否** | 8 | 1024 |
+| 20260925-retrain-v3-8ep | retrain8-iso-s43 | v3 | 10 | 是 | **否** | 8 | 1024 |
+| 20260925-retrain-v3-8ep | retrain8-iso-s44 | v3 | 10 | 是 | **否** | 8 | 1024 |
+| 20260925-retrain-v3-8ep | retrain8-retry-v3full-s42 | v3 | 10 | 是 | **否** | 8 | 1024 |
+| 20260925-retrain-v3-8ep | retrain8-v3full-s43 | v3 | 10 | 是 | **否** | 8 | 1024 |
+| 20260925-retrain-v3-8ep | retrain8-v3full-s44 | v3 | 10 | 是 | **否** | 8 | 1024 |
+| 20260925-v3-diagnostics | probe-base-s42 | v3 | 30 | 是 | **否** | 8 | 1024 |
 | 20260925-v3-diagnostics | probe-high-s42 | v3 | 30 | 是 | 是 | 8 | 1024 |
 | v3-from-dminj30 | pairhist-v3-s42-from-dminj30 | v3 | 7 | 是 | 是 | — | — |
 | v3-from-dminj30 | pairhist-v3-s43-from-dminj30 | v3 | 7 | 是 | 是 | — | — |
@@ -182,5 +188,12 @@ actor LR 从 `1e-5` 提至 `3e-5`，A 窗最终仅 `0.7590/0.7594`、B 窗 `0.84
 ## 备注
 
 **env_fp `9091810f`** = 删 Stockholm 后的现环境（专家锚 0.7674；删前为 0.6979，旧值不可引用）。
+
+
+
+
+
+
+
 
 

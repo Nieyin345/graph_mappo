@@ -49,15 +49,24 @@ BATCHES: dict[str, tuple[str, str]] = {
     "server_results_node342/iso_attr_20260924": ("20260924-iso-attribution", "clnode342"),
     "server_results_node342/retrain_v3_8ep_20260925": ("20260925-retrain-v3-8ep", "clnode342"),
     "server_results_node342/diagnostics_v3_20260925": ("20260925-v3-diagnostics", "clnode342"),
-    "server_results/pairhist_v4": ("v4-lstm-from-dminj30", "unknown-amd238-era"),
+    "server_results/pairhist_v5": ("v5-from-dminj30", "unknown-amd238-era"),
     "server_results/pairhist_v3": ("v3-from-dminj30", "unknown-amd238-era"),
+    "server_results/v4_eval_20260925": ("20260925-v4-isolated", "clnode342"),
 }
 
 #: Batches whose model cannot be read from a resolved config (none was archived)
 #: and is instead stated explicitly. Kept separate from inference on purpose:
 #: an inferred model that is wrong is worse than a null one.
+#:
+#: History of the v4/v5 naming: ``server_results/pairhist_v4`` was RENAMED to
+#: ``pairhist_v5`` on 2026-09-26. That batch runs a server branch
+#: (``codex/pairhist-v4``) whose selling point is a causal LSTM request
+#: sequence -- it is NOT ``model_zoo/v4``, which is the demand-isolation +
+#: 4-hop pair attention model in this repo. Two different models had shared the
+#: name "v4", which is exactly the confusion 实验产物规范.md §3.4 forbids; the
+#: LSTM one was moved to v5 so that "v4" resolves to one model only.
 BATCH_MODEL_HINT: dict[str, str] = {
-    "v4-lstm-from-dminj30": "v4",
+    "v5-from-dminj30": "v5",
     "v3-from-dminj30": "v3",
 }
 
@@ -160,7 +169,7 @@ def _train_seed(policy: str) -> int | None:
 
 def _model_of(policy: str, arm_dir: str) -> str | None:
     name = f"{arm_dir} {policy}".lower()
-    for tag in ("v4", "v3", "v2"):
+    for tag in ("v5", "v4", "v3", "v2"):
         if re.search(rf"(?<![a-z0-9]){tag}(?![0-9])", name):
             return tag
     return None
@@ -194,6 +203,13 @@ def _record_from_eval_json(
     arm_dir = path.stem
     arm = re.sub(r"^rl_outputs_experiments_", "", path.stem)
     arm = re.sub(r"_[AB]$", "", arm).replace("_", "-")
+    # A batch may stage the same run's eval at several points (e.g. after BC and
+    # after PPO) under sibling dirs named ``<stage>_stage``. Those are different
+    # measurements of the same run, so the stage must be part of the arm name or
+    # the collision drops one of them.
+    parent = path.parent.name
+    if parent.endswith("_stage"):
+        arm = f"{parent[:-len('_stage')]}-{arm}"
 
     is_expert = policy == "expert" or path.name.startswith("expert")
     model = None if is_expert else _model_of(policy, arm_dir)
@@ -274,6 +290,33 @@ TRAIN_SUMMARY_KEYS = (
     "n_minibatches", "mean_ratio", "actor_grad_norm",
 )
 
+#: A KL below this is numerical noise, not policy movement.
+#:
+#: Calibration (measured, 2026-09-26):
+#:   * genuinely moving : v5/pairhist `kl ~2e-3` with `clip_frac ~0.10`
+#:   * NOT moving       : v4 s42_bc8_u20  `kl 1.6e-05..5.6e-05`, clip ALWAYS 0
+#:   * NOT moving       : v3 retrain8_*   `kl 4.9e-06..1.8e-05`, clip ALWAYS 0
+#:
+#: So a live `kl > 0` test labels BOTH dead runs as "PPO updated" -- round-off is
+#: positive. `clip_frac > 0` is the sharp discriminator (a clip event is
+#: impossible when the ratio never leaves 1.0), but it is absent from some
+#: genuinely-moving arms, so KL is kept as the secondary signal with a floor
+#: two orders of magnitude above the dead runs and two below the live one.
+PPO_KL_EPS = 1e-4
+
+
+def _ppo_moved(rows: list[dict]) -> bool:
+    """Did PPO actually move the policy?
+
+    A clip event (clip_frac > 0) is decisive -- the importance ratio cannot
+    leave its clip band under an unchanged policy. Otherwise require KL above
+    the round-off floor; see PPO_KL_EPS for the measured calibration.
+    """
+    return any(
+        (r.get("clip_frac") or 0.0) > 0.0 or (r.get("kl") or 0.0) > PPO_KL_EPS
+        for r in rows
+    )
+
 
 def _training_records(bdir: Path, batch_id: str, batch_dir: str, node: str) -> list[dict]:
     """One record per training run, summarising its metrics.jsonl.
@@ -334,9 +377,7 @@ def _training_records(bdir: Path, batch_id: str, batch_dir: str, node: str) -> l
             return cur
 
         model = exp.get("model") or manifest.get("model") or BATCH_MODEL_HINT.get(batch_id)
-        ppo_moved = any(
-            (r.get("kl") or 0.0) > 0 or (r.get("clip_frac") or 0.0) > 0 for r in rows
-        )
+        ppo_moved = _ppo_moved(rows)
         rec = {
             "schema": SCHEMA,
             "batch_id": batch_id,
@@ -517,8 +558,9 @@ def _write_model_doc(root: Path, model: str, records: list[dict]) -> Path | None
     if tr:
         lines.append("## 训练记录")
         lines.append("")
-        lines.append("`PPO 更新` 列为「否」= 全程 `kl=0` 且 `clip_frac=0`，"
-                     "即 PPO 从未真正更新（预算配置错误），该次训练不构成架构结论。")
+        lines.append("`PPO 更新` 列为「否」= 全程 `clip_frac=0` 且 `kl ≤ 1e-4`"
+                     "（浮点舍入使死掉的 run 也报正 kl，故不能用 `kl>0` 判断），"
+                     "即 PPO 从未真正更新，该次训练不构成架构结论。")
         lines.append("")
         lines.append("| 批次 | arm | 模型 | 轮数 | 是否多 minibatch | PPO 更新 | 每轮集数 | minibatch |")
         lines.append("|---|---|---|---|---|---|---|---|")
@@ -623,7 +665,7 @@ def main() -> None:
             for mm in ("v2", "v3"):          # expert is the shared anchor
                 by_model.setdefault(mm, []).append(r)
             continue
-        if m in ("v2", "v3", "v4"):
+        if m in ("v2", "v3", "v4", "v5"):
             by_model.setdefault(m, []).append(r)
         else:
             unmatched += 1
@@ -656,7 +698,7 @@ def main() -> None:
             fh.write(json.dumps(r, ensure_ascii=False) + "\n")
     print(f"\n-> wrote {ledger} ({len(all_records)} lines)")
 
-    for model in ("v2", "v3", "v4"):
+    for model in ("v2", "v3", "v4", "v5"):
         doc = _write_model_doc(root, model, by_model.get(model, []))
         if doc:
             print(f"-> wrote {doc.relative_to(root).as_posix()} "

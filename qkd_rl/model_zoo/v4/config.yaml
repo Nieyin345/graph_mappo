@@ -1,0 +1,42 @@
+# v4 uses the common BC -> MAPPO -> frozen_eval pipeline without changing it.
+experiment:
+  model: v4
+features:
+  node:
+    # A physical-only node encoder must not pre-mix requests from other pairs.
+    include_demand_in: false
+    include_demand_out: false
+    include_queue_pressure: false
+    include_recent_demand: false
+  edge:
+    # Rate>0 links plus stocked links (including rate=0) enter the graph.
+    # Only rate>0 links are legal generation actions (shared action masks).
+    include_stocked_edges: true
+    include_relay_importance: false
+    include_req_hop: false
+    include_on_pending_path: false
+  demand_edge:
+    include_pair_history: false
+  history_encoder:
+    enabled: false
+model:
+  mode: mixed
+  encoder:
+    fuse_demand_to_node: false
+  actor:
+    attention_only: true
+    demand_residual:
+      enabled: false
+    path_edge_attention:
+      enabled: false
+    pair_path_attention:
+      enabled: true
+      arc_query: true
+      num_heads: 4
+      max_hops: 4
+train:
+  # Match the unified short-run budget: 8 episodes x 240 steps per update.
+  # Set it for v4 only; never change v2/v3 shared configurations.
+  episodes_per_update: 8
+  optimizer:
+    actor_lr: 0.00001
