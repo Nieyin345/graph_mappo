@@ -459,7 +459,7 @@ def _write_model_doc(root: Path, model: str, records: list[dict]) -> Path | None
     lines.append("> ```")
     lines.append(">")
     lines.append("> 数据源：`outputs/model_ledger.jsonl`（中心台账，由原始产物重建）。")
-    lines.append("> 手写说明请写在文末「备注」段，生成时会保留该段。")
+    lines.append("> 手写内容写在文末「设计要点」「备注」段，重新生成时原样保留。")
     lines.append("")
 
     # --- environment table
@@ -533,19 +533,33 @@ def _write_model_doc(root: Path, model: str, records: list[dict]) -> Path | None
             )
         lines.append("")
 
-    # --- hand-written notes, preserved across regeneration
-    notes = "## 备注\n\n（本段由人工维护，脚本重新生成时保留。）\n"
+    # --- hand-written sections, preserved across regeneration.
+    # Everything from the first hand-written heading onward is kept verbatim, so
+    # the design notes and caveats written here survive every rebuild. Only the
+    # generated tables above them are rewritten.
+    tail = ""
     doc = root / MODEL_DOC_REL.format(model=model)
     if doc.exists():
         old = doc.read_text(encoding="utf-8")
-        marker = "## 备注"
-        if marker in old:
-            notes = old[old.index(marker):]
-    lines.append(notes)
+        for marker in ("## 设计要点", "## 备注"):
+            if marker in old:
+                tail = old[old.index(marker):]
+                break
+    lines.append(tail if tail else _EMPTY_TAIL)
+    lines.append("")
 
     doc.parent.mkdir(parents=True, exist_ok=True)
     doc.write_text("\n".join(lines), encoding="utf-8")
     return doc
+
+
+_EMPTY_TAIL = """## 设计要点
+
+（本段由人工维护，脚本重新生成时保留。写该模型专属的设计、归属与已知限制。）
+
+## 备注
+
+（本段由人工维护，脚本重新生成时保留。）"""
 
 
 # ---------------------------------------------------------------- main
