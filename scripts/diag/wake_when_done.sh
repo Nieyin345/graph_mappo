@@ -93,8 +93,8 @@ echo " 醒来：$LABEL（rc=$RC）  $(date '+%F %T')"
 echo "=============================================="
 
 if [ "$DO_FETCH" -eq 1 ] && [ "$RC" -eq 0 ]; then
-    echo "--- 抓结果到本地（只要结果与方法，不要权重）---"
-    bash "$ROOT/scripts/diag/fetch_results.sh" 2>&1 | tail -15
+    echo "--- 抓结果到本地（按模型自动分流；权重也拉，那是最不可重算的部分）---"
+    bash "$ROOT/deployment/fetch_results.sh" --all 2>&1 | tail -15
 fi
 
 # 终端响铃 —— 这是脚本能给到的最强提示；真正的推送由我在这边补
