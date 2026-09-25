@@ -118,6 +118,28 @@ def test_budget_yields_enough_gradient_steps():
         )
 
 
+def test_entropy_coef_stays_at_the_measured_best_value():
+    """entropy_coef must be 0.01, the project's largest measured effect.
+
+    0.001 -> 0.01 measured +0.0954 (t=+9.96), the biggest single-knob effect in
+    the project (docs/训练诊断记录.md:2535); the n=15 arm `ent01_rerun` (0.01)
+    is the current baseline at 0.6989 vs expert 0.6979. Several historical runs
+    actually used 0.001 -- not by design, but because rl_algorithm.yaml
+    overrode the tuned preset (record 2576-2593). At 0.001 entropy collapses and
+    validation success is ~0.653, BELOW the 0.7674 expert, which is the origin
+    of the "RL loses to the expert" claim. Pinned here because a silent
+    regression to 0.001 costs the project its single biggest known gain.
+    """
+    for model in MODELS:
+        cfg = resolved(model)
+        got = dig(cfg, ("train", "ppo", "entropy_coef"))
+        assert got == 0.01, (
+            f"{model}: entropy_coef = {got!r}, expected 0.01. 0.001 is the known "
+            "bad value (entropy collapse -> validation ~0.653, below the expert). "
+            "见 docs/实验产物规范.md §3.6。"
+        )
+
+
 def test_model_configs_carry_structure_only():
     """A model config must not set training hyperparameters."""
     from pathlib import Path

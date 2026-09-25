@@ -42,7 +42,14 @@ train:
     batch_chunk: 16
     clip_eps: 0.1
     normalize_advantages: true
-    entropy_coef: 0.001
+    # ★★ 0.01 不是随手填的 —— 它是本项目**实测最大效应**的取值：
+    #   entropy_coef 0.001 → 0.01 = +0.0954 (t=+9.96)，见 docs/训练诊断记录.md:2535。
+    #   0.001 会让熵塌陷、验证侧 RL≈0.653（**打不过专家** 0.7674），
+    #   这正是常被引用成"RL 打不过专家"的那一条；0.01 下 RL≈0.7178。
+    #   ⚠ 历史多批 run 实测生效的是 0.001 —— 不是设计选择，是配置链覆盖 bug
+    #   （调好的 preset 写 0.01，被 rl_algorithm.yaml 的 0.001 盖掉，见记录 2576-2593）。
+    #   统一到这里就是要终结这个覆盖，别再被改回 0.001。
+    entropy_coef: 0.01
     value_coef: 0.5
     max_grad_norm: 0.5
     target_kl: 0.02
