@@ -32,6 +32,10 @@ RUN_ROOT="outputs/iso_attr_${STAMP}"
 TRAJ_DIR="outputs/trajs_v3_50d"
 LOCAL_DIR="server_results_node342/iso_attr_${STAMP}"
 
+FETCH_ONLY=0
+[ "${2:-}" = "--fetch" ] && FETCH_ONLY=1
+
+if [ "$FETCH_ONLY" = "0" ]; then
 echo "== 1/4 启动：采集 50 天轨迹 -> 独立 BC x2 臂 x3 种子 -> PPO -> 评测 =="
 "$SSH_BIN" "$TARGET" "cd $REMOTE_DIR && mkdir -p $RUN_ROOT && cat > $RUN_ROOT/pipeline.sh" <<EOS
 #!/usr/bin/env bash
@@ -86,6 +90,8 @@ echo "[iso-attr] done \$(date -u)" >> \$LOG
 touch \$RUN_ROOT_LOG/PIPELINE_DONE
 EOS
 "$SSH_BIN" "$TARGET" "cd $REMOTE_DIR && sed -i \"s|\\\$RUN_ROOT_LOG|$RUN_ROOT|g\" $RUN_ROOT/pipeline.sh && chmod +x $RUN_ROOT/pipeline.sh && setsid nohup bash $RUN_ROOT/pipeline.sh >/dev/null 2>&1 & echo LAUNCHED"
+
+fi
 
 echo "== 2/4 轮询等待完成 =="
 while :; do
