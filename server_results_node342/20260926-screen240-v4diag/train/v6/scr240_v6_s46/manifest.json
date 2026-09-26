@@ -1,0 +1,17 @@
+{
+  "model": "v6",
+  "seed": 46,
+  "started_at": "2026-09-26T08:28:46.277570+00:00",
+  "config": "/opt/qkd/graph_mappo/outputs/experiments/v6/scr240_v6_s46/experiment_config.yaml",
+  "config_sha256": "30ed0d046e6b00de7308fb2e04e8d20d8d939187453d7a7ea440f83ce1d2906d",
+  "cpu_threads": 16,
+  "model_sources_sha256": {
+    "__init__.py": "dd8f6f8a719dadb695533e1e2e5a4275550d39ae39d827bcbb50daef9b10fb2d",
+    "graph_builder.py": "a54e5425151c47b08df34aea7420988dc77cdfa432ae1069c77044be89c9b97b",
+    "model.py": "1ebb2540f0d5bae2d932402d3c83648cad8cc3152c0491cad6e2fac824c78750",
+    "model_impl.py": "ac4aedf4dba3a0bfe9183d0f98d4e2cff3d8519c03a1e2bfbaacec64e4fac61d"
+  },
+  "status": "completed",
+  "checkpoint": "/opt/qkd/graph_mappo/outputs/experiments/v6/scr240_v6_s46/checkpoint_final.pt",
+  "finished_at": "2026-09-26T08:39:06.736426+00:00"
+}
