@@ -87,3 +87,20 @@ server_results_node342/**
 # Tool session transcripts and unrelated scratch files -- not project source
 .yfcode/
 pelican_bicycle_animation.html
+
+# 240 步筛选批（2026-09-26）：报告 + 评测 JSON + 训练记录入库；
+# checkpoint/figure/大文件不入。git 需逐级 un-ignore 父目录才会下探。
+!server_results_node342/20260926-screen240-v4diag/
+!server_results_node342/20260926-screen240-v4diag/BATCH.md
+!server_results_node342/20260926-screen240-v4diag/eval/
+!server_results_node342/20260926-screen240-v4diag/eval/outputs/
+!server_results_node342/20260926-screen240-v4diag/eval/outputs/frozen_eval/
+!server_results_node342/20260926-screen240-v4diag/eval/outputs/frozen_eval/*.json
+!server_results_node342/20260926-screen240-v4diag/eval/outputs/bc_eval/
+!server_results_node342/20260926-screen240-v4diag/eval/outputs/bc_eval/*.json
+!server_results_node342/20260926-screen240-v4diag/train/
+!server_results_node342/20260926-screen240-v4diag/train/v6/
+!server_results_node342/20260926-screen240-v4diag/train/v6/*/
+!server_results_node342/20260926-screen240-v4diag/train/v6/*/*.jsonl
+!server_results_node342/20260926-screen240-v4diag/train/v6/*/*.yaml
+!server_results_node342/20260926-screen240-v4diag/train/v6/*/*.json
