@@ -1,0 +1,18 @@
+# ============================================================================
+# v4 归因分解臂：去掉三个边特征（relay_importance / req_hop / on_pending_path）
+#
+# 单变量：只关这三个边特征，其余同 v3 默认。
+# 动机与判据见 diag_v4_iso.yaml 头部注释（同一波实验）。
+#
+# ⚠ 改了 features ⟹ **BC 必须重跑**。
+# ⚠ 已核 v3 默认值：`include_relay_importance: true`、`include_req_hop: true`、
+#    `include_on_pending_path` v3 与 v4 **都是 false**（v4 config 里那句显式 false
+#    只是把默认写出来，不是改动）。
+#    ⟹ 本臂**实际只动两项**：relay_importance 与 req_hop。
+#    保留 on_pending_path: false 是为了与 v4 的 config 逐字对齐、避免以后读出歧义。
+# ============================================================================
+features:
+  edge:
+    include_relay_importance: false
+    include_req_hop: false
+    include_on_pending_path: false

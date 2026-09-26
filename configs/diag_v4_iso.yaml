@@ -1,0 +1,40 @@
+# ============================================================================
+# v4 归因分解：把 v4 相对 v3 的改动**逐项**加回 v3，定位是哪一项造成 −0.073
+#
+# 背景（已确证，见 qkd_rl/model_zoo/v4/RESULTS.md「定案」段）：
+#   v4 在修复后的训练配置下显著更差：窗 A 0.6911 vs v3 0.7599，
+#   配对 Δ=−0.073，t=−11.85（3/3 训练种子同向），且劣势在 **BC 起点就已存在**。
+#   但 v4 相对 v3 是 **5+ 项捆绑改动**（配置 4 项 + 代码 1 项），−0.073 无法归给单项。
+#
+# 为什么能在 v3 上分解（已核代码）：
+#   v3 的 `graph_builder.py` 与 `model_impl.py` **已经支持** v4 的全部配置级开关
+#   （`include_stocked_edges`、`fuse_demand_to_node`、四个 include_demand_*），
+#   所以这四项可以在 v3 上逐个打开，不必新建模型目录。
+#   唯一**不能**这样测的是代码级的 pair_path 掩码定义（v4 用「≤max_hops 简单
+#   路径并集」，v3 用「距离和判据」）—— 那需要独立目录，本波不含。
+#
+# 臂设计（单变量，每臂只动一项；对照 = v3 默认臂 scr240_v3_*）：
+#   iso     需求隔离：node 四个 include_demand_* = false
+#   stock   include_stocked_edges = true
+#   nofuse  encoder.fuse_demand_to_node = false
+#   nofeat  relay_importance / req_hop / on_pending_path = false
+#
+# 判据（跑之前写死）：
+#   对照 v3 均值 0.7599（窗 A，3 训练种子）；n=3 临界 t=4.303，分辨率约 0.035。
+#   若某臂 |Δ| 显著且方向与 v4 一致（负），则它是主因；都不显著则说明 −0.073
+#   来自**组合或代码级路径改动**——那本身就是结论。
+#
+# ★ 本文件是**配置覆盖**（--config），不是模型定义；不改任何张量形状 ⟹ 各臂
+#   与 v3 共用同一份 BC 起点（BC 不读这些开关？——**不，BC 读 features**，
+#   所以每臂必须**重新跑 BC**。见下方注意）。
+#
+# 用法（v3 的 BC 起点不能跨臂复用，因为 features 变了）：
+#   scripts/experiment.py train --model v3 --seed 42 \
+#       --name scr240_v3_iso_s42 --updates 20 --config diag_v4_iso.yaml
+# ============================================================================
+features:
+  node:
+    include_demand_in: false
+    include_demand_out: false
+    include_queue_pressure: false
+    include_recent_demand: false
