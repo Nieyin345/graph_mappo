@@ -4,15 +4,23 @@ global:
       start_day: 0
       end_day: 295
     request_seed: 7
+  # ★ 验证协议 = 同 frozen_eval 窗 A（330–365，请求种子 100–114，15 集 × 240 步）。
+  #
+  # 原先这里是 种子 [7..11] / 5 集，与 frozen_eval 的窗 A（[100..114] / 15 集）
+  # 不一致，而两个数都被引用成"验证成功率"。2026-09-26 实测：**同一窗口、同一
+  # 专家**，种子 7–11 得 0.8643、种子 100–114 得 0.7368，差 12.75 点（固定种子
+  # 扫起日 30→360 平坦 ⟹ 天窗无影响，差距全来自种子集）。训练器内部
+  # `eval_validation` 读本块，frozen_eval 读自己的 WINDOWS，于是「训练侧 0.86 /
+  # 验证侧 0.76」被误读成 regime 差异。
+  #
+  # 本块与 frozen_eval.WINDOWS["A"] 必须一致，由
+  # tests/test_validation_protocol_alignment.py 钉住（漂移即报错）。
+  # 窗 B（300–329，种子 200–214）是显式替代协议，不在本默认块里。
   validation:
     window:
       start_day: 330
       end_day: 365
-    request_seeds:
-    - 7
-    - 8
-    - 9
-    - 10
-    - 11
-    episodes: 5
+    request_seeds: [100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114]
+    episodes: 15
     episode_steps: 240
+    start_mode: random_day
