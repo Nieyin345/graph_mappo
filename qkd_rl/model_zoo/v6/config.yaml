@@ -1,0 +1,39 @@
+# ============================================================================
+# v6 只声明**模型结构**。训练超参（预算/学习率/PPO 系数）一律走全局默认
+# configs/experiment_base.yaml —— 见 docs/实验产物规范.md §3.6。
+#
+# ★ v6 = v3 + **唯一一项**改动：需求边不参与 GNN 消息传递（杜绝需求边互相融合）。
+#
+# 为什么需要 v6（而不是直接用 v4）：
+#   用户原本的意图就是「只测需求边的相互融合会不会拖累结果」。v4 把这个意图
+#   实现成了 5 项捆绑改动，分解实验（qkd_rl/model_zoo/v4/RESULTS.md）证明
+#   其中两项 —— 关掉节点需求特征（iso，−0.060）与关掉两个边特征
+#   （nofeat，−0.045）—— 是拖累的主因，而**它们与需求边融合无关**。
+#   v6 把那些无关改动全部撤回，只留隔离本身。
+#
+# 与 v3 的差异仅一处：
+#   model.encoder.fuse_demand_to_node: true -> false
+#
+# 相对 v3 保留不变（这是 v4 改错而 v6 改回的地方）：
+#   节点需求特征 4 项        = true      （v4 全关 = iso 臂 = −0.060）
+#   relay_importance/req_hop = true      （v4 关掉 = nofeat 臂 = −0.045）
+#   include_stocked_edges    = false     （v4 打开；分解显示无害但非本意）
+#   pair_path 掩码定义        = v3 的      （v4 换成了简单路径并集）
+# ============================================================================
+experiment:
+  model: v6
+model:
+  mode: mixed
+  encoder:
+    fuse_demand_to_node: false
+  actor:
+    attention_only: true
+    demand_residual:
+      enabled: false
+    path_edge_attention:
+      enabled: false
+    pair_path_attention:
+      enabled: true
+      arc_query: true
+      num_heads: 4
+      max_hops: 4

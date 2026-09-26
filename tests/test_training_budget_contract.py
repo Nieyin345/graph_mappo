@@ -36,7 +36,7 @@ import yaml
 
 from scripts.experiment import resolve_experiment
 
-MODELS = ["v2", "v3", "v4"]
+MODELS = ["v2", "v3", "v4", "v6"]
 
 #: Keys that MUST be identical across models. A model may differ in structure
 #: (that is the point of having models); it may not differ in how hard it is
