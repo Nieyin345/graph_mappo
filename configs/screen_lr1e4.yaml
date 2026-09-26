@@ -1,0 +1,17 @@
+# ============================================================================
+# 筛选臂（显式覆盖，非模型定义）：v3 的 actor_lr 高侧对照 1e-4
+#
+# 与 screen_lr1e5.yaml 配对，构成 1e-5 / 3e-5(默认) / 1e-4 的三点 log 等距扫描。
+# 依据与判据见本文件与 screen_lr1e5.yaml 的头部注释，以及
+# docs/实验产物规范.md §3.7（240 步筛选 regime）。
+#
+# ★ 不动张量形状 ⟹ 与 v3 默认臂共用 BC 起点。
+#
+# 用法：
+#   scripts/experiment.py train --model v3 --seed 42 --name scr240_v3_lr1e4_s42 \
+#       --updates 20 --config screen_lr1e4.yaml \
+#       --resume outputs/experiments/v3/screen_bc/bc/supervised_pg_phased.pt
+# ============================================================================
+train:
+  optimizer:
+    actor_lr: 0.0001
