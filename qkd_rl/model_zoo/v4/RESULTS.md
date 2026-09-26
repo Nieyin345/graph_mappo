@@ -106,19 +106,46 @@ v2/v3 带到 0.756–0.764，却只把 v4 带到 0.702。PPO 随后还在 v4 上
 因为策略转向了「多产密钥」这个更容易拟合的代理目标。**不是过拟合，也不是
 「学不动」——是学到了对的目标之外的、更容易优化的东西。**
 
-### 相对 v3 的改动是**捆绑**（代码 + 配置都有）
+### v3 ↔ v4 的完整差异（代码级，逐项核对过）
 
-⚠ 这不是「v3 调了几个开关」—— `graph_builder.py` 也改了：
+⚠ 这不是「v3 调了几个开关」—— **消息传递层被重写了**。按文件：
 
-| 改动 | v3 | v4 | 层面 |
+| 文件 | 差异 | 性质 |
+|---|---|---|
+| `model.py` | 2 行（仅 docstring） | 无 |
+| `model_impl.py` | **378 行 / 35 个 hunk** | **结构性** |
+| `graph_builder.py` | 140 行 | 掩码定义 + 库存边 |
+
+**`model_impl.py` 的三处结构改动**：
+
+1. **消息传递层被替换**：v3 的 `EdgeConditionedGraphLayer` 有 `_node_message` /
+   `_edge_message` 两个方法，**同时聚合物理边与需求边**（`fuse_demand_to_node`
+   可开关）；v4 的同名类删掉这两个方法，并在构造时就**禁止**需求边进入：
+   ```python
+   if fuse_demand_to_node:
+       raise ValueError("v4 never passes demand edges through the GNN")
+   ```
+   v4 的 `forward` 还会断言输入里没有需求边（`if demand_emb.size(0): raise`）。
+   ⟹ **v4 的 GNN 只看物理边**。
+
+2. **需求对编码方式不同**：v4 在 `PairPathEncoder` 里把需求边按**对**取均值
+   （`pair_raw = demand_emb.reshape(-1, 2, H).mean(dim=1)`）再编码，v3 无此步。
+
+3. **`PairPathAttentionScorer`（actor 打分头）逐字节相同** —— 所以差距**不在
+   actor**，在它拿到的输入表示。这与「问题在观测表示」的结论一致。
+
+**配置级改动（5 项）与维度后果**：
+
+| 改动 | v3 | v4 | 维度影响 |
 |---|---|---|---|
-| pair_path 掩码定义 | 距离和判据 | ≤max_hops 的**简单路径并集**（DFS 拒死端） | **代码** |
-| 节点需求特征 4 项 | true | false（需求隔离） | 配置 |
-| `include_stocked_edges` | false | true | 配置+代码 |
-| `relay_importance`/`req_hop`/`on_pending_path` | true/true/— | false/false/false | 配置 |
-| `fuse_demand_to_node` | — | false | 配置 |
+| 节点需求特征 4 项 | 全部 true | **全部 false** | node **17 → 11**（−6：`recent_demand` 占 3 个窗口 + in/out/queue 各 1） |
+| `relay_importance` / `req_hop` | true / true | **false / false** | edge **44 → 39**（−5） |
+| `include_stocked_edges` | false | **true** | 观测图并入库存边（含速率 0） |
+| `fuse_demand_to_node` | true | **false** | 见上面第 1 条 |
+| pair_path 掩码定义 | 距离和判据（含 `s-a-x-a-t` 类绕行） | **≤max_hops 简单路径并集**（DFS 拒死端） | 代码级 |
 
-**⟹ 这个 −0.073 是 5+ 项改动的合力，不能归给任何单项。**
+**⟹ 这个 −0.073 是上述改动的合力。** 已测的分解（下一节）把其中两项**量化**了；
+掩码定义那一项是代码级、无法在 v3 上单变量打开，**仍未测**。
 
 ### ★★★ 「为什么会有差距」：策略拿掉需求信息后转向**多产密钥**，而非服务需求
 
