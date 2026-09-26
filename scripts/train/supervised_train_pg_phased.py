@@ -57,12 +57,31 @@ from qkd_rl.model_zoo import build_model
 
 
 def _obs_class(model_name: str):
-    """v3 observations carry pair_path fields the base class lacks."""
-    if model_name == "v3":
-        from qkd_rl.model_zoo.v3.graph_builder import GraphObservation as V3Obs
-        return V3Obs
-    from qkd_rl.env.graph_builder import GraphObservation
-    return GraphObservation
+    """The observation class of the model's OWN graph builder.
+
+    Each model_zoo builder defines its own GraphObservation (v2 in
+    v2/graph_builder.py, v3 in v3/graph_builder.py, ...); the ones that enable
+    pair_path attention carry pair_path_edge_masks / pair_path_weights, and the
+    base qkd_rl/env/graph_builder.py:GraphObservation does NOT.
+
+    This must match what the env actually emits: build_env_from_config uses
+    model_zoo.graph_builder_class(config), which dispatches on the same
+    experiment.model key. Rebinding to anything else silently feeds the scorer
+    empty masks -- zero-context branch, i.e. no BC gradient into the attention
+    (measured 2026-09-24). Previously hardcoded "v3", so v4/v6 (which share the
+    pair_path fields) fell through to the base class on the --data-dir path.
+    """
+    from importlib import import_module
+
+    from qkd_rl.env.graph_builder import GraphObservation as BaseObs
+
+    if not model_name or not str(model_name).isidentifier() or str(model_name).startswith("_"):
+        return BaseObs
+    try:
+        module = import_module(f"qkd_rl.model_zoo.{model_name}.graph_builder")
+    except ModuleNotFoundError:
+        return BaseObs
+    return getattr(module, "GraphObservation", BaseObs)
 
 # numpy 2.x pickle 引用 ``numpy._core`` 命名空间；本环境若装的是 numpy 1.x
 # （如 CUDA torch 环境自带 numpy 1.24），该命名空间不存在会导致反序列化失败。
@@ -173,8 +192,8 @@ def rebuild_obs(rec: dict, obs_cls=None) -> GraphObservation:
         raw_action_masks=rec.get("raw_action_masks"),
         flat_action_masks=rec.get("flat_action_masks"),
     )
-    if obs_cls is not GraphObservation:
-        # v3 scorer needs these; empty masks = zero-context branch = no BC
+    if "pair_path_edge_masks" in getattr(obs_cls, "__dataclass_fields__", {}):
+        # v3/v4/v6 scorers need these; empty masks = zero-context branch = no BC
         # gradient into the attention (2026-09-24 measured).
         kwargs["pair_path_edge_masks"] = rec.get("pair_path_edge_masks", [])
         kwargs["pair_path_weights"] = rec.get("pair_path_weights", [])
