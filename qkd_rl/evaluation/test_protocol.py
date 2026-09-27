@@ -10,6 +10,8 @@ and scenario time limit.
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
+import json
 import math
 from pathlib import Path
 
@@ -135,3 +137,70 @@ def resolve_seeds(profile: dict, episodes: int | None = None) -> list[int]:
     if profile["seeds"]:
         return list(profile["seeds"])
     return list(range(int(profile["seed_start"]), int(profile["seed_start"]) + episodes))
+
+
+# ---------------------------------------------------------------------------
+# 「按训练任务评测」路径（2026-09-27 审计后新增）
+#
+# 实测问题：trainer 的验证继承训练 config（pairhot_v2 + arrival_rate），而
+# eval_expert 从 default + env_full 重新拼（legacy_v1）⟹ 专家与 RL 在**两个
+# 不同任务**上打分，1× 下专家读数差 0.013（0.7674 vs 0.7803），RL−专家差被
+# 高估约 0.013。下面两个函数是**唯一实现**：trainer 验证、eval_expert --run、
+# experiment.py evaluate 都走它；task_fingerprint 写进每份结果，配对脚本
+# 指纹不同就拒绝配对。
+# ---------------------------------------------------------------------------
+
+# 决定「任务」的配置段：请求流、密钥池、路由、速率数据、场景、环境动力学。
+# 不含 model/features/reward/ppo 等策略侧段（它们不改变被测的任务）。
+TASK_SECTIONS = ("requests", "qkp", "routing", "rate_provider", "scenario", "env")
+
+
+def run_validation_seeds(validation_cfg: dict, num_episodes: int | None = None) -> list[int]:
+    """训练 config 的 ``validation`` 段 → 请求种子列表（与 trainer 旧逻辑逐字等价）。"""
+    seeds = [int(s) for s in (validation_cfg.get("request_seeds", []) or [])]
+    if not seeds:
+        seeds = list(range(7, 7 + int(validation_cfg.get("episodes", 3) or 3)))
+    if num_episodes is not None and num_episodes > 0:
+        seeds = [seeds[i % len(seeds)] for i in range(int(num_episodes))]
+    return seeds
+
+
+def run_validation_env_config(
+    config: dict, validation_cfg: dict | None = None, step_limit: int | None = None
+) -> dict:
+    """训练 config → 验证环境 config：任务段原样继承，只换验证窗口/回合长度。
+
+    与 trainer 旧 ``_build_validation_envs`` 逐字等价（由测试钉住）。
+    """
+    validation_cfg = validation_cfg if validation_cfg is not None else (
+        config.get("validation", {}) or {})
+    window = validation_cfg.get("window", {}) or {}
+    start_day = int(window.get("start_day", 0))
+    end_day = int(window.get("end_day", 365))
+    episode_steps = int(step_limit) if (step_limit is not None and step_limit > 0) else 0
+    day_steps = int(config["env"].get("day_steps", DAY_STEPS))
+    if episode_steps <= 0:
+        episode_steps = int(validation_cfg.get("episode_steps", 0) or 0)
+    if episode_steps <= 0:
+        episode_steps = int(validation_cfg.get("episode_days", 1) or 1) * day_steps
+
+    out = deepcopy(config)
+    out["env"]["episode_start_mode"] = str(validation_cfg.get("start_mode", "random_day"))
+    out["env"]["episode_steps"] = episode_steps
+    out["env"]["continuous"] = False
+    out["env"]["activation_window_start_day"] = start_day
+    out["env"]["activation_window_end_day"] = end_day
+    out["env"]["activation_window_days"] = max(0, end_day - start_day)
+    out["scenario"]["time_limit"]["days"] = end_day + max(1, math.ceil(episode_steps / day_steps))
+    return out
+
+
+def task_fingerprint(env_config: dict) -> str:
+    """任务指纹：TASK_SECTIONS 的规范化 JSON 的 sha1 前 12 位。
+
+    两份结果指纹不同 = 不是同一个任务，禁止配对。``seed.env_seed`` 不计入
+    （它只是第一条回合的种子，回合种子另有 ``seeds`` 字段）。
+    """
+    payload = {k: env_config.get(k) for k in TASK_SECTIONS}
+    blob = json.dumps(payload, sort_keys=True, default=str, ensure_ascii=True)
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:12]

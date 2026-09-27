@@ -22,6 +22,15 @@ near 0.06 and cannot separate policies that differ by 0.02.
 
     python scripts/eval/eval_expert.py --seeds 7-21
     python scripts/eval/eval_expert.py --config <profile.yaml> --seeds 7-14 --steps 1440
+
+★ 2026-09-27：与 RL 配对时**必须**用 ``--run <训练目录>``。不加 --run 时本脚本
+从 default + env_full 拼配置（legacy_v1 请求分布），而 RL 在自己的训练 config
+（如 pairhot_v2 + arrival_rate）上验证 —— 实测 1× 下专家两种读数差 0.013。
+--run 走 trainer 验证的同一实现（test_protocol.run_validation_env_config），
+输出带 task_fingerprint，与 RL 的 validation.json / eval_*.json 指纹一致才可配对。
+
+    python scripts/eval/eval_expert.py --run outputs/experiments/v8/<run> \\
+        [--seeds 1000-1029] [--overlay pair_seed1.yaml] --out outputs/eval/<name>.json
 """
 from __future__ import annotations
 
@@ -59,37 +68,105 @@ def parse_seeds(spec: str) -> list[int]:
     return out
 
 
+def _overlay_path(name: str) -> Path:
+    p = Path(name)
+    return p if p.exists() else ROOT / "configs" / name
+
+
+def build_policy(name: str, env, obs, config: dict, weights=(1.0, 10.0, 1.0, 0.5, 0.2),
+                 milp_window: int = 30, milp_replan: int = 10, milp_time_limit: float = 30.0,
+                 milp_max_requests: int = 64, milp_max_paths: int = 8):
+    """每个回合构建一次（两种策略都持有 live env 的引用/状态）。"""
+    if name == "rh_milp":
+        import copy
+        from qkd_rl.baselines.receding_horizon_milp import RecedingHorizonMILPPolicy
+        pol = RecedingHorizonMILPPolicy(
+            config, slot_seconds=float(env.scenario.slot_seconds),
+            window_steps=milp_window, replan_every_steps=milp_replan,
+            time_limit_s=milp_time_limit, max_requests=milp_max_requests,
+            max_paths_per_request=milp_max_paths, switch_decay=0.5,
+        )
+        # 生成器有状态：预览会推进 RNG。给 MILP 一份 reset 后的深拷贝 ⟹
+        # 预览 == env 实际到达，且不扰动 env 自己的请求流（共用则两边都错）。
+        pol._ensure_init(obs, gen=copy.deepcopy(env.request_generator))
+        return pol
+    if name == "expert":
+        return PathScoreGreedy(weights=tuple(weights), phased=True, principles=False,
+                               router=ServeProbe(env))
+    raise ValueError(f"unknown policy {name!r}")
+
+
+def build_expert_task(run: str = "", config_path: str = "", seeds_spec: str = "",
+                      steps: int = 0, overlays: list[str] | None = None
+                      ) -> tuple[dict, list[int], int]:
+    """→ (env_config, seeds, start_seed_base)。可测试的纯函数（无 env 构建）。
+
+    run 非空：训练目录的 experiment_config.yaml + overlays → 与 trainer 验证
+    同一实现。run 为空：旧的 canonical profile 路径（legacy_v1，仅供复现旧数）。
+    """
+    overlays = list(overlays or [])
+    if run:
+        config = _tp.load_config([Path(run) / "experiment_config.yaml"])
+        for name in overlays:
+            config = _tp.deep_merge(config, _tp.load_config([_overlay_path(name)]))
+        vcfg = config.get("validation", {}) or {}
+        seeds = parse_seeds(seeds_spec) if seeds_spec else _tp.run_validation_seeds(vcfg)
+        env_config = _tp.run_validation_env_config(config, vcfg, steps or None)
+        return env_config, seeds, int(vcfg.get("start_seed", 0) or 0)
+    profile = _tp.load_validation_profile(
+        Path(config_path or ROOT / "configs" / "global.yaml"))
+    n_steps = steps or int(profile["episode_steps"]) or 240
+    config = _tp.build_validation_env_config(
+        profile, include_baselines=False, episode_steps=n_steps,
+        start_mode=profile["start_mode"])
+    for name in overlays:
+        config = _tp.deep_merge(config, _tp.load_config([_overlay_path(name)]))
+    return config, parse_seeds(seeds_spec or "7-21"), int(profile.get("start_seed", 0))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--config", default=str(ROOT / "configs" / "global.yaml"),
-                    help="config whose global.validation block defines the protocol")
-    ap.add_argument("--seeds", default="7-21")
+    ap.add_argument("--run", default="",
+                    help="训练目录：在该 run 的任务上评测（与 RL 配对时必须用）")
+    ap.add_argument("--config", default="",
+                    help="(无 --run 时) config whose global.validation block defines the protocol")
+    ap.add_argument("--seeds", default="",
+                    help="默认：--run 时用该 run 的验证种子；否则 7-21")
     ap.add_argument("--steps", type=int, default=0, help="0 = use the profile's episode_steps")
     ap.add_argument("--weights", nargs=5, type=float, default=[1.0, 10.0, 1.0, 0.5, 0.2])
     ap.add_argument("--out", default="", help="default: outputs/eval/expert_<steps>.json")
+    ap.add_argument("--overlay", action="append", default=[],
+                    help="extra config yaml(s) merged over the task config, "
+                         "e.g. load_x20.yaml / pair_seed1.yaml")
+    # 2026-09-27：可执行滚动时域 MILP（先知未来请求）作为「离线最优」的下沿。
+    # 与流体 LP 上界（scripts/milp/fluid_upper_bound.py）一起夹住真实最优。
+    ap.add_argument("--policy", choices=["expert", "rh_milp"], default="expert")
+    ap.add_argument("--milp-window", type=int, default=30)
+    ap.add_argument("--milp-replan", type=int, default=10)
+    ap.add_argument("--milp-time-limit", type=float, default=30.0)
+    ap.add_argument("--milp-max-requests", type=int, default=64)
+    ap.add_argument("--milp-max-paths", type=int, default=8)
     args = ap.parse_args()
 
-    profile = _tp.load_validation_profile(Path(args.config))
-    steps = args.steps or int(profile["episode_steps"]) or 240
-    seeds = parse_seeds(args.seeds)
-
-    print(f"profile: window {profile['window_start_day']}-{profile['window_end_day']}, "
-          f"steps {steps}, start_mode {profile['start_mode']}, {len(seeds)} seeds")
-
-    config = _tp.build_validation_env_config(
-        profile, include_baselines=False, episode_steps=steps,
-        start_mode=profile["start_mode"])
+    config, seeds, start_seed_base = build_expert_task(
+        args.run, args.config, args.seeds, args.steps, args.overlay)
+    steps = int(config["env"]["episode_steps"])
+    fingerprint = _tp.task_fingerprint(config)
+    print(f"task: {'run ' + args.run if args.run else 'canonical profile (legacy)'}; "
+          f"overlays {args.overlay}; window {config['env'].get('activation_window_start_day')}-"
+          f"{config['env'].get('activation_window_end_day')}, steps {steps}, "
+          f"{len(seeds)} seeds, fingerprint {fingerprint}")
 
     rows = []
     t0 = time.perf_counter()
     for seed in seeds:
         env = build_env_from_config(config)
-        obs = env.reset(seed=seed, start_seed=int(profile.get("start_seed", 0)) + seed)
-        # Built per env: ServeProbe holds a reference to the live env.
-        expert = PathScoreGreedy(
-            weights=tuple(args.weights), phased=True, principles=False,
-            router=ServeProbe(env),
-        )
+        obs = env.reset(seed=seed, start_seed=start_seed_base + seed)
+        expert = build_policy(
+            args.policy, env, obs, config, weights=tuple(args.weights),
+            milp_window=args.milp_window, milp_replan=args.milp_replan,
+            milp_time_limit=args.milp_time_limit,
+            milp_max_requests=args.milp_max_requests, milp_max_paths=args.milp_max_paths)
         served = 0.0
         # 2026-09-19 补：把**生成量**与**等待量**也记下来。
         #
@@ -139,8 +216,12 @@ def main() -> None:
     out_path = Path(args.out) if args.out else ROOT / "outputs" / "eval" / f"expert_{steps}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps({
-        "policy": "path_score_greedy_phased",
+        "policy": "path_score_greedy_phased" if args.policy == "expert" else
+                  f"rh_milp_w{args.milp_window}_r{args.milp_replan}_tl{args.milp_time_limit:g}",
         "steps": steps,
+        "task_fingerprint": fingerprint,
+        "run": args.run,
+        "overlays": list(args.overlay),
         "seeds": [r[0] for r in rows],
         "success": [r[1] for r in rows],
         "served": [r[2] for r in rows],

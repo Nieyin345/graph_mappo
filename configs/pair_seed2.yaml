@@ -1,0 +1,4 @@
+# 留出泛化臂：换热门站对的分配（pairhot_v2 下 Zipf 权重随 pair_seed 洗牌）。
+# 训练全部用 pair_seed 0；此文件只用于评测。
+requests:
+  pair_seed: 2

@@ -164,7 +164,15 @@ def train_one(args, model: str, seed: int) -> Path:
     return run_dir
 
 
-def evaluate_one(run_dir: Path, checkpoint: Path | None = None) -> dict:
+def evaluate_one(run_dir: Path, checkpoint: Path | None = None, seeds: list[int] | None = None,
+                 overlays: list[str] | None = None, tag: str = "",
+                 threads: int | None = None) -> dict:
+    """在 run 自己的任务上评测检查点（trainer.evaluate_validation 同一实现）。
+
+    seeds / overlays / tag（2026-09-27 新增）：换请求种子（留出测试集）或叠加
+    配置（如 pair_seed1.yaml 换热门站对）。给了 tag 就写 ``eval_<tag>.json``，
+    **不覆盖** validation.json；已存在则报错（outputs 只增不改）。
+    """
     import torch
     from qkd_rl.env.factory import build_env_from_config
     from qkd_rl.model_zoo import build_model
@@ -173,7 +181,18 @@ def evaluate_one(run_dir: Path, checkpoint: Path | None = None) -> dict:
     from qkd_rl.rl.algos.policy import MAPPOPolicy
 
     config = load_config([run_dir / "experiment_config.yaml"])
-    threads = int(config.get("experiment", {}).get("cpu_threads", 4))
+    for name in overlays or []:
+        p = Path(name)
+        config = deep_merge(config, load_config([p if p.exists() else ROOT / "configs" / name]))
+    if seeds:
+        config.setdefault("validation", {})["request_seeds"] = list(seeds)
+        config["validation"]["episodes"] = len(seeds)
+    if (seeds or overlays) and not tag:
+        raise ValueError("换了种子或叠加了配置就必须给 --tag，避免覆盖 validation.json")
+    path = run_dir / (f"eval_{tag}.json" if tag else "validation.json")
+    if tag and path.exists():
+        raise FileExistsError(f"{path} 已存在（outputs 只增不改）；换一个 tag")
+    threads = int(threads or config.get("experiment", {}).get("cpu_threads", 4))
     torch.set_num_threads(threads)
     device = config.get("runtime", {}).get("device", "cpu")
     if device == "cuda" and not torch.cuda.is_available():
@@ -187,8 +206,8 @@ def evaluate_one(run_dir: Path, checkpoint: Path | None = None) -> dict:
     result = trainer.evaluate_validation(
         num_episodes=int(config.get("validation", {}).get("episodes", 1))
     )
-    result.update({"checkpoint": str(checkpoint), "model": config["experiment"]["model"]})
-    path = run_dir / "validation.json"
+    result.update({"checkpoint": str(checkpoint), "model": config["experiment"]["model"],
+                   "overlays": list(overlays or []), "tag": tag})
     path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return result
 
@@ -220,6 +239,10 @@ def main() -> None:
     p = sub.add_parser("evaluate")
     p.add_argument("--run", type=Path, required=True)
     p.add_argument("--checkpoint", type=Path)
+    p.add_argument("--seeds", default="", help="如 1000-1029；默认用 run 的验证种子")
+    p.add_argument("--overlay", action="append", default=[], help="如 pair_seed1.yaml")
+    p.add_argument("--tag", default="", help="输出 eval_<tag>.json（换种子/叠加时必填）")
+    p.add_argument("--threads", type=int, default=0, help="0 = 用 run 的 cpu_threads")
     p = sub.add_parser("batch-evaluate")
     p.add_argument("--runs", type=Path, nargs="+", required=True)
     p.add_argument("--parallel", type=int, default=1)
@@ -246,7 +269,15 @@ def main() -> None:
             for future in as_completed(futures):
                 print(futures[future], future.result(), flush=True)
     elif args.command == "evaluate":
-        print(json.dumps(evaluate_one(args.run, args.checkpoint), ensure_ascii=False))
+        seeds: list[int] = []
+        for part in args.seeds.split(","):
+            if "-" in part:
+                a, b = part.split("-", 1)
+                seeds.extend(range(int(a), int(b) + 1))
+            elif part.strip():
+                seeds.append(int(part))
+        print(json.dumps(evaluate_one(args.run, args.checkpoint, seeds, args.overlay,
+                                      args.tag, args.threads or None), ensure_ascii=False))
     else:
         with ProcessPoolExecutor(max_workers=args.parallel) as pool:
             for result in pool.map(evaluate_one, args.runs):

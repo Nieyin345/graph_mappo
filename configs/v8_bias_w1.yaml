@@ -1,0 +1,5 @@
+# 改进探针（2026-09-27 b6）：偏置强度 1.0（v8_bias.yaml 为 0.2；历史上 w=4 打崩 PPO）。叠加在 v8_bias.yaml 之后。
+model:
+  actor:
+    usage_forecast:
+      bias_weight: 1.0
