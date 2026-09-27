@@ -38,7 +38,7 @@ from qkd_rl.model_zoo import build_model, graph_builder_class, model_name
 from scripts.experiment import resolve_experiment
 from scripts.train.supervised_train_pg_phased import _obs_class, rebuild_obs
 
-MODELS = ["v2", "v3", "v4", "v6"]
+MODELS = ["v2", "v3", "v4", "v6", "v7", "v8"]
 
 
 def _resolved(model: str) -> dict:

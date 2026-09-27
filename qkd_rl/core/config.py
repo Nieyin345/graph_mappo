@@ -107,6 +107,9 @@ class ConfigValidator:
             # 通路成员资格（1 维）：该边此刻在不在某个 pending 请求的服务路径上。
             # 见 graph_builder._compute_on_pending_path 与 docs/训练诊断记录.md。
             "include_on_pending_path",
+            # 通路成员的**近期历史**（1 维，衰减累加）：该边最近几个槽有没有
+            # 在请求路径上。与上面的"此刻"版不同，这是多槽记忆。
+            "include_path_recency",
         ):
             edge_dim += int(bool(edge_cfg.get(flag, False)))
         # 通路提示特征：两端点距最近需求源/宿共 4 个 hop 值。

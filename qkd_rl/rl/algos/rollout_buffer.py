@@ -102,6 +102,13 @@ class RolloutStep:
     returns: torch.Tensor | None = None
     advantages: torch.Tensor | None = None
     matched_edges: list[tuple[str, str]] | None = None
+    # v8 auxiliary target: for physical edge e at this step's position in
+    # ``obs.physical_edge_ids``, 1.0 if e lies on some request's path within the
+    # next `horizon` steps, else 0.0. Aligned to the SAME edge list the forecast
+    # head is aligned to, so loss time needs no id mapping. None when the model
+    # has no forecast head. Filled by `fill_usage_labels` once the episode is
+    # complete (the label is forward-looking, so it needs the future steps).
+    usage_label: torch.Tensor | None = None
 
     # ---- cross-process shipping -------------------------------------------
     # RolloutStep is what the workers send back to the trainer, and the trainer
@@ -190,6 +197,20 @@ class RolloutBuffer:
         self.value_target = value_target
         self.steps: list[RolloutStep] = []
         self._episode_start = 0
+        # v8: label horizon in slots (0 = do not compute usage labels). Set by
+        # the trainer from actor.usage_forecast.horizon so a v3 run costs nothing.
+        self.usage_horizon = 0
+        # v8 label semantics:
+        #   "used"    -- e is on some request path at any step in [t, t+K).
+        #                The first batch used this. Measured problem: it is
+        #                dominated by persistence (an edge in use now is in use
+        #                100% of the time over the horizon), so the head just
+        #                relearns "keep serving what you already serve" and ends
+        #                up worse than a copy of the current mask.
+        #   "new"     -- e is used in (t, t+K] AND is NOT used at t. Removes the
+        #                persistence term, leaving only the new activations --
+        #                the only place proactive preparation can add anything.
+        self.usage_label_mode = "used"
 
     def __len__(self) -> int:
         return len(self.steps)
@@ -235,7 +256,85 @@ class RolloutBuffer:
         for step, ret, adv in zip(episode, returns, advantages):
             step.returns = ret.detach()
             step.advantages = adv.detach()
+        if self.usage_horizon > 0:
+            self._fill_usage_labels(episode)
         self._episode_start = len(self.steps)
+
+    def _fill_usage_labels(self, episode: list[RolloutStep]) -> None:
+        """Set ``usage_label`` for every step in one finished episode.
+
+        Label for step t on physical edge e, per ``usage_label_mode``:
+            "used": 1.0 if e is on some pending request's path at ANY step in
+                    [t, t + horizon), else 0.0
+            "new":  1.0 if e is on a path at some step in (t, t + horizon] but
+                    NOT at t, else 0.0
+
+        Source: ``obs.request_path_edge_mask``, which the graph builder already
+        fills every step (per physical edge, aligned with physical_edge_ids). It
+        is the CURRENT-step version; taking the union over the next `horizon`
+        steps turns it into the forward-looking label. Because it is the request
+        stream's own path set, the label is independent of the policy's actions
+        -- it cannot be farmed by hoarding keys.
+
+        "new" exists because "used" is dominated by persistence: measured, an
+        edge on a path now is still on a path 100% of the time across the
+        horizon, while an edge not on a path becomes one only 10.6% of the time.
+        "used" therefore mostly teaches "keep doing what you are doing", which
+        the actor's own current-mask attention already encodes. "new" subtracts
+        that term, leaving the new activations -- the only place proactive
+        preparation can add anything.
+
+        Steps whose mask is missing (None) are treated as all-zero, matching the
+        builder's empty-request case.
+        """
+        horizon = self.usage_horizon
+        mode = getattr(self, "usage_label_mode", "used")
+        n = len(episode)
+        # Precompute per-step boolean masks from the observations.
+        masks: list[list[bool] | None] = []
+        sizes: list[int] = []
+        for step in episode:
+            mask = getattr(step.obs, "request_path_edge_mask", None)
+            ids = getattr(step.obs, "physical_edge_ids", None) or []
+            masks.append(mask)
+            sizes.append(len(ids))
+        for t, step in enumerate(episode):
+            size_t = sizes[t]
+            if size_t == 0:
+                step.usage_label = torch.zeros((0,), dtype=torch.float32)
+                continue
+            label = torch.zeros(size_t, dtype=torch.float32)
+            # A step's edge list can differ in ORDER/length from step t's, so
+            # accumulate by edge id over a window. "used" includes step t; "new"
+            # starts at t+1 so the current step cannot satisfy the future term.
+            # 窗口上界（2026-09-27 修，代码审查 A4）："used" = [t, t+K)（含当前
+            # 步共 K 槽）；"new" = (t, t+K]（K 个未来槽）。原实现两种模式都用
+            # min(n, t+horizon) ⟹ "new" 实际只覆盖 t+1..t+K-1（K-1 槽），
+            # horizon=1 时窗口为空、全零标签。
+            lo = t if mode == "used" else t + 1
+            hi = min(n, t + horizon + (1 if mode == "new" else 0))
+            window_ids: set[str] = set()
+            for u in range(lo, hi):
+                m = masks[u]
+                if not m:
+                    continue
+                ids_u = getattr(episode[u].obs, "physical_edge_ids", None) or []
+                for pos, on_path in enumerate(m):
+                    if on_path and pos < len(ids_u):
+                        window_ids.add(ids_u[pos])
+            now_ids: set[str] = set()
+            if mode == "new":
+                m_t = masks[t]
+                ids_t = getattr(step.obs, "physical_edge_ids", None) or []
+                if m_t:
+                    for pos, on_path in enumerate(m_t):
+                        if on_path and pos < len(ids_t):
+                            now_ids.add(ids_t[pos])
+            ids_t = getattr(step.obs, "physical_edge_ids", None) or []
+            for pos, eid in enumerate(ids_t):
+                if eid in window_ids and eid not in now_ids:
+                    label[pos] = 1.0
+            step.usage_label = label
 
     def sample(
         self,

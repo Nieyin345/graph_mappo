@@ -1,0 +1,108 @@
+# ============================================================================
+# v8: v3 + a USAGE-FORECAST auxiliary head  (see model_impl.UsageForecastHead)
+# ============================================================================
+#
+# ## The problem it addresses
+#
+# The measured ceiling (docs/实验日志.md §10.9) says the policy can only win
+# ~2.45% of arrived demand more than the expert, and the expert is already at
+# ~96-98% of the physical ceiling. That little headroom is concentrated in
+# `bn@到达=0` (91% of the contested bucket): requests whose path has zero stock
+# the moment they arrive, so the 6-9 slot window is not enough to accumulate.
+#
+# The fix is preparation: activate an edge BEFORE the request that needs it
+# arrives. Two prior attempts failed for the same reason, and it is worth naming
+# it because v8 exists to fix exactly this:
+#
+#   * v7 (two-stage service/prepare): the prepare stage chose edges with NO way
+#     to learn whether the choice was right. Only ~0.45% of reward came from
+#     storage; actor_grad_norm fell to 1/4.5 of v3's while entropy ROSE
+#     (3.75 -> 4.37). Decisions without feedback = noise.
+#   * v5 (LSTM over per-pair request history): fed information IN, but still
+#     gave no per-decision feedback. Adding input does not create learning
+#     signal.
+#
+# ## What v8 does differently
+#
+# Give the decision a DIRECT, DENSE LABEL that needs no reward:
+#
+#     label_t(e) = 1 if physical edge e lies on some request's path within the
+#                  next K slots, else 0
+#
+# The environment ALREADY computes the current-step version of this
+# (GraphObservation.request_path_edge_mask); the label is its K-step
+# forward-looking form, read from the recorded per-step masks at episode end.
+# It depends only on the request stream -- not on the policy -- so it cannot be
+# gamed (unlike a reward for "storing keys", which a policy can farm by hoarding).
+#
+# Two uses, separately switchable so the effect can be attributed:
+#   loss_weight > 0 : train the head (BCE). Shapes the encoder even
+#                     with bias 0 -- a pure representation change.
+#   bias_weight > 0 : add w * logit to each edge's score, so edges the
+#                     head expects to be used soon are preferred. This
+#                     is the "prepare" behaviour (through the SAME
+#                     single-stage matching v3 uses -- no second pass,
+#                     because port headroom is 31%, not scarce).
+#
+# Ablation (all on the same BC, same budget):
+#   v8-loss      : loss only      -> isolates "better representation"
+#   v8-bias      : loss + bias    -> isolates "active preparation"
+#
+experiment:
+  model: v8
+# The head must be able to see the signal it is asked to predict. The measured
+# recency of path membership (a decaying count over the last tens of slots) is
+# the quantity with AUC 0.63 on the "new activation" target; the edge features
+# otherwise carry only `include_last_activated`, which is whether the edge was
+# ACTIVATED (keys generated) -- a different thing. Appended last so the BC
+# warm-start widens by zero-fill and stays bit-equivalent.
+features:
+  edge:
+    include_path_recency: true
+model:
+  encoder:
+    fuse_demand_to_node: true
+  actor:
+    attention_only: true
+    demand_residual:
+      enabled: false
+    path_edge_attention:
+      enabled: false
+    pair_path_attention:
+      enabled: true
+      arc_query: true
+      num_heads: 4
+      # Same as the v3 control, so the experiment isolates the forecast head.
+      max_hops: 4
+    usage_forecast:
+      enabled: true
+      # Horizon of the label, in slots. The requests' window is 6-9 slots
+      # (measured), so K must be at least that to warn in time; 8 covers the
+      # median while staying short enough to be predictable.
+      horizon: 8
+      # Label semantics. "used" is what batch 1 trained on and it does not work:
+      # it is dominated by persistence (an edge on a path now is on a path 100%
+      # of the time over the horizon; one not on a path becomes one only 10.6%
+      # of the time), so the head relearns "keep serving what you already serve"
+      # and ends up WORSE than a copy of the current mask (AUC 0.60 vs 0.73).
+      # "new" subtracts the persistence term, leaving only newly-active edges --
+      # the only place preparation can add anything.
+      label_mode: new
+      # BCE weight. 0 disables training the head.
+      loss_weight: 0.05
+      # BCE 正例权重（2026-09-27，代码审查 A4）："new" 标签正例率 ~10.6%，
+      # 裸 BCE 梯度被易分负例主导（batch-1 三种子里两个头 AUC≈0.5）。
+      # pos_weight ≈ (1-p)/p ≈ 8.5。设 0 = 关闭（保持与 batch-1 可比）。
+      pos_weight: 8.5
+      # Score bias（2026-09-27 起为 z-score 语义，代码审查 A4）：
+      #   bias = w · zscore_graph(tanh(logit))
+      # 图内标准化后偏置分布均值 0、std = w ⟹ **w 直接就是"分数 std 的
+      # 倍数"**，与头的绝对输出尺度解耦。历史教训（两次标定失效，方向相反）：
+      #   batch-1: w=0.01 按未训练 std 标定 → 实际 0.05% score std，无操作；
+      #   batch-2 旧方案: w=4 按 "used" 头的 |tanh|≈0.05 标定，换 "new" 标签后
+      #   基线 logit≈-2.1、tanh 饱和 ≈±1 → 实际 ≈4 个 score std（kl 5-12、
+      #   clip_frac≈1.0，PPO 死亡）。z-score 一次性终结这类标定问题。
+      # 注意：z-score 后行为臂在 configs/v8_bias.yaml 里设 w（0.2 ≈ 温和推动，
+      # 1.0 ≈ 与注意力分数同量级）。
+      # 0 = no behavioural effect (representation-only ablation).
+      bias_weight: 0.0

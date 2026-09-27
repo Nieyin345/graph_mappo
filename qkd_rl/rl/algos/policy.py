@@ -238,6 +238,132 @@ class MAPPOPolicy:
             matched_edges, mean_lp_t, mean_entropy_t,
         )
 
+    def _sample_two_stage_matching(
+        self,
+        service_scores: dict[tuple[str, str], torch.Tensor],
+        preparation_scores: dict[tuple[str, str], torch.Tensor],
+        service_arcs: set[tuple[str, str]],
+        deterministic: bool = False,
+        build_scores: bool = True,
+    ):
+        """Sample service arcs first, then preparation arcs on remaining ports."""
+        all_arcs = list(service_scores)
+        used_tx: set[str] = set()
+        used_rx: set[str] = set()
+        used_pairs: set[frozenset[str]] = set()
+        matched: list[tuple[str, str]] = []
+        total_lp = torch.zeros((), device=self.device)
+        total_entropy = torch.zeros((), device=self.device)
+        decisions = 0
+
+        stages = (
+            ([arc for arc in all_arcs if arc in service_arcs], service_scores,
+             self.model.actor.stop_logit),
+            ([arc for arc in all_arcs if arc not in service_arcs], preparation_scores,
+             self.model.actor.prepare.stop_logit),
+        )
+        for stage_arcs, scores, stop_logit in stages:
+            while True:
+                legal = [
+                    arc for arc in stage_arcs
+                    if arc[0] not in used_tx
+                    and arc[1] not in used_rx
+                    and frozenset(arc) not in used_pairs
+                ]
+                if not legal:
+                    break
+                logits = torch.stack([scores[arc] for arc in legal] + [stop_logit])
+                if self.model.actor.temperature != 1.0:
+                    logits = logits / self.model.actor.temperature
+                dist = torch.distributions.Categorical(logits=logits)
+                if deterministic:
+                    pick = torch.argmax(logits)
+                else:
+                    pick = torch.multinomial(
+                        dist.probs, 1, generator=self._sample_gen
+                    ).squeeze(0)
+                total_lp = total_lp + dist.log_prob(pick)
+                total_entropy = total_entropy + dist.entropy()
+                decisions += 1
+                idx = int(pick.item())
+                if idx == len(legal):
+                    break
+                arc = legal[idx]
+                matched.append(arc)
+                used_tx.add(arc[0])
+                used_rx.add(arc[1])
+                used_pairs.add(frozenset(arc))
+        entropy = total_entropy / max(1, decisions)
+        return (
+            self._matching_to_actions(matched, service_scores, build_scores=build_scores),
+            matched,
+            total_lp,
+            entropy,
+        )
+
+    def _two_stage_log_prob_entropy(
+        self,
+        service_scores: dict[tuple[str, str], torch.Tensor],
+        preparation_scores: dict[tuple[str, str], torch.Tensor],
+        service_arcs: set[tuple[str, str]],
+        matched_edges: list[tuple[str, str]],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Replay the two ordered matching stages with gradients intact."""
+        all_arcs = list(service_scores)
+        used_tx: set[str] = set()
+        used_rx: set[str] = set()
+        used_pairs: set[frozenset[str]] = set()
+        split = 0
+        while split < len(matched_edges) and matched_edges[split] in service_arcs:
+            split += 1
+        sequences = (matched_edges[:split], matched_edges[split:])
+        stages = (
+            ([arc for arc in all_arcs if arc in service_arcs], service_scores,
+             self.model.actor.stop_logit),
+            ([arc for arc in all_arcs if arc not in service_arcs], preparation_scores,
+             self.model.actor.prepare.stop_logit),
+        )
+        total_lp = torch.zeros((), device=self.device)
+        total_entropy = torch.zeros((), device=self.device)
+        decisions = 0
+        for (stage_arcs, scores, stop_logit), sequence in zip(stages, sequences):
+            for arc in sequence:
+                legal = [
+                    cand for cand in stage_arcs
+                    if cand[0] not in used_tx
+                    and cand[1] not in used_rx
+                    and frozenset(cand) not in used_pairs
+                ]
+                if arc not in legal:
+                    raise ValueError(f"Stored two-stage arc {arc!r} is not feasible")
+                logits = torch.stack([scores[cand] for cand in legal] + [stop_logit])
+                if self.model.actor.temperature != 1.0:
+                    logits = logits / self.model.actor.temperature
+                dist = torch.distributions.Categorical(logits=logits)
+                pick = torch.tensor(legal.index(arc), device=self.device)
+                total_lp = total_lp + dist.log_prob(pick)
+                total_entropy = total_entropy + dist.entropy()
+                decisions += 1
+                used_tx.add(arc[0])
+                used_rx.add(arc[1])
+                used_pairs.add(frozenset(arc))
+            legal = [
+                cand for cand in stage_arcs
+                if cand[0] not in used_tx
+                and cand[1] not in used_rx
+                and frozenset(cand) not in used_pairs
+            ]
+            if legal:
+                logits = torch.stack([scores[cand] for cand in legal] + [stop_logit])
+                if self.model.actor.temperature != 1.0:
+                    logits = logits / self.model.actor.temperature
+                dist = torch.distributions.Categorical(logits=logits)
+                stop = torch.tensor(len(legal), device=self.device)
+                total_lp = total_lp + dist.log_prob(stop)
+                total_entropy = total_entropy + dist.entropy()
+                decisions += 1
+        return total_lp, total_entropy / max(1, decisions)
+
     def _matching_to_actions(
         self,
         matched_edges: list[tuple[str, str]],
@@ -326,11 +452,22 @@ class MAPPOPolicy:
                 matched_edges=[],
             )
         edge_scores = output.edge_scores or {}
-        (actions, action_scores), matched_edges, mean_lp, mean_entropy = self._sample_matching(
-            edge_scores,
-            deterministic=deterministic,
-            build_scores=build_scores,
-        )
+        if bool(getattr(self.model.actor, "two_stage_enabled", False)):
+            (actions, action_scores), matched_edges, mean_lp, mean_entropy = (
+                self._sample_two_stage_matching(
+                    edge_scores,
+                    output.preparation_scores or {},
+                    set(output.service_arcs or ()),
+                    deterministic=deterministic,
+                    build_scores=build_scores,
+                )
+            )
+        else:
+            (actions, action_scores), matched_edges, mean_lp, mean_entropy = self._sample_matching(
+                edge_scores,
+                deterministic=deterministic,
+                build_scores=build_scores,
+            )
         log_probs, entropies = self._fill_node_tensors(node_ids, mean_lp, mean_entropy)
         return PolicyStep(
             actions=actions,
@@ -545,6 +682,8 @@ class MAPPOPolicy:
         ``build_scores`` is False (the arrays path does not materialize per-edge
         score dicts).
         """
+        if bool(getattr(self.model.actor, "two_stage_enabled", False)):
+            return [self.act(obs, deterministic, build_scores) for obs in obs_list]
         arrays = None
         want_edge_maps = build_scores or not use_edge_arrays
         outputs = self.model.batched_forward(
@@ -635,7 +774,15 @@ class MAPPOPolicy:
         if not node_ids:
             return {}, {}, output.value
         edge_scores = output.edge_scores or {}
-        mean_lp, mean_entropy = self._matching_log_prob_entropy_fast(edge_scores, matched_edges)
+        if bool(getattr(self.model.actor, "two_stage_enabled", False)):
+            mean_lp, mean_entropy = self._two_stage_log_prob_entropy(
+                edge_scores,
+                output.preparation_scores or {},
+                set(output.service_arcs or ()),
+                matched_edges,
+            )
+        else:
+            mean_lp, mean_entropy = self._matching_log_prob_entropy_fast(edge_scores, matched_edges)
         log_probs, entropies = self._fill_node_tensors(node_ids, mean_lp, mean_entropy)
         return log_probs, entropies, output.value
 
@@ -645,20 +792,36 @@ class MAPPOPolicy:
         obs_list: list[GraphObservation],
         actions_list: list[dict[str, tuple[str, str]]],
         matched_edges_list: list[list[tuple[str, str]]],
+        want_usage_logits: bool = False,
     ) -> list[tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], torch.Tensor]]:
         """Batched PPO evaluation: one block-diagonal model forward for many
         graphs instead of one forward per step. Per-graph math is identical to
-        ``evaluate_actions``; returns (log_probs, entropies, value) per obs."""
+        ``evaluate_actions``; returns (log_probs, entropies, value) per obs.
+
+        With ``want_usage_logits=True`` the returned tuples gain a 4th element
+        (the v8 per-graph physical-edge forecast), obtained from the SAME
+        forward so the auxiliary loss backprops into the encoder. Default False
+        keeps every existing caller's 3-tuple unpacking valid.
+        """
+        if bool(getattr(self.model.actor, "two_stage_enabled", False)):
+            return [
+                self.evaluate_actions(obs, actions, matched)
+                for obs, actions, matched in zip(obs_list, actions_list, matched_edges_list)
+            ]
         outputs = self.model.batched_forward(obs_list, self.device, want_edge_maps=False)
         arrays = outputs.edge_arrays or []
-        results: list[tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], torch.Tensor]] = []
+        # getattr, not attribute access: this policy class is shared by every
+        # model, and only v8's batched output carries the forecast field.
+        usage = getattr(outputs, "usage_logits", None) if want_usage_logits else None
+        results: list[tuple] = []
         for i, (obs, value) in enumerate(zip(
             obs_list,
             outputs.values,
         )):
+            ul = usage[i] if usage is not None else None
             node_order = list(obs.node_ids)
             if not node_order:
-                results.append(({}, {}, value))
+                results.append(({}, {}, value, ul) if want_usage_logits else ({}, {}, value))
                 continue
             src_arr, dst_arr, scores = arrays[i]
             node_pos = {node_id: j for j, node_id in enumerate(node_order)}
@@ -666,7 +829,10 @@ class MAPPOPolicy:
                 src_arr, dst_arr, scores, node_pos, matched_edges_list[i]
             )
             log_probs, entropies = self._fill_node_tensors(node_order, mean_lp, mean_entropy)
-            results.append((log_probs, entropies, value))
+            results.append(
+                (log_probs, entropies, value, ul) if want_usage_logits
+                else (log_probs, entropies, value)
+            )
         return results
 
     def log_prob_entropy_for_matching(

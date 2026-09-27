@@ -285,6 +285,14 @@ class RequestGenerator:
         self.counter = 0
         self._pairs: list[tuple[str, str]] = []
         self._pair_weights: np.ndarray | None = None
+        self.distribution_version = str(
+            self.config.get("distribution_version", "legacy_v1")
+        )
+        if self.distribution_version not in {"legacy_v1", "pairhot_v2"}:
+            raise ValueError(
+                "Unknown request distribution_version: "
+                f"{self.distribution_version!r}"
+            )
         # Timezone offset per GS node (hours from UTC, derived from longitude)
         self._tz_offsets: dict[str, int] = {}
         self._load_tz_offsets()
@@ -392,6 +400,14 @@ class RequestGenerator:
                 local_hour = ((t // steps_per_hour) + tz_off) % 24
                 w = float(weights[local_hour % len(weights)])
                 pair_rates[i] = base * w / mean_w / len(self._pairs)
+            if (
+                self.distribution_version == "pairhot_v2"
+                and self._pair_weights is not None
+            ):
+                # ``_pair_weights`` sums to one. Multiplying by N keeps the
+                # uniform case at factor 1, so Zipf changes only which pairs
+                # receive the offered load, not the configured global rate.
+                pair_rates *= len(self._pairs) * self._pair_weights
             total_rate = float(pair_rates.sum())
             n_requests = int(self.rng.poisson(total_rate))
             if n_requests <= 0:

@@ -43,6 +43,8 @@ def _run_episode(
     gae_lambda: float,
     value_target: str = "gae",
     episode_steps: int | None = None,
+    usage_horizon: int = 0,
+    usage_label_mode: str = "used",
 ):
     """Run one episode and return finished ``RolloutStep``s (CPU tensors).
 
@@ -59,6 +61,13 @@ def _run_episode(
     policy.set_sample_seed(seed)
     obs = env.reset(seed=seed)
     buffer = RolloutBuffer(gamma, gae_lambda, device="cpu", value_target=value_target)
+    # ★ 2026-09-27 修（第五个 buffer 构造点）：worker 自建 buffer 此前不设
+    #   usage_horizon ⟹ n_rollout_workers>1 时 usage_label 全为 None，
+    #   v8 辅助头静默零训练——症状与"头被关闭"逐位相同（_make_buffer 的
+    #   注释警告过的正是这类漂移；batch-1 三种子头 AUC 0.60/0.48/0.50
+    #   ≈ 随机初始化水平，与此一致）。
+    buffer.usage_horizon = int(usage_horizon)
+    buffer.usage_label_mode = str(usage_label_mode)
     rollout_debug = new_rollout_debug()
     ep_reward = 0.0
     steps = 0
@@ -132,6 +141,11 @@ def _worker_entry(config: dict, device: str, task_queue, result_queue, job_dir: 
     gamma = float(config["train"]["gamma"])
     gae_lambda = float(config["train"]["gae_lambda"])
     value_target = str(config["train"].get("value_target", "gae"))
+    _ucfg = (config.get("model", {}).get("actor", {}) or {}).get("usage_forecast", {}) or {}
+    usage_horizon = (
+        int(_ucfg.get("horizon", 0) or 0) if _ucfg.get("enabled", False) else 0
+    )
+    usage_label_mode = str(_ucfg.get("label_mode", "used") or "used")
     while True:
         task = task_queue.get()
         if task is None:
@@ -145,7 +159,8 @@ def _worker_entry(config: dict, device: str, task_queue, result_queue, job_dir: 
         # disagree and every PPO ratio/KL is systematically biased.
         policy.model.actor.temperature = float(temperature)
         steps, ep_reward, summary, rollout_debug = _run_episode(
-            env, policy, seed, rollout_steps, gamma, gae_lambda, value_target, episode_steps
+            env, policy, seed, rollout_steps, gamma, gae_lambda, value_target, episode_steps,
+            usage_horizon=usage_horizon, usage_label_mode=usage_label_mode,
         )
         path = Path(job_dir) / f"job_{seed}.pkl"
         with path.open("wb") as f:

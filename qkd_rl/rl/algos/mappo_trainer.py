@@ -95,6 +95,11 @@ class UpdateStats:
     # almost no work -- and `kl` above cannot reveal that, because it is the
     # mean over the batches that did run.
     n_minibatches: int = 0
+    # v8 辅助头可观测量（代码审查 A2.2）：每轮 BCE 均值与在线 AUC。
+    # head_bce 此前算完即弃、AUC 只能事后离线测 ⟹ “头学没学到”这一 batch-2
+    # 核心判据在训练过程中不可见。0 = 头未启用。
+    head_bce: float = 0.0
+    head_auc: float = 0.0
 
 
 class MAPPOTrainer:
@@ -229,6 +234,34 @@ class MAPPOTrainer:
         # Critic target mode: "gae" (default, standard PPO returns) or "mc"
         # (bootstrap-free returns, kept only for ablation; see RolloutBuffer).
         self.value_target = str(train_cfg.get("value_target", "gae"))
+        # v8 auxiliary usage forecast: label horizon (slots). 0 = off, which is
+        # the case for every model without a forecast head (v2/v3/v4/v6), so the
+        # label pass costs them nothing. Read once here so the four buffer
+        # construction sites cannot drift apart.
+        _usage_cfg = (self.config.get("model", {}).get("actor", {}) or {}).get(
+            "usage_forecast", {}
+        ) or {}
+        self.usage_horizon = (
+            int(_usage_cfg.get("horizon", 0) or 0)
+            if _usage_cfg.get("enabled", False)
+            else 0
+        )
+        self.usage_loss_weight = float(_usage_cfg.get("loss_weight", 0.0) or 0.0)
+        # "used" (batch 1) or "new" (batch 2). See RolloutBuffer.usage_label_mode
+        # for why "used" is dominated by persistence and yields a head worse
+        # than a copy of the current mask.
+        self.usage_label_mode = str(_usage_cfg.get("label_mode", "used") or "used")
+        # BCE 类别不平衡（代码审查 A4）："new" 标签正例率 ~10%，裸 BCE 的梯度被
+        # 海量易分负例主导。pos_weight≈(1-p)/p≈8.5。默认 0（关闭）保持既有臂
+        # 位可比；要开在 config 里显式设 usage_forecast.pos_weight。
+        self.usage_pos_weight = float(_usage_cfg.get("pos_weight", 0.0) or 0.0)
+        # 头+encoder 的持久化优化器（代码审查 A2.3）：原实现每轮新建 Adam，
+        # 动量/二阶矩清零 + bias-correction 重启 ⟹ 每轮一个冷启动步长尖峰。
+        self._usage_head_opt: torch.optim.Adam | None = None
+        # forward 失败计数（代码审查 A2.1）：静默吞异常会让头永不训练且无报错，
+        # 症状与“头被关闭”逐位相同。
+        self._usage_forward_errors = 0
+
         # Optional curriculum: a list of stages that lengthen the rollout and
         # adjust the number of parallel episodes as training progresses. The
         # trainer starts on short episodes (frequent updates, easy horizon)
@@ -250,6 +283,119 @@ class MAPPOTrainer:
             # mean success rate on the rollout is directly comparable across
             # updates and isolates learning in one scenario.
             self._seed_stride = 0
+
+    def _make_buffer(self) -> RolloutBuffer:
+        """One construction path for every rollout buffer.
+
+        Four call sites build a buffer; the usage horizon must be set on all of
+        them or the label silently goes missing (which looks exactly like "the
+        head was disabled"). Same failure shape as the four hand-written param
+        groups -- funnel it through one place instead.
+        """
+        buffer = RolloutBuffer(
+            self.gamma, self.gae_lambda, self.device, value_target=self.value_target
+        )
+        buffer.usage_horizon = int(self.usage_horizon)
+        buffer.usage_label_mode = str(self.usage_label_mode)
+        return buffer
+
+    def _train_usage_head(self, buffer: RolloutBuffer, ppo: dict) -> tuple[float, float]:
+        """One pass of BCE over the rollout, to train the v8 forecast head.
+
+        Runs AFTER the PPO epochs (see the comment in ``update``) and returns
+        ``(mean_bce, online_auc)``. Deliberately outside the epoch loop: a head
+        that is part of the scoring function must not move between the rollout
+        and the PPO ratios.
+
+        Optimises the head AND the shared encoder. The encoder is the whole
+        point of the "representation" half of v8: the forecast task is supposed
+        to shape the representation the actor uses. Stepping only the head would
+        make it a pure read-out of a frozen encoder, i.e. delete the mechanism
+        being tested. What must NOT happen is BCE touching the policy between
+        the rollout and the ratio -- and that is guaranteed by running this
+        before the epoch loop, not by excluding the encoder.
+
+        The critic is deliberately excluded: it is a value fit and BCE has
+        nothing to say about it.
+        """
+        head = getattr(self.model.actor, "usage_forecast", None)
+        if head is None or self.usage_horizon <= 0 or self.usage_loss_weight <= 0.0:
+            return 0.0, 0.0
+        steps = [s for s in buffer.steps if s.usage_label is not None]
+        if not steps:
+            return 0.0, 0.0
+        lr = float(ppo.get("usage_head_lr", ppo.get("actor_lr", 3e-4)) or 3e-4)
+        epochs = int(ppo.get("usage_head_epochs", 1) or 1)
+        bs = int(ppo.get("usage_head_batch", 256) or 256)
+        if self._usage_head_opt is None:
+            params = list(head.parameters()) + list(self.model.encoder.parameters())
+            self._usage_head_opt = torch.optim.Adam(params, lr=lr)
+        opt = self._usage_head_opt
+        pos_weight = (
+            torch.tensor(self.usage_pos_weight, device=self.device)
+            if self.usage_pos_weight > 0.0
+            else None
+        )
+        total, nb = 0.0, 0
+        for _ in range(max(1, epochs)):
+            idx = list(range(len(steps)))
+            self.rng.shuffle(idx)
+            for start in range(0, len(idx), bs):
+                chunk = [steps[i] for i in idx[start:start + bs]]
+                terms = []
+                for s in chunk:
+                    lg = self._usage_logits_for(s.obs)
+                    if lg is None or lg.numel() != s.usage_label.numel() or not lg.numel():
+                        continue
+                    terms.append(torch.nn.functional.binary_cross_entropy_with_logits(
+                        lg.clamp(-20.0, 20.0), s.usage_label.to(self.device),
+                        pos_weight=pos_weight))
+                if not terms:
+                    continue
+                loss = torch.stack(terms).mean() * float(self.usage_loss_weight)
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
+                total += float(loss.detach().cpu())
+                nb += 1
+        # 在线 AUC（代码审查 A2.2）：训练后在至多 128 个随机步上重算 logits，
+        # rank AUC。batch-1 的 AUC≈0.5（头没学到）本可以在第 2 个 update 就被
+        # 看见，而不是等整条 run 跑完离线测。负例下采样到 2000 条控内存。
+        auc = 0.0
+        with torch.no_grad():
+            sample = steps if len(steps) <= 128 else self.rng.sample(steps, 128)
+            pos_parts, neg_parts = [], []
+            for s in sample:
+                lg = self._usage_logits_for(s.obs)
+                if lg is None or lg.numel() != s.usage_label.numel() or not lg.numel():
+                    continue
+                lab = s.usage_label.to(lg.device)
+                pos_parts.append(lg[lab > 0.5])
+                neg_parts.append(lg[lab <= 0.5])
+            if pos_parts:
+                pos = torch.cat(pos_parts)
+                neg = torch.cat(neg_parts)
+                if neg.numel() > 2000:
+                    keep = torch.randperm(neg.numel(), device=neg.device)[:2000]
+                    neg = neg[keep]
+                if pos.numel() and neg.numel():
+                    gt = (pos[:, None] > neg[None, :]).float().mean()
+                    eq = (pos[:, None] == neg[None, :]).float().mean()
+                    auc = float(gt + 0.5 * eq)
+        return total / max(1, nb), auc
+
+    def _usage_logits_for(self, obs) -> torch.Tensor | None:
+        """Per-undirected-physical-edge forecast logits for one observation."""
+        try:
+            out = self.model(obs, device=self.device)
+        except Exception as exc:  # noqa: BLE001
+            # ★ 不许静默（代码审查 A2.1）：forward 全灭时头永不训练，症状与
+            #   “头被关闭”逐位相同。计数 + 前 3 次打印。
+            self._usage_forward_errors += 1
+            if self._usage_forward_errors <= 3:
+                print(f"[usage_head] forward failed #{self._usage_forward_errors}: {exc!r}")
+            return None
+        return getattr(out, "usage_logits", None)
 
     def _reset_env(self, env, seed: int, **kwargs):
         """``env.reset`` with the action-sampling RNG pinned to the same seed.
@@ -345,7 +491,7 @@ class MAPPOTrainer:
             episode_steps_list,
             temperature=float(self.model.actor.temperature),
         )
-        buffer = RolloutBuffer(self.gamma, self.gae_lambda, self.device, value_target=self.value_target)
+        buffer = self._make_buffer()
         episode_rewards: list[float] = []
         episode_summaries: list[dict] = []
         for _seed, steps, ep_reward, summary, ep_debug in results:
@@ -357,6 +503,16 @@ class MAPPOTrainer:
             # rollout_debug.jsonl stays available with n_workers > 1.
             for key, value in ep_debug.items():
                 self._rollout_debug[key] += value
+        # ★ 哨兵（2026-09-27）：worker 路径曾静默丢 usage_label（rollout_workers
+        #   的 buffer 不设 horizon，第五个构造点）。凡 usage_horizon>0 而整批
+        #   无标签，必须吼出来——这类静默失效读起来与"想法不行"逐位相同。
+        if self.usage_horizon > 0 and buffer.steps and all(
+            s.usage_label is None for s in buffer.steps
+        ):
+            print(
+                "[usage_head] WARNING: usage_horizon>0 but no rollout step "
+                "carries a usage_label -- a buffer construction site dropped it."
+            )
         self.last_episode_rewards = episode_rewards
         self.last_episode_summaries = episode_summaries
         return buffer
@@ -417,7 +573,7 @@ class MAPPOTrainer:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def _collect_rollout_serial(self) -> RolloutBuffer:
-        buffer = RolloutBuffer(self.gamma, self.gae_lambda, self.device, value_target=self.value_target)
+        buffer = self._make_buffer()
         self.model.eval()
         base_seed = int(self.config["seed"]["env_seed"]) + self.update_count * self._seed_stride
         episode_rewards: list[float] = []
@@ -512,7 +668,7 @@ class MAPPOTrainer:
         group_size = max(1, int(self.config["train"].get("rollout_batch_envs", n_ep) or n_ep))
         if group_size >= n_ep:
             return self._collect_rollout_batched()
-        buffer = RolloutBuffer(self.gamma, self.gae_lambda, self.device, value_target=self.value_target)
+        buffer = self._make_buffer()
         rewards: list[float] = []
         summaries: list[dict] = []
         for start in range(0, n_ep, group_size):
@@ -538,9 +694,7 @@ class MAPPOTrainer:
         is counterproductive. The index list is explicit rather than positional
         so a caller can rotate which seeds share a group.
         """
-        buffer = buffer if buffer is not None else RolloutBuffer(
-            self.gamma, self.gae_lambda, self.device, value_target=self.value_target
-        )
+        buffer = buffer if buffer is not None else self._make_buffer()
         self.model.eval()
         n_ep = self.episodes_per_update
         if self._rollout_envs is None:
@@ -696,6 +850,16 @@ class MAPPOTrainer:
             for replay in self._replay_buffers
             for step in replay
         ]
+        # NOTE: the v8 forecast head is trained at the END of this method, AFTER
+        # the PPO epochs -- see the comment there. It must NOT go before them.
+        # Reason: `_train_usage_head` also steps the shared ENCODER, and the
+        # encoder is the policy. Training it before the epochs would mean the
+        # rollout was collected under encoder E0, the head pass moved it to E1,
+        # and PPO then re-evaluated the stored actions under E1 -- so pi_new !=
+        # pi_old before a single policy gradient step. Measured with that
+        # ordering: kl 6.2-6.9, clip_frac ~0.93. Placing it after the epochs
+        # keeps pi fixed for the whole ratio computation.
+
         total_actor = 0.0
         total_critic = 0.0
         total_entropy = 0.0
@@ -777,6 +941,22 @@ class MAPPOTrainer:
             if stop_for_kl:
                 break
         n = max(1, total_batches)
+        # v8: train the forecast head LAST, after every PPO minibatch is done.
+        #
+        # AFTER, not before, and not inside the epoch loop -- both placements
+        # violate the same invariant. `_train_usage_head` also steps the shared
+        # encoder, which IS part of the policy, so running it anywhere before the
+        # ratios are computed means PPO re-evaluates the stored actions under a
+        # different encoder than the one that sampled them. Measured with the
+        # before-epochs ordering: kl 6.2-6.9 and clip_frac ~0.93, versus kl
+        # 0.002-0.004 at bias=0 with an identical setup.
+        #
+        # Running it last makes the forecast a function of the current policy
+        # and applies its effect from the NEXT rollout onward: the head always
+        # predicts with what the encoder has just learned, and PPO always
+        # optimises a policy whose scoring function is frozen for the update.
+        head_bce_value, head_auc_value = self._train_usage_head(buffer, ppo)
+
         mean_reward = sum(self.last_episode_rewards) / max(1, len(self.last_episode_rewards))
         success_rates = [summary.get("success_rate", 0.0) for summary in self.last_episode_summaries]
         served = [summary.get("served_keys", 0.0) for summary in self.last_episode_summaries]
@@ -820,6 +1000,8 @@ class MAPPOTrainer:
             return_std=return_std,
             value_return_corr=value_return_corr,
             n_minibatches=total_batches,
+            head_bce=head_bce_value,
+            head_auc=head_auc_value,
         )
         self.last_stats = stats
         return stats
@@ -871,6 +1053,11 @@ class MAPPOTrainer:
         #   `ratios` 本身要反传（surr1），而指示量在 `.detach()` 后不参与梯度。
         clip_terms_frac: list[torch.Tensor] = []
         critic_terms: list[torch.Tensor] = []
+        # NOTE: the v8 usage-forecast BCE is NOT here. It is applied once per
+        # update in `_train_usage_head`, AFTER the PPO epochs -- see the long
+        # comment in `update`. Folding it into the minibatch loss would move the
+        # head between the rollout and the ratio, and with bias_weight != 0 that
+        # makes pi_new != pi_old for non-PPO reasons (measured kl 5-12).
         # Batched PPO evaluation: one block-diagonal forward over many minibatch
         # graphs (chunked to bound GPU memory) instead of one forward per step.
         # The math is identical to per-step evaluation; only the CUDA kernels
@@ -885,7 +1072,9 @@ class MAPPOTrainer:
                 [step.actions for step in chunk],
                 [list(step.matched_edges or []) for step in chunk],
             )
-            for step, adv, (log_probs, entropies, value) in zip(chunk, chunk_advantages, batched_results):
+            for item in zip(chunk, chunk_advantages, batched_results):
+                step, adv = item[0], item[1]
+                (log_probs, entropies, value) = item[2]
                 node_ids = step.obs.node_ids
                 if node_ids:
                     # PPO is evaluated on the whole matching action, not on the
@@ -1041,48 +1230,23 @@ class MAPPOTrainer:
         if self._validation_envs is not None and num_episodes is None and step_limit is None:
             return self._validation_envs
 
-        import copy
-
-        window = self.validation_cfg.get("window", {}) or {}
-        start_day = int(window.get("start_day", 0))
-        end_day = int(window.get("end_day", 365))
-        seeds = [int(s) for s in (self.validation_cfg.get("request_seeds", []) or [])]
-        if not seeds:
-            seeds = list(range(7, 7 + int(self.validation_cfg.get("episodes", 3) or 3)))
-        # Optional override: number of eval episodes (REUSE the seed list by
-        # cycling, exactly like the evaluator: seed = seeds[ep % len(seeds)]).
-        if num_episodes is not None and num_episodes > 0:
-            cycles = max(1, int(num_episodes))
-            seeds = [seeds[i % len(seeds)] for i in range(cycles)]
-        episode_steps = int(step_limit) if (step_limit is not None and step_limit > 0) else 0
-        if episode_steps <= 0:
-            episode_steps = int(self.validation_cfg.get("episode_steps", 0) or 0)
-        if episode_steps <= 0:
-            # Back-compat: derive from episode_days if episode_steps not set
-            episode_days = int(self.validation_cfg.get("episode_days", 1) or 1)
-            day_steps = int(self.config["env"].get("day_steps", 1440))
-            episode_steps = episode_days * day_steps
-        day_steps = int(self.config["env"].get("day_steps", 1440))
-
-        config = copy.deepcopy(self.config)
-        # Use the canonical validation start mode (default random_day), NOT a
-        # hardcoded value, so trainer validation matches the evaluator.
-        config["env"]["episode_start_mode"] = str(
-            self.validation_cfg.get("start_mode", "random_day")
+        # 2026-09-27：配置拼装移到 test_protocol 的唯一实现，eval_expert --run
+        # 与 experiment.py evaluate 也走它（见 test_eval_task_alignment.py）。
+        from qkd_rl.evaluation.test_protocol import (
+            run_validation_env_config,
+            run_validation_seeds,
+            task_fingerprint,
         )
-        config["env"]["episode_steps"] = episode_steps
-        config["env"]["continuous"] = False
-        config["env"]["activation_window_start_day"] = start_day
-        config["env"]["activation_window_end_day"] = end_day
-        config["env"]["activation_window_days"] = max(0, end_day - start_day)
-        config["scenario"]["time_limit"]["days"] = end_day + max(
-            1, math.ceil(episode_steps / day_steps)
-        )
+
+        # num_episodes: REUSE the seed list by cycling (seed = seeds[ep % len]).
+        seeds = run_validation_seeds(self.validation_cfg, num_episodes)
+        config = run_validation_env_config(self.config, self.validation_cfg, step_limit)
         config["seed"]["env_seed"] = seeds[0]
 
         from qkd_rl.env.factory import build_env_from_config
 
         self._validation_seeds = seeds
+        self._validation_task_fingerprint = task_fingerprint(config)
         self._validation_envs = [build_env_from_config(config) for _ in seeds]
         return self._validation_envs
 
@@ -1134,6 +1298,8 @@ class MAPPOTrainer:
             )
             / max(1, len(summaries)),
             "seeds": list(self._validation_seeds),
+            # 任务指纹：与 eval_expert --run 的输出比对，不同则不可配对。
+            "task_fingerprint": getattr(self, "_validation_task_fingerprint", None),
             # Per-seed values, aligned with `seeds` above (envs and
             # `_validation_seeds` are built from the same list, in order).
             #

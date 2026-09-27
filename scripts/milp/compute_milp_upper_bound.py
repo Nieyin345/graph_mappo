@@ -91,6 +91,9 @@ def main():
                              "printed bound is only a loose LP/dual bound. Use 30-60 for "
                              "a converged window optimum (tight bound, but a receding-"
                              "horizon approximation of the global optimum).")
+    parser.add_argument("--overlay", action="append", default=[],
+                        help="extra config yaml(s) merged over the env config, e.g. "
+                             "load_x20.yaml（高负载 regime 的上界，论文实验计划 §3/§5）")
     args = parser.parse_args()
 
     profile = _validation_profile()
@@ -110,6 +113,15 @@ def main():
           f"episode_steps={episode_steps} seeds={seeds} start_seed={profile['start_seed']}", flush=True)
 
     config = _build_config(profile, start_mode, episode_steps)
+    if args.overlay:
+        from pathlib import Path as _P
+        from qkd_rl.core.config import deep_merge as _dm, load_config as _lc
+        for _name in args.overlay:
+            _p = _P(_name)
+            if not _p.exists():
+                _p = ROOT / "configs" / _name
+            config = _dm(config, _lc([_p]))
+            print(f"overlay merged: {_p.name}", flush=True)
     env = build_env_from_config(config)
 
     from qkd_rl.baselines.receding_horizon_milp import RecedingHorizonMILPPolicy

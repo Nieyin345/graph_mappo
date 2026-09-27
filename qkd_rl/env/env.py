@@ -135,6 +135,14 @@ class QKDEnv:
             self.history_buffer.reset()
         self.metrics.reset()
         self.reward_fn.reset()
+        # ★ 2026-09-27 修（代码审查 A3）：graph_builder 携带跨步衰减状态
+        #   （_v31_edge_use/_v31_edge_shortage/_path_recency），此前只在时间
+        #   倒退时自清零 ⟹ 新回合起始 t 晚于上一回合末尾时，残值按 0.99^gap
+        #   进入新回合，同 seed 读数依赖回合执行顺序。reset 时显式清零；
+        #   getattr 兼容没有该方法的旧 builder（v2/env 基类无衰减状态）。
+        reset_episode = getattr(self.graph_builder, "reset_episode", None)
+        if callable(reset_episode):
+            reset_episode()
         self.steps = 0
         self.last_activated_edges = []
         self.last_matched_arcs = []

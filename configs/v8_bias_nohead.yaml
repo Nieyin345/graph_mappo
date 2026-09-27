@@ -1,0 +1,8 @@
+# Diagnostic only: bias ON, but the head never trained (loss_weight 0).
+# Isolates "the bias alone breaks the ratio" from "training the head while the
+# bias is on breaks the ratio".
+model:
+  actor:
+    usage_forecast:
+      bias_weight: 4.0
+      loss_weight: 0.0

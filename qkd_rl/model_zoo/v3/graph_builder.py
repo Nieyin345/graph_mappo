@@ -184,6 +184,18 @@ class GraphBuilder:
             for node_id, incident in self._node_incident_ids.items()
         }
 
+    def reset_episode(self) -> None:
+        """清零跨步衰减状态（由 ``QKDEnv.reset`` 调用）。
+
+        ★ 2026-09-27（代码审查 A3）：这些计数器此前只在时间倒退时清零；
+        新回合起始 t 晚于上一回合末尾时残值按 0.99^gap 泄漏进新回合，
+        使同 seed 读数依赖回合执行顺序（串行 vs 复用 env vs worker）。"""
+        self._v31_history_t = None
+        for edge_id in self._v31_edge_use:
+            self._v31_edge_use[edge_id] = 0.0
+        for edge_id in self._v31_edge_shortage:
+            self._v31_edge_shortage[edge_id] = 0.0
+
     def build(
         self,
         env_state: EnvState,

@@ -1,0 +1,21 @@
+# v8 behavioural arm: the "active preparation" ablation, on the batch-2 design.
+#
+# v8's model config is the REPRESENTATION-ONLY arm (bias_weight 0 keeps the
+# forecast from touching any decision). This overlay turns the bias on, so the
+# pair (this - v8loss) isolates "acting on the forecast" from "a better
+# encoder". The base design (label "new", recency feature, pos_weight) is
+# identical in both.
+#
+# ★ 2026-09-27 起 bias 为 z-score 语义（见 model_zoo/v8/config.yaml 的说明）：
+#   bias = w · zscore_graph(tanh(logit))，w 直接就是"分数 std 的倍数"。
+# 标定史（两次失效，方向相反，都源于用错误基准换算 tanh 的绝对尺度）：
+#   batch-1  w=0.01（按未训练分数 std）→ 实际 0.05% score std，无操作臂；
+#   batch-2旧 w=4   （按 "used" 头 |tanh|≈0.05）→ "new" 标签下 tanh 饱和，
+#            实际 ≈4 score std，kl 5-12 / clip_frac≈1.0，PPO 死亡臂。
+# z-score 后 w 无需再随头/标签重标定：
+#   w=0.2 -> 偏置 std = 20% 分数 std（温和推动，本臂取值）
+#   w=1.0 -> 与注意力分数同量级（备用强臂，仅在 0.2 有正向信号后再试）
+model:
+  actor:
+    usage_forecast:
+      bias_weight: 0.2

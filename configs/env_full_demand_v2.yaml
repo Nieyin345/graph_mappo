@@ -1,0 +1,10 @@
+# Request-distribution v2: combine the local-time daily profile with the
+# configured fixed GS-pair hotness. Load after env_full.yaml.
+#
+# Legacy experiments intentionally omit this overlay and retain legacy_v1,
+# where the timezone-aware branch bypassed pair_hotness. Results across the
+# two distribution versions are different tasks and must not be compared as
+# model-only ablations.
+requests:
+  distribution_version: pairhot_v2
+

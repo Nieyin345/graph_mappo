@@ -415,9 +415,18 @@ class RecedingHorizonMILPPolicy:
         rates_all, avail_all = self._window_rates_avail(t0, W)
         window_avail = avail_all.max(axis=0) >= 0.5
         full_idx = {eid: i for i, eid in enumerate(self._edge_ids)}
-        edges = [eid for eid, ok in zip(self._edge_ids, window_avail) if ok]
+        # ★ 2026-09-27：只建模环境里真实注册的边。费率表(provider)覆盖全星座
+        #   链路，含未被 GS 选择(gs mode:smart)纳入的站点（实测 SanFrancisco）
+        #   ——那些边在环境里不存在（不在 qkp/action space），此前直接撞
+        #   _require_finite_capacities 的 fail-loudly。过滤同时保证 MILP 与
+        #   RL/专家同一拓扑，上界口径公平。
+        registered = obs.state.qkp_capacity or {}
+        edges = [
+            eid for eid, ok in zip(self._edge_ids, window_avail)
+            if ok and eid in registered
+        ]
         if len(edges) == 0:
-            edges = list(self._edge_ids)  # degenerate fallback
+            edges = [eid for eid in self._edge_ids if eid in registered]
         sel = np.asarray([full_idx[e] for e in edges], dtype=np.int64)
         n_edges = len(edges)
         rates = rates_all[:, sel]  # (W, n_edges)

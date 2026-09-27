@@ -151,6 +151,57 @@ def test_request_generator_rejects_unknown_pair_hotness():
         RequestGenerator(["GS_001", "GS_002"], cfg, seed=0)
 
 
+def test_pairhot_v2_combines_timezone_profile_with_zipf_hotness():
+    """v2 keeps Zipf concentration when the timezone branch is active."""
+    from qkd_rl.env.request import RequestGenerator
+
+    gs = ["GS_001", "GS_002", "GS_003", "GS_004"]
+    cfg = {
+        "arrival_rate": 20.0,
+        "amount_mean": 10.0,
+        "deadline_steps": 12,
+        "steps_per_hour": 60,
+        "hourly_weights": [1.0] * 24,
+        "pair_hotness": "zipf",
+        "pair_zipf_s": 1.0,
+        "pair_seed": 0,
+        "distribution_version": "pairhot_v2",
+    }
+    gen = RequestGenerator(gs, cfg, seed=7)
+    gen._tz_offsets = {node: 0 for node in gs}
+    counts = {pair: 0 for pair in gen._pairs}
+    for t in range(1200):
+        for req in gen.generate(t):
+            pair = tuple(sorted((req.src_gs, req.dst_gs)))
+            counts[pair] += 1
+
+    values = sorted(counts.values())
+    assert values[-1] > values[0] * 2.5
+    assert 18.0 < sum(values) / 1200.0 < 22.0
+
+
+def test_request_generator_rejects_unknown_distribution_version():
+    from qkd_rl.env.request import RequestGenerator
+
+    cfg = {
+        "arrival_rate": 1.0,
+        "amount_mean": 10.0,
+        "distribution_version": "future_v99",
+    }
+    with pytest.raises(ValueError, match="distribution_version"):
+        RequestGenerator(["GS_001", "GS_002"], cfg, seed=0)
+
+
+def test_pairhot_v2_overlay_selects_new_distribution():
+    from pathlib import Path
+    import yaml
+
+    cfg = yaml.safe_load(
+        Path("configs/env_full_demand_v2.yaml").read_text(encoding="utf-8")
+    )
+    assert cfg["requests"]["distribution_version"] == "pairhot_v2"
+
+
 def test_request_generator_yaml_config_drives_pattern():
     """The shipped env_full.yaml request block must construct and show the
     intra-day + zipf pattern (yaml -> code contract for the new keys)."""
