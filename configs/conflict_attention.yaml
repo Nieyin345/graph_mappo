@@ -1,0 +1,8 @@
+# 端口冲突注意力（2026-09-27，实验日志 §11.15）：每条候选弧 attend 到与它争同一端口的候选弧，
+# 零初始化残差加在基础打分上。叠在 no_attention.yaml + v8_bias.yaml 之上使用（单变量对照 = noattbias）。
+# 新参数不在 BC 检查点里 ⟹ resume 时按缺失键处理（零初始化 ⟹ 首次前向与对照逐位相同）。
+model:
+  actor:
+    conflict_attention:
+      enabled: true
+      num_heads: 4

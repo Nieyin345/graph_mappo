@@ -562,6 +562,77 @@ class PathEdgeResidual(nn.Module):
         return self.out(ctx).squeeze(-1)
 
 
+def conflict_mask(src: torch.Tensor, dst: torch.Tensor) -> torch.Tensor:
+    """Port-conflict relation among candidate arcs, ``(n, n)`` bool, zero diagonal.
+
+    Every node has exactly one Tx and one Rx port, so arc ``u->v`` competes with
+    every other arc leaving ``u`` (same Tx) and every other arc entering ``v``
+    (same Rx). The reverse arc ``v->u`` is added as well: it activates the same
+    physical edge, so the two are redundant rather than complementary.
+    """
+    s = src.view(-1, 1)
+    d = dst.view(-1, 1)
+    m = (s == s.T) | (d == d.T) | ((s == d.T) & (d == s.T))
+    if m.numel():
+        m.fill_diagonal_(False)
+    return m
+
+
+class ConflictResidual(nn.Module):
+    """Arc-to-arc attention restricted to arcs that compete for the same port.
+
+    Failure anatomy (experiment log 11.12) puts port conflicts as the largest
+    controllable loss once lookahead/prestock were ruled out (11.13-11.14). The
+    base scorer rates every candidate arc independently; the matching sampler
+    only enforces feasibility, so an arc's score never reflects who else wants
+    its ports. Here each arc attends over its conflict set and a zero-initialised
+    MLP maps ``[own projection, conflict context]`` to a residual score.
+
+    Arcs with an empty conflict set get exactly 0 (no NaN from an all-masked
+    softmax). Zero-init of the last layer keeps the first forward pass equal to
+    the base model, so an existing BC checkpoint remains a valid warm start.
+    """
+
+    def __init__(self, arc_dim: int, hidden_dim: int, num_heads: int, activation: str, dropout: float):
+        super().__init__()
+        self.hidden_dim = int(hidden_dim)
+        self.num_heads = int(num_heads)
+        if hidden_dim % self.num_heads != 0:
+            raise ValueError("conflict_attention hidden_dim must be divisible by num_heads")
+        self.arc_proj = nn.Linear(arc_dim, hidden_dim)
+        self.key_proj = nn.Linear(arc_dim, hidden_dim)
+        self.value_proj = nn.Linear(arc_dim, hidden_dim)
+        self.out = build_mlp(2 * hidden_dim, [hidden_dim], 1, activation, dropout)
+        last = self.out[-1]
+        if isinstance(last, nn.Linear):
+            nn.init.zeros_(last.weight)
+            nn.init.zeros_(last.bias)
+
+    def forward(self, pair_emb: torch.Tensor, src: torch.Tensor, dst: torch.Tensor) -> torch.Tensor:
+        n = pair_emb.size(0)
+        if n == 0:
+            return pair_emb.new_zeros((0,))
+        mask = conflict_mask(src.to(pair_emb.device), dst.to(pair_emb.device))
+        has = mask.any(dim=1)
+        if not bool(has.any()):
+            return pair_emb.new_zeros((n,))
+        h, nh = self.hidden_dim, self.num_heads
+        dh = h // nh
+        own = self.arc_proj(pair_emb)
+        q = own.view(n, nh, dh)
+        k = self.key_proj(pair_emb).view(n, nh, dh)
+        v = self.value_proj(pair_emb).view(n, nh, dh)
+        logits = torch.einsum("ahd,bhd->ahb", q, k) / math.sqrt(dh)
+        # Rows with no conflict are unmasked to 0 before the softmax (avoids NaN)
+        # and zeroed after it via `has`.
+        keep = (mask | ~has.view(-1, 1)).view(n, 1, n)
+        logits = logits.masked_fill(~keep, float("-inf"))
+        attn = torch.softmax(logits, dim=-1)
+        ctx = torch.einsum("ahb,bhd->ahd", attn, v).reshape(n, h)
+        out = self.out(torch.cat([own, ctx], dim=-1)).squeeze(-1)
+        return out * has.to(out.dtype)
+
+
 class UsageForecastHead(nn.Module):
     """Auxiliary head: will this physical edge be on a request path soon?
 
@@ -835,6 +906,23 @@ class SharedNodeActor(nn.Module):
                 activation=activation,
                 dropout=dropout,
             )
+        self.conflict_residual = None
+        cf_cfg = config["actor"].get("conflict_attention", {}) or {}
+        if cf_cfg.get("enabled", False):
+            if self.attention_only:
+                raise ValueError("conflict_attention is a residual on the base scorer; incompatible with attention_only")
+            # fork_rng: building this module must not advance the global RNG,
+            # otherwise every module initialised after it (e.g. the usage head,
+            # which is not in the BC checkpoint) would get different weights
+            # and the arm would differ from its control in more than one variable.
+            with torch.random.fork_rng(devices=[]):
+                self.conflict_residual = ConflictResidual(
+                    arc_dim=edge_scorer_input_dim,
+                    hidden_dim=hidden_dim,
+                    num_heads=int(cf_cfg.get("num_heads", 4)),
+                    activation=activation,
+                    dropout=dropout,
+                )
         self.pair_path_scorer = None
         pair_cfg = config["actor"].get("pair_path_attention", {}) or {}
         if pair_cfg.get("enabled", False):
@@ -1093,6 +1181,8 @@ class SharedNodeActor(nn.Module):
                 edge_scores = edge_scores + self.path_edge_residual(
                     pair_emb, physical_emb, path_edge_mask
                 )
+            if self.conflict_residual is not None:
+                edge_scores = edge_scores + self.conflict_residual(pair_emb, src_t, dst_t)
             if self.pair_path_scorer is not None:
                 if physical_path_tokens is None or demand_emb is None:
                     raise ValueError("pair path attention requires physical and demand tokens")
@@ -1704,6 +1794,21 @@ class GraphMAPPOActorCritic(nn.Module):
                     mask_t = torch.as_tensor(mask, dtype=torch.bool, device=device)
                     resid_parts.append(self.actor.path_edge_residual(
                         pair_emb[arc_lo:arc_hi], graph_phys, mask_t
+                    ))
+                if resid_parts:
+                    edge_scores = edge_scores + torch.cat(resid_parts, dim=0)
+            if self.actor.conflict_residual is not None:
+                # Per-graph slices: conflicts exist only inside one graph. The
+                # batched src/dst carry a per-graph node offset, which leaves
+                # equality comparisons within a slice unchanged.
+                resid_parts = []
+                for i in range(len(plans)):
+                    n_arc_i = int(plans[i][0].size)
+                    if n_arc_i == 0:
+                        continue
+                    arc_lo, arc_hi = edge_score_off[i], edge_score_off[i] + n_arc_i
+                    resid_parts.append(self.actor.conflict_residual(
+                        pair_emb[arc_lo:arc_hi], src_t[arc_lo:arc_hi], dst_t[arc_lo:arc_hi]
                     ))
                 if resid_parts:
                     edge_scores = edge_scores + torch.cat(resid_parts, dim=0)
