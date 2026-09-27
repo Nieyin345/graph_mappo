@@ -1,0 +1,11 @@
+# 关掉 v8 的使用预测头与 path_recency 特征 ⟹ v8 代码退化为 v3
+#（v8/__init__.py：usage_forecast.enabled=false 时与 v3 逐位一致；recency
+# 列不加）。用于 2×2 析因里"无预测"的两格，见 configs/no_attention.yaml。
+model:
+  actor:
+    usage_forecast:
+      enabled: false
+      bias_weight: 0.0
+features:
+  edge:
+    include_path_recency: false

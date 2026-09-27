@@ -1,0 +1,7 @@
+# 复现 v3/screen_bc 的 BC 条件（2026-09-25 生成时 env_full_demand_v2.yaml
+# 还没有 pairhot_v2，负载 1×）：只把请求分布改回 legacy_v1。
+# 用法：experiment.py train --model v8 --bc --bc-only --bc-episodes 8 \
+#   --config env_full_demand_v2.yaml --config no_attention.yaml \
+#   --config forecast_off.yaml --config bc_legacy_requests.yaml --config cpu8.yaml
+requests:
+  distribution_version: legacy_v1

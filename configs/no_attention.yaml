@@ -1,0 +1,14 @@
+# 注意力消融（2026-09-27）：v8 骨架上关掉 pair-path 注意力，边打分退回
+# v2 式 MLP（[node_src, node_dst, edge_emb] -> score）。编码器、需求边、
+# 预测头、path_recency 特征都不动 ⟹ 与 v8/v3 只差"注意力"这一项。
+#
+# 2×2 析因（同一 v8 代码，BC 起点见 docs/实验日志.md §11.7）：
+#   v3（= v8 + forecast_off.yaml）          注意力 ✓  预测 ✗
+#   v8 + v8_bias.yaml                      注意力 ✓  预测 ✓
+#   v8 + no_attention + forecast_off       注意力 ✗  预测 ✗
+#   v8 + no_attention + v8_bias            注意力 ✗  预测 ✓
+model:
+  actor:
+    attention_only: false
+    pair_path_attention:
+      enabled: false
