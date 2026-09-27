@@ -107,6 +107,12 @@ class LazyEdgeWindows:
         idx = self._provider.edge_link_ids(edge_ids)
         return self._blocks[0][0][idx]
 
+    def avail_lookahead(self, link_idx: np.ndarray, steps: int) -> np.ndarray:
+        """``(steps, len(link_idx))`` availability for slots ``t+1 .. t+steps``."""
+        if self._provider is None:
+            raise RuntimeError("avail_lookahead needs the live provider (not available after unpickling)")
+        return self._provider.get_avail_lookahead(self._t, steps)[:, link_idx]
+
 
 class RateProvider(Protocol):
     def setup(self, edges: list[Edge], horizon: int, min_link_rate: float) -> None:
@@ -356,23 +362,8 @@ class H5RateProvider:
         if self.negative_rate_policy == "raise" and np.any(np.nan_to_num(rates_block, nan=0.0) < 0.0):
             raise ValueError("Negative rate encountered with rate.negative_rate_policy=raise.")
         rates_clean = np.where(np.isnan(rates_block), 0.0, np.maximum(rates_block, 0.0))
-        rate_ok = rates_clean >= self.min_link_rate
         source = self.availability_source
-        if self._has_los:
-            los_block = self._read_dataset_rows(self.los_dataset_key, t0, t1)
-            los_ok = los_block == 1
-            if source == "los":
-                avail = los_ok
-            elif source == "rate":
-                avail = rate_ok
-            elif source == "los_and_rate":
-                avail = los_ok & rate_ok
-            else:
-                raise ValueError(f"Unknown availability_source: {source!r}")
-        else:
-            # Lean H5 (k_max only): los is redundant because k_max=0 whenever
-            # los=0, so with min_link_rate>0 availability reduces to rate>=min.
-            avail = rate_ok
+        avail = self._availability_block(rates_clean, t0, t1)
         rates_norm = self._normalize_block(rates_clean)
         # Pad short blocks (dataset end) according to out_of_range_policy.
         n = rates_clean.shape[0]
@@ -423,6 +414,52 @@ class H5RateProvider:
         self._blocks_t = t
         self._blocks = (rates_clean, avail, rates_norm)
         return self._blocks
+
+    def _availability_block(self, rates_clean: np.ndarray, r0: int, r1: int) -> np.ndarray:
+        """Availability of dataset rows ``[r0, r1)`` given their cleaned rates.
+
+        The one shared implementation for block reads (``get_window_blocks``
+        and ``get_avail_lookahead``), so the lookahead can never disagree with
+        the availability the env actually uses.
+        """
+        rate_ok = rates_clean >= self.min_link_rate
+        if not self._has_los:
+            # Lean H5 (k_max only): los is redundant because k_max=0 whenever
+            # los=0, so with min_link_rate>0 availability reduces to rate>=min.
+            return rate_ok
+        los_ok = self._read_dataset_rows(self.los_dataset_key, r0, r1) == 1
+        source = self.availability_source
+        if source == "los":
+            return los_ok
+        if source == "rate":
+            return rate_ok
+        if source == "los_and_rate":
+            return los_ok & rate_ok
+        raise ValueError(f"Unknown availability_source: {source!r}")
+
+    def get_avail_lookahead(self, t: int, steps: int) -> np.ndarray:
+        """``(steps, L)`` availability for slots ``t+1 .. t+steps`` (contact plan).
+
+        2026-09-27: long-horizon lookahead for ``features.edge.contact_lookahead``,
+        independent of ``prediction_horizon`` so the existing window block (and
+        every feature/mask derived from it) is unchanged. Slots beyond the
+        dataset end are unavailable. Cached for the last ``(t, steps)``.
+        """
+        key = (int(t), int(steps))
+        if getattr(self, "_lookahead_key", None) == key:
+            return self._lookahead
+        r0 = min(max(t + 1, 0), self._T)
+        r1 = min(max(t + 1 + steps, 0), self._T)
+        if r1 > r0:
+            rates = self._read_dataset_rows(self.rate_dataset_key, r0, r1)
+            rates_clean = np.where(np.isnan(rates), 0.0, np.maximum(rates, 0.0))
+            avail = self._availability_block(rates_clean, r0, r1)
+        else:
+            avail = np.zeros((0, self._L), dtype=bool)
+        if avail.shape[0] < steps:
+            avail = np.concatenate([avail, np.zeros((steps - avail.shape[0], self._L), dtype=bool)], axis=0)
+        self._lookahead_key, self._lookahead = key, avail
+        return avail
 
     def edge_window_from_blocks(self, edge_id: str, blocks) -> EdgeWindow:
         """Materialize one ``EdgeWindow`` from a cached window block."""

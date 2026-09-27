@@ -115,6 +115,15 @@ class ConfigValidator:
         # 通路提示特征：两端点距最近需求源/宿共 4 个 hop 值。
         if edge_cfg.get("include_req_hop", False):
             edge_dim += 4
+        # 接触计划前瞻（2026-09-27）：未来 steps 步可见性分 buckets 桶 + 当前接触剩余 + 之后间隙。
+        # 列追加在物理边特征最末（见 model_zoo/v8/graph_builder.py），前面的列序不变。
+        lookahead_cfg = edge_cfg.get("contact_lookahead") or {}
+        if lookahead_cfg.get("enabled", False):
+            la_steps = int(lookahead_cfg.get("steps", 120))
+            la_buckets = int(lookahead_cfg.get("buckets", 8))
+            if la_buckets <= 0 or la_steps <= 0 or la_steps % la_buckets:
+                raise ValueError("contact_lookahead.steps must be a positive multiple of buckets")
+            edge_dim += la_buckets + 2
 
         demand_edge_dim = 0
         if demand_edge_cfg.get("enabled", False):

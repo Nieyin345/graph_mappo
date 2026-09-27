@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from qkd_rl.core.types import Edge, LinkType, Node, NodeType
+from qkd_rl.env.contact_features import contact_lookahead_features
 from qkd_rl.env.action_space import NodeActionSpace
 from qkd_rl.env.qkp import LinkQKPPool
 from qkd_rl.env.request import DemandEdgeStats, RequestHistoryTracker, RequestQueue
@@ -1090,6 +1091,13 @@ class GraphBuilder:
                 cols.append(path_recency[active_pos])
             else:
                 cols.append(np.zeros(len(active_ids), dtype=np.float32))
+        # 接触计划前瞻（2026-09-27，实验日志 §11.12）：放在最末，前面列序不变。
+        lookahead_cfg = edge_cfg.get("contact_lookahead") or {}
+        if lookahead_cfg.get("enabled", False):
+            la_steps = int(lookahead_cfg.get("steps", 120))
+            la_buckets = int(lookahead_cfg.get("buckets", 8))
+            future = env_state.edge_windows.avail_lookahead(link_idx, la_steps)
+            cols.append(contact_lookahead_features(future, la_buckets))
         dyn = np.column_stack(cols) if cols else np.zeros((len(active_ids), 0), dtype=np.float32)
         static_rows = self._edge_static_arr[active_pos]
         rows = np.concatenate(
@@ -1115,6 +1123,8 @@ class GraphBuilder:
     ) -> list[list[float]]:
         """Legacy per-window loop for directly-constructed windows (tests)."""
         horizon = int(edge_cfg.get("prediction_horizon", 0))
+        if (edge_cfg.get("contact_lookahead") or {}).get("enabled", False):
+            raise ValueError("contact_lookahead needs the vectorized block path (live rate provider)")
         rows: list[list[float]] = []
         for edge in active_edges:
             window = env_state.edge_windows[edge.edge_id]
