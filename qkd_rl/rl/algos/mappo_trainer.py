@@ -28,6 +28,7 @@ from qkd_rl.rl.algos.checkpoint_compat import (
     _upgrade_optimizer_state_for_model,
     _upgrade_state_dict_for_model,
     build_param_groups,
+    edge_layout_from_configs,
 )
 
 
@@ -1444,11 +1445,18 @@ class MAPPOTrainer:
         # ★ 不再直接 `load_state_dict`（默认 strict=True，形状一变就抛异常，
         #   于是"改结构"被迫等于"丢暖启动"）。先让 checkpoint 适配当前结构：
         #   能靠**末维补零**救回的键就救（救回后前向逐位等价），其余才丢。
+        # ★ 2026-09-28：边特征行是 [物理块 | 需求块]，新增物理特征（path_recency 等）
+        #   落在物理块末尾 = 行的中间。按新旧 config 的块宽把零列插到正确位置；
+        #   原来一律补在行末 ⟹ 需求块权重整体错一列（暖启动被打乱，并非等价）。
+        edge_layout = edge_layout_from_configs(data.config, self.config)
         state, widened, dropped, missing, unexpected = _upgrade_state_dict_for_model(
-            self.model, data.model_state
+            self.model, data.model_state, edge_layout=edge_layout
         )
         if widened:
-            print("checkpoint 结构升级：加宽 %d 个键（新增维置零 ⟹ 前向逐位等价）" % len(widened))
+            print("checkpoint 结构升级：加宽 %d 个键（新增维置零；边特征布局 %s ⟹ %s）" % (
+                len(widened), edge_layout,
+                "零列插在旧物理块末尾" if edge_layout and edge_layout[1] == edge_layout[3]
+                and edge_layout[2] > edge_layout[0] else "零列补在行末"))
             for w in widened:
                 print("    + %s" % w)
         if dropped:
@@ -1489,7 +1497,7 @@ class MAPPOTrainer:
             #   （KeyError）。改为按**参数名**重映射后直接装 `optimizer.state`
             #   —— 详见 `_upgrade_optimizer_state_for_model` 的说明。
             direct_state, msgs = _upgrade_optimizer_state_for_model(
-                self.model, self.optimizer, data.optimizer_state
+                self.model, self.optimizer, data.optimizer_state, edge_layout=edge_layout
             )
             for msg in msgs:
                 print("checkpoint " + msg if msg.startswith("优化器") else msg)

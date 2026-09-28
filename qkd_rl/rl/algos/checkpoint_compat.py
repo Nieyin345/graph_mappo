@@ -31,8 +31,46 @@ def _expand_last_dim(t: torch.Tensor, new_dim: int) -> torch.Tensor:
     return torch.cat([t, t.new_zeros(pad)], dim=-1)
 
 
+def _widen_last_dim(
+    t: torch.Tensor, new_dim: int, edge_layout: tuple[int, int, int, int] | None = None
+) -> torch.Tensor:
+    """Widen the last dim with zeros -- at the right PLACE for raw edge inputs.
+
+    Edge feature rows are ``[physical block | demand block | trailing extras]``.
+    A new PHYSICAL feature (e.g. ``include_path_recency``) lands at the end of
+    the physical block, i.e. in the middle of the row. Appending the zero column
+    at the end of the row (``_expand_last_dim``) would shift every demand-block
+    weight by one column -- a scrambled warm start, not an equivalent one
+    (found 2026-09-28: the recency-only arm's update-0 differed from its control).
+
+    ``edge_layout = (old_phys, old_dem, new_phys, new_dem)`` from the checkpoint
+    and current configs. The zeros are inserted at ``old_phys`` when the tensor
+    is a raw-edge-input weight (its width matches the old row, the target width
+    the new one, with identical trailing extras), the demand block is unchanged
+    and only the physical block grew. Anything else keeps the append rule.
+    """
+    if edge_layout is not None:
+        old_p, old_d, new_p, new_d = (int(x) for x in edge_layout)
+        extra_old = t.size(-1) - (old_p + old_d) if t.dim() else -1
+        extra_new = new_dim - (new_p + new_d)
+        if old_d == new_d and new_p > old_p and extra_old == extra_new and extra_old >= 0:
+            pad = list(t.shape[:-1]) + [new_p - old_p]
+            return torch.cat([t[..., :old_p], t.new_zeros(pad), t[..., old_p:]], dim=-1)
+    return _expand_last_dim(t, new_dim)
+
+
+def edge_layout_from_configs(old_config: dict | None, new_config: dict | None):
+    """``(old_phys, old_dem, new_phys, new_dem)`` from two resolved configs, or None."""
+    def dims(cfg):
+        d = ((cfg or {}).get("features") or {}).get("dims") or {}
+        p, q = d.get("physical_edge_dim_resolved"), d.get("demand_edge_dim_resolved")
+        return (int(p), int(q)) if isinstance(p, int) and isinstance(q, int) else None
+    old, new = dims(old_config), dims(new_config)
+    return (old[0], old[1], new[0], new[1]) if old and new else None
+
+
 def _upgrade_state_dict_for_model(
-    model: torch.nn.Module, state: dict
+    model: torch.nn.Module, state: dict, edge_layout: tuple[int, int, int, int] | None = None
 ) -> tuple[dict, list[str], list[str], list[str], list[str]]:
     """把 checkpoint 的 state_dict 适配到**当前**模型的结构上。
 
@@ -66,7 +104,7 @@ def _upgrade_state_dict_for_model(
         elif tuple(old.shape) == tuple(v.shape):
             out[k] = old
         elif old.dim() >= 1 and old.shape[:-1] == v.shape[:-1] and old.size(-1) < v.size(-1):
-            out[k] = _expand_last_dim(old, v.size(-1))
+            out[k] = _widen_last_dim(old, v.size(-1), edge_layout)
             widened.append("%s %s→%s" % (k, tuple(old.shape), tuple(v.shape)))
         else:
             out[k] = v
@@ -164,7 +202,8 @@ def build_param_groups(model: torch.nn.Module, policy_lr: float, critic_lr: floa
 
 
 def _upgrade_optimizer_state_for_model(
-    model: torch.nn.Module, optimizer: torch.optim.Optimizer, opt_state: dict
+    model: torch.nn.Module, optimizer: torch.optim.Optimizer, opt_state: dict,
+    edge_layout: tuple[int, int, int, int] | None = None,
 ) -> list[str]:
     """把 checkpoint 的**优化器**状态适配到当前结构上（就地修改 ``opt_state``）。
 
@@ -329,7 +368,7 @@ def _upgrade_optimizer_state_for_model(
                 n_ok += 1
             elif (t.dim() >= 1 and t.shape[:-1] == cur_shape[:-1]
                   and t.size(-1) < cur_shape[-1]):
-                fixed[k] = _expand_last_dim(t, cur_shape[-1])
+                fixed[k] = _widen_last_dim(t, cur_shape[-1], edge_layout)
                 n_widen += 1
                 msgs.append("    + %s.%s %s→%s（新增列置零 ⟹ 无动量近似）"
                             % (name, k, tuple(t.shape), cur_shape))
