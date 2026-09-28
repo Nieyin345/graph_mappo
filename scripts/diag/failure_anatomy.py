@@ -196,7 +196,8 @@ class Recorder:
         return rows
 
 
-def run_rl(run: Path, seeds: list[int], threads: int):
+def run_rl(run: Path, seeds: list[int], threads: int, decode: str = "greedy",
+           decode_beta: float = 0.0):
     from qkd_rl.core.config import load_config
     from qkd_rl.evaluation.test_protocol import run_validation_env_config
     from qkd_rl.model_zoo import build_model
@@ -215,7 +216,7 @@ def run_rl(run: Path, seeds: list[int], threads: int):
     model = build_model(env.action_resolver.action_space, config)
     model.load_state_dict(load_checkpoint(run / "checkpoint_final.pt", "cpu").model_state)
     model.eval()
-    policy = MAPPOPolicy(model, "cpu")
+    policy = MAPPOPolicy(model, "cpu", deterministic_decode=decode, decode_beta=decode_beta)
     trainer = MAPPOTrainer(env, policy, config, run, device="cpu")
     needs_scores, resolver_mode = trainer._needs_edge_scores, trainer.resolver_mode
     for seed in seeds:
@@ -316,12 +317,15 @@ def main() -> None:
     ap.add_argument("--overlay", action="append", default=[])
     ap.add_argument("--threads", type=int, default=2)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--decode", choices=["greedy", "max_weight"], default="greedy",
+                    help="RL 确定性解码（改进 1a）；默认 greedy 与旧结果一致")
+    ap.add_argument("--decode-beta", type=float, default=0.0)
     args = ap.parse_args()
     out_path = Path(args.out)
     if out_path.exists():
         raise FileExistsError(f"{out_path} 已存在（outputs 只增不改）")
     run, seeds = Path(args.run), parse_seeds(args.seeds)
-    gen = run_rl(run, seeds, args.threads) if args.policy == "rl" else run_expert(run, seeds, args.overlay)
+    gen = run_rl(run, seeds, args.threads, args.decode, args.decode_beta) if args.policy == "rl" else run_expert(run, seeds, args.overlay)
     all_rows, per_seed, arrived_tot = [], {}, 0.0
     for seed, env, rec in gen:
         s = env.metrics.episode_summary()
@@ -346,7 +350,7 @@ def main() -> None:
     print(f"TOTAL others_ready {total['others_ready_share_of_lost']:.3f}  n_zero {total['n_zero_share_of_lost']}")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps({"run": str(run), "policy": args.policy, "seeds": seeds,
-                                    "overlay": args.overlay, "total": total, "per_seed": per_seed},
+                                    "overlay": args.overlay, "decode": args.decode, "decode_beta": args.decode_beta, "total": total, "per_seed": per_seed},
                                    ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     print("wrote", out_path)
 

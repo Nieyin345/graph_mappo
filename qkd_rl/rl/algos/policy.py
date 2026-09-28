@@ -9,6 +9,7 @@ import torch
 
 from qkd_rl.env.graph_builder import GraphObservation
 from qkd_rl.model_zoo.v2.model_impl import GraphMAPPOActorCritic
+from qkd_rl.rl.algos.matching_decode import max_weight_matching_indices
 
 
 @dataclass
@@ -67,7 +68,27 @@ def _finalize_matching_log_prob(total, *, n_decisions: int, average: bool):
 
 
 class MAPPOPolicy:
-    def __init__(self, model: GraphMAPPOActorCritic, device: torch.device | str = "cpu"):
+    #: Deterministic decoders. ``greedy`` (default) is the argmax of the
+    #: sequential sampler; ``max_weight`` returns the exact max-weight feasible
+    #: matching of ``score - stop`` (improvement 1a, evaluation-time only).
+    DECODE_MODES = ("greedy", "max_weight")
+
+    def __init__(
+        self,
+        model: GraphMAPPOActorCritic,
+        device: torch.device | str = "cpu",
+        deterministic_decode: str = "greedy",
+        decode_beta: float = 0.0,
+    ):
+        if deterministic_decode not in self.DECODE_MODES:
+            raise ValueError(
+                f"deterministic_decode must be one of {self.DECODE_MODES}, got {deterministic_decode!r}"
+            )
+        # Only consulted when ``deterministic=True``; stochastic sampling (the
+        # rollouts PPO trains on) never changes.
+        self.deterministic_decode = deterministic_decode
+        # max_weight arc weight: 0 = margin s - stop; >0 = expm1(beta*margin)/beta.
+        self.decode_beta = float(decode_beta)
         self.model = model
         self.device = torch.device(device)
         self.model.to(self.device)
@@ -197,6 +218,15 @@ class MAPPOPolicy:
         mean_lp = 0.0
         mean_entropy = 0.0
         stopped = False
+        # max_weight decode: the matching is fixed up front and replayed through
+        # the same loop (descending score order, then STOP), so the reported
+        # joint log-probability is that of the executed ordered sequence.
+        forced = None
+        if deterministic and self.deterministic_decode == "max_weight":
+            forced = max_weight_matching_indices(
+                src_code, dst_code, pair_code, scores_np, stop_score, beta=self.decode_beta
+            )
+        n_forced = 0
         while True:
             idx = np.flatnonzero(alive[:n_arcs])
             if idx.size == 0:
@@ -205,7 +235,13 @@ class MAPPOPolicy:
             s = np.concatenate([scores_np[idx], stop_arr])
             s_max = float(s.max())
             logp = s - (s_max + float(np.log(np.exp(s - s_max).sum())))
-            if deterministic:
+            if forced is not None:
+                if n_forced < len(forced):
+                    k = int(np.flatnonzero(idx == forced[n_forced])[0])
+                    n_forced += 1
+                else:
+                    k = idx.size  # STOP
+            elif deterministic:
                 k = int(np.argmax(s))
             else:
                 k = int(np.argmax(s + gumbel_np[cand]))
@@ -599,6 +635,23 @@ class MAPPOPolicy:
                 gumbel[g, :n_g] = v[:n_g]
                 gumbel[g, A] = v[n_g]
 
+        forced_k = None
+        if deterministic and self.deterministic_decode == "max_weight":
+            # Per-graph exact matching, replayed in lockstep (see _sample_matching).
+            forced_k = []
+            for g in range(G):
+                n_g = int(n_arcs[g])
+                order = (
+                    max_weight_matching_indices(
+                        src_code[g, :n_g], dst_code[g, :n_g], pair_code[g, :n_g],
+                        S[g, :n_g], stop_score, beta=self.decode_beta,
+                    )
+                    if n_g
+                    else []
+                )
+                forced_k.append(order + [A])  # trailing STOP
+            forced_ptr = np.zeros(G, dtype=np.int64)
+
         matched_idx: list[list[int]] = [[] for _ in range(G)]
         lp_sum = np.zeros(G, dtype=np.float64)
         ent_sum = np.zeros(G, dtype=np.float64)
@@ -621,9 +674,17 @@ class MAPPOPolicy:
                 S - m - np.log(np.maximum(ex.sum(axis=1, keepdims=True), 1e-300)),
                 -np.inf,
             )
-            pick = legal if deterministic else legal + gumbel
-            pick = np.where(live[:, None], pick, -np.inf)
-            k = np.where(live, np.argmax(pick, axis=1), A)
+            if forced_k is not None:
+                k = np.fromiter(
+                    (forced_k[g][min(int(forced_ptr[g]), len(forced_k[g]) - 1)] for g in range(G)),
+                    dtype=np.int64, count=G,
+                )
+                k = np.where(live, k, A)
+                forced_ptr += live.astype(np.int64)
+            else:
+                pick = legal if deterministic else legal + gumbel
+                pick = np.where(live[:, None], pick, -np.inf)
+                k = np.where(live, np.argmax(pick, axis=1), A)
 
             lp_pick = np.take_along_axis(logp, k[:, None], axis=1)[:, 0]
             lp_sum += np.where(live, lp_pick, 0.0)

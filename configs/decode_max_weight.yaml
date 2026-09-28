@@ -1,0 +1,5 @@
+# 改进 1a（2026-09-29）：评测时把确定性解码从逐步贪心换成精确最大权匹配
+# （Σ(score − stop)，满足 1 Tx / 1 Rx / 对端不同）。只影响 deterministic=True 的评测，
+# 训练采样不变。用法：experiment.py evaluate --overlay decode_max_weight.yaml --tag ...
+validation:
+  decode: max_weight

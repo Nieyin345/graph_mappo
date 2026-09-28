@@ -1,0 +1,4 @@
+# 改进 1a 变体：最大权解码，弧权重 expm1(beta*(s-stop))/beta，beta=2.0
+validation:
+  decode: max_weight
+  decode_beta: 2.0

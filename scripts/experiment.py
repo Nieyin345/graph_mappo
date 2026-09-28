@@ -201,13 +201,17 @@ def evaluate_one(run_dir: Path, checkpoint: Path | None = None, seeds: list[int]
     env = build_env_from_config(config)
     model = build_model(env.action_resolver.action_space, config)
     model.load_state_dict(load_checkpoint(checkpoint, device).model_state)
-    policy = MAPPOPolicy(model, device)
+    # validation.decode（改进 1a，opt-in）：greedy（默认，逐位不变）| max_weight
+    decode = str((config.get("validation", {}) or {}).get("decode", "greedy"))
+    decode_beta = float((config.get("validation", {}) or {}).get("decode_beta", 0.0) or 0.0)
+    policy = MAPPOPolicy(model, device, deterministic_decode=decode, decode_beta=decode_beta)
     trainer = MAPPOTrainer(env, policy, config, run_dir, device=device)
     result = trainer.evaluate_validation(
         num_episodes=int(config.get("validation", {}).get("episodes", 1))
     )
     result.update({"checkpoint": str(checkpoint), "model": config["experiment"]["model"],
-                   "overlays": list(overlays or []), "tag": tag})
+                   "overlays": list(overlays or []), "tag": tag, "decode": decode,
+                   "decode_beta": decode_beta})
     path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return result
 
