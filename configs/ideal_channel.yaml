@@ -1,0 +1,9 @@
+# 期刊实验 (c)：理想信道（2026-09-28）。训练/BC 在无天气数据上进行，评估时去掉本覆盖即为真实天气。
+# dataset/global_ideal_lean = build_global_tensor.py --ideal-channel（晴空、无日照背景），
+# 映射到真实精简链路集（同 1978 条链路，仅速率不同；SAT-SAT/SAT-HAP 与真实逐位相同）。
+# 归一化统计显式指向真实数据 ⟹ 特征尺度与天气感知策略一致（单变量）。
+rate_provider:
+  normalization:
+    stats_path: dataset/global/rate_stats.json
+  h5:
+    dataset_dir: dataset/global_ideal_lean

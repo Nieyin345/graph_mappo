@@ -1,0 +1,7 @@
+# 期刊实验 (c)：评估覆盖——把 ideal_channel.yaml 训练出的策略切回真实天气数据评估
+# （experiment.py evaluate --overlay real_channel.yaml）。与默认 rate_provider.yaml 等价。
+rate_provider:
+  normalization:
+    stats_path: null
+  h5:
+    dataset_dir: dataset/global

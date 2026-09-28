@@ -57,9 +57,16 @@ _DEFAULT_WEATHER = _build_default_weather(T_YEAR)
 
 _WEATHER_NUMERIC_KEYS = ("vis", "rain", "snow", "temp", "sf", "c_low", "c_mid", "c_high")
 
-def load_weather_data(gnodes, T_YEAR, THETA):
-    """预先将所有地面的 CSV 气象数据按时间维度拉齐并提取出来"""
-    print(">>> [1.5/5] 载入地面站真实天气物理数据...")
+def load_weather_data(gnodes, T_YEAR, THETA, ideal_channel=False):
+    """预先将所有地面的 CSV 气象数据按时间维度拉齐并提取出来
+
+    ideal_channel=True：**理想信道**对照（论文“环境感知的价值”实验）——不读任何天气 CSV，
+    所有地面站一律用下面的默认值（无云/雨/雪、能见度 24 km、无太阳直射辐射 ⟹ 无日照背景）。
+    即“仅几何传播损耗 + 固定晴空大气”的常见理想化假设。几何、轨道、链路集合与真实版完全相同，
+    只有天气相关输入不同；不经过大气的 SAT-SAT / HAP-SAT 链路两版逐位相同。
+    """
+    print(">>> [1.5/5] 载入地面站真实天气物理数据..." if not ideal_channel
+          else ">>> [1.5/5] 理想信道模式：不载入天气，全部地面站用晴空无日照默认值")
     weather_dict = {}
     coverage_rows = []
     repeat_factor = max(1, int(3600 / THETA))
@@ -89,7 +96,9 @@ def load_weather_data(gnodes, T_YEAR, THETA):
         csv_rows = 0
         covered_steps = 0
         missing_columns = []
-        if cfg:
+        if ideal_channel:
+            source = "ideal_channel"
+        elif cfg:
             file_path = os.path.join(_PROJECT_ROOT, "weather", "2023", f"{node.tag}_weather.csv")
             if os.path.exists(file_path):
                 try:
@@ -539,7 +548,7 @@ def compute_link_timeline(args):
     return (l_idx, kmax_array)
 
 
-def build_all(out_dir=None):
+def build_all(out_dir=None, ideal_channel=False):
     out_dir = out_dir or os.path.join("dataset", "global")
     os.makedirs(out_dir, exist_ok=True)
 
@@ -548,7 +557,7 @@ def build_all(out_dir=None):
     gnodes = [gs(c["lon"], c["lat"], 1e9, c["name"]) for c in gs_configs]
     
     # 抽取天气数据字典
-    weather_dict, weather_coverage = load_weather_data(gnodes, T_YEAR, THETA)
+    weather_dict, weather_coverage = load_weather_data(gnodes, T_YEAR, THETA, ideal_channel=ideal_channel)
     pd.DataFrame(weather_coverage).to_csv(os.path.join(out_dir, "weather_coverage.csv"), index=False)
     
     hap_configs = GlobalHAPs.get_haps()[:SimConfig.NUM_HAPS]
@@ -648,6 +657,7 @@ def build_all(out_dir=None):
         "num_links": L,
         "num_skipped_links": len(skipped_links),
         "weather_fallback_steps_total": int(sum(row["fallback_steps"] for row in weather_coverage)),
+        "ideal_channel": bool(ideal_channel),
     }
     with open(os.path.join(out_dir, "build_metadata.json"), "w", encoding="utf-8") as fh:
         json.dump(metadata, fh, indent=2)
@@ -771,14 +781,15 @@ def main() -> None:
     parser.add_argument("--theta", type=int, default=60, help="core step size in seconds (default 60)")
     parser.add_argument("--out-dir", default=os.path.join("dataset", "global"), help="output directory")
     parser.add_argument("--workers", type=int, default=0, help="worker processes (0 = all cores)")
+    parser.add_argument("--ideal-channel", action="store_true",
+                        help="ideal-channel control: ignore weather CSVs, clear sky + no solar background for every GS")
     args = parser.parse_args()
     if args.theta != 60:
         _configure_globals(args.theta)
     if args.workers > 0:
         os.environ["HAP_QKD_WORKERS"] = str(args.workers)
-    build_all(out_dir=args.out_dir)
+    build_all(out_dir=args.out_dir, ideal_channel=args.ideal_channel)
 
 
 if __name__ == "__main__":
     main()
-
