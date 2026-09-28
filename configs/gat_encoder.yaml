@@ -1,0 +1,8 @@
+# 期刊实验 (b)：GAT 编码器基线（2026-09-28）。叠加在任一 v8 配置之后。
+# 单变量：EdgeConditionedGraphLayer 的邻居聚合 mean → GATv2 式多头注意力
+# （每目标节点入边 softmax，物理/需求边各一套参数）。注意力向量零初始化 ⟹
+# 初始与均值版逐位等价，共享 BC 暖启动仍有效；见 tests/test_v8_gat_aggregation.py。
+model:
+  encoder:
+    aggregation: attention
+    attention_heads: 4

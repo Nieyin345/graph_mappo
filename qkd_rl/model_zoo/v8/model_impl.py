@@ -199,6 +199,11 @@ def _segment_max(x: torch.Tensor, gid: torch.Tensor, n_segments: int) -> torch.T
     return torch.where((counts == 0).unsqueeze(1), torch.zeros_like(out), out)
 
 
+# Neighbour aggregation of EdgeConditionedGraphLayer (model.encoder.aggregation).
+# "mean" is the method's encoder; "attention" is the GAT baseline (journal exp (b)).
+GNN_AGGREGATIONS = ("mean", "attention")
+
+
 class EdgeConditionedGraphLayer(nn.Module):
     def __init__(
         self,
@@ -209,8 +214,15 @@ class EdgeConditionedGraphLayer(nn.Module):
         layer_norm: bool,
         fuse_physical_to_node: bool = True,
         fuse_demand_to_node: bool = True,
+        aggregation: str = "mean",
+        attention_heads: int = 4,
     ):
         super().__init__()
+        if aggregation not in GNN_AGGREGATIONS:
+            raise ValueError(
+                f"unknown encoder aggregation {aggregation!r}; expected one of {GNN_AGGREGATIONS}"
+            )
+        self.aggregation = aggregation
         # 物理链路边和逻辑请求边使用各自独立的 message MLP：物理边传递链路
         # 能力（速率/容量/可用性），逻辑边传递需求（待服务量/deadline/优先级），
         # 两者的语义标准不同，不能共用同一个变换。
@@ -256,6 +268,23 @@ class EdgeConditionedGraphLayer(nn.Module):
         self.edge_norm = nn.LayerNorm(hidden_dim) if layer_norm else nn.Identity()
         self.fuse_physical_to_node = fuse_physical_to_node
         self.fuse_demand_to_node = fuse_demand_to_node
+        # 期刊实验 (b)：GAT 编码器基线（aggregation="attention"）。GATv2 式多头
+        # 注意力（Brody et al., ICLR 2022）：logit_{e,h} = a_h · LeakyReLU(W [h_dst ; m_e])_h，
+        # 在每个目标节点的入边上做 softmax，替代均值聚合；两类边各一套参数。
+        # a 零初始化 ⟹ 初始权重均匀 ⟹ 与均值层逐位等价（共享 BC 暖启动仍有效，
+        # 臂与对照从同一函数出发）。fork_rng：构建新参数不推进全局 RNG，
+        # 其余模块的初始化与均值版完全相同（单变量）。
+        self.att_proj_phys = self.att_proj_demand = None
+        self.att_vec_phys = self.att_vec_demand = None
+        if aggregation == "attention":
+            heads = int(attention_heads)
+            if heads <= 0 or hidden_dim % heads:
+                raise ValueError(f"attention_heads={heads} must divide hidden_dim={hidden_dim}")
+            with torch.random.fork_rng(devices=[]):
+                self.att_proj_phys = nn.Linear(2 * hidden_dim, hidden_dim)
+                self.att_proj_demand = nn.Linear(2 * hidden_dim, hidden_dim)
+            self.att_vec_phys = nn.Parameter(torch.zeros(heads, hidden_dim // heads))
+            self.att_vec_demand = nn.Parameter(torch.zeros(heads, hidden_dim // heads))
 
     def forward(
         self,
@@ -287,11 +316,13 @@ class EdgeConditionedGraphLayer(nn.Module):
         # 保证两类信息互不稀释。
         if self.fuse_physical_to_node and n_phys > 0:
             aggregated = aggregated + self._node_message(
-                self.message_mlp_phys, node_emb, src_p, dst_p, phys_emb
+                self.message_mlp_phys, node_emb, src_p, dst_p, phys_emb,
+                self.att_proj_phys, self.att_vec_phys,
             )
         if self.fuse_demand_to_node and demand_emb.size(0) > 0:
             aggregated = aggregated + self._node_message(
-                self.message_mlp_demand, node_emb, src_d, dst_d, demand_emb
+                self.message_mlp_demand, node_emb, src_d, dst_d, demand_emb,
+                self.att_proj_demand, self.att_vec_demand,
             )
         updated = self.update(torch.cat([node_emb, aggregated], dim=-1))
         new_node = self.norm(updated)
@@ -311,8 +342,14 @@ class EdgeConditionedGraphLayer(nn.Module):
         src: torch.Tensor,
         dst: torch.Tensor,
         edge_emb: torch.Tensor,
+        att_proj: nn.Module | None = None,
+        att_vec: torch.Tensor | None = None,
     ) -> torch.Tensor:
         messages = message_mlp(torch.cat([node_emb[src], edge_emb], dim=-1))
+        if att_vec is not None:
+            return EdgeConditionedGraphLayer._attention_aggregate(
+                messages, node_emb, dst, att_proj, att_vec
+            )
         # mean = sum / count via index_add_: scatter_reduce_("mean") is
         # measurably slower on CUDA (~26% in micro-benchmark) and can be
         # numerically unstable for small graphs; the two-kernel version is
@@ -322,6 +359,36 @@ class EdgeConditionedGraphLayer(nn.Module):
         counts.index_add_(0, dst, torch.ones_like(messages[:, 0]))
         agg.index_add_(0, dst, messages)
         return agg / counts.clamp(min=1.0).unsqueeze(-1)
+
+    @staticmethod
+    def _attention_aggregate(
+        messages: torch.Tensor,
+        node_emb: torch.Tensor,
+        dst: torch.Tensor,
+        att_proj: nn.Module,
+        att_vec: torch.Tensor,
+    ) -> torch.Tensor:
+        """Per-destination multi-head softmax over incoming messages (GATv2).
+
+        Segment softmax via index ops (no torch_scatter): subtract the per-node
+        max (detached; softmax is shift-invariant), exponentiate, normalise by
+        the per-node sum. Nodes without incoming edges get 0, like the mean.
+        """
+        n_nodes, hidden = node_emb.size(0), messages.size(1)
+        heads, d_head = att_vec.shape
+        if messages.size(0) == 0:
+            return torch.zeros_like(node_emb, dtype=messages.dtype)
+        z = torch.nn.functional.leaky_relu(att_proj(torch.cat([node_emb[dst], messages], dim=-1)), 0.2)
+        logits = (z.view(-1, heads, d_head) * att_vec.unsqueeze(0)).sum(-1)      # [E, heads]
+        idx = dst.unsqueeze(1).expand_as(logits)
+        seg_max = logits.new_full((n_nodes, heads), float("-inf")).scatter_reduce_(
+            0, idx, logits.detach(), reduce="amax", include_self=True
+        )
+        ex = torch.exp(logits - seg_max[dst])
+        denom = logits.new_zeros((n_nodes, heads)).index_add_(0, dst, ex)
+        alpha = ex / denom[dst]                                                    # [E, heads]
+        weighted = (messages.view(-1, heads, d_head) * alpha.unsqueeze(-1)).reshape(-1, hidden)
+        return torch.zeros_like(node_emb, dtype=messages.dtype).index_add_(0, dst, weighted)
 
     def _edge_message(
         self,
@@ -371,6 +438,8 @@ class GraphEncoder(nn.Module):
                     layer_norm,
                     fuse_physical_to_node=fuse_physical_to_node,
                     fuse_demand_to_node=fuse_demand_to_node,
+                    aggregation=str(config.get("aggregation", "mean") or "mean"),
+                    attention_heads=int(config.get("attention_heads", 4)),
                 )
                 for _ in range(int(config["num_layers"]))
             ]
