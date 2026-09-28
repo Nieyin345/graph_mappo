@@ -1,0 +1,6 @@
+# 分解实验（2026-09-28，batch-13）：forecast_off.yaml 同时关掉了预测头与 path_recency 特征，
+# 2×2 析因里的"预测"因素因此捆绑了 {recency 特征, 头的表征学习, 偏置} 三项。
+# 本覆盖叠加在 forecast_off.yaml 之后，只把 recency 特征加回 ⟹ "仅特征"臂。
+features:
+  edge:
+    include_path_recency: true
