@@ -171,6 +171,12 @@ def state_free_obs(obs: GraphObservation | None) -> GraphObservation | None:
     return replace(obs, state=None)
 
 
+# Label targets for the usage-forecast head. "used"/"new" are the method's
+# labels; "persist"/"shuffle" are journal controls (generic availability
+# forecast / content-free label with the same class balance).
+USAGE_LABEL_MODES = ("used", "new", "persist", "shuffle")
+
+
 class RolloutBuffer:
     """Stores steps of one or more episodes and computes GAE per episode."""
 
@@ -268,6 +274,10 @@ class RolloutBuffer:
                     [t, t + horizon), else 0.0
             "new":  1.0 if e is on a path at some step in (t, t + horizon] but
                     NOT at t, else 0.0
+            "persist": (control) 1.0 if e is in the graph at EVERY step of
+                    (t, t + horizon] -- demand-agnostic availability forecast
+            "shuffle": (control) the "new" label randomly permuted within the
+                    step -- same positive count, no edge identity
 
         Source: ``obs.request_path_edge_mask``, which the graph builder already
         fills every step (per physical edge, aligned with physical_edge_ids). It
@@ -289,21 +299,43 @@ class RolloutBuffer:
         """
         horizon = self.usage_horizon
         mode = getattr(self, "usage_label_mode", "used")
+        if mode not in USAGE_LABEL_MODES:
+            raise ValueError(
+                f"unknown usage label_mode {mode!r}; expected one of {USAGE_LABEL_MODES}"
+            )
         n = len(episode)
-        # Precompute per-step boolean masks from the observations.
-        masks: list[list[bool] | None] = []
-        sizes: list[int] = []
+        # Precompute per-step edge-id lists and on-path id sets.
+        ids_all: list[list[str]] = []
+        on_path: list[set[str]] = []
         for step in episode:
             mask = getattr(step.obs, "request_path_edge_mask", None)
-            ids = getattr(step.obs, "physical_edge_ids", None) or []
-            masks.append(mask)
-            sizes.append(len(ids))
+            ids = list(getattr(step.obs, "physical_edge_ids", None) or [])
+            ids_all.append(ids)
+            on_path.append(
+                {ids[pos] for pos, flag in enumerate(mask or []) if flag and pos < len(ids)}
+            )
+        present: list[set[str]] | None = (
+            [set(ids) for ids in ids_all] if mode == "persist" else None
+        )
         for t, step in enumerate(episode):
-            size_t = sizes[t]
+            ids_t = ids_all[t]
+            size_t = len(ids_t)
             if size_t == 0:
                 step.usage_label = torch.zeros((0,), dtype=torch.float32)
                 continue
             label = torch.zeros(size_t, dtype=torch.float32)
+            if mode == "persist":
+                # Control (a): demand-agnostic availability forecast -- e is in
+                # the graph (visible, rate >= min) at EVERY step of (t, t+K].
+                # Truncated at the episode end; an empty window is vacuously 1.
+                keep = set(ids_t)
+                for u in range(t + 1, min(n, t + horizon + 1)):
+                    keep &= present[u]
+                for pos, eid in enumerate(ids_t):
+                    if eid in keep:
+                        label[pos] = 1.0
+                step.usage_label = label
+                continue
             # A step's edge list can differ in ORDER/length from step t's, so
             # accumulate by edge id over a window. "used" includes step t; "new"
             # starts at t+1 so the current step cannot satisfy the future term.
@@ -311,29 +343,23 @@ class RolloutBuffer:
             # 步共 K 槽）；"new" = (t, t+K]（K 个未来槽）。原实现两种模式都用
             # min(n, t+horizon) ⟹ "new" 实际只覆盖 t+1..t+K-1（K-1 槽），
             # horizon=1 时窗口为空、全零标签。
-            lo = t if mode == "used" else t + 1
-            hi = min(n, t + horizon + (1 if mode == "new" else 0))
+            future = mode != "used"          # "new" and its shuffled control
+            lo = t + 1 if future else t
+            hi = min(n, t + horizon + (1 if future else 0))
             window_ids: set[str] = set()
             for u in range(lo, hi):
-                m = masks[u]
-                if not m:
-                    continue
-                ids_u = getattr(episode[u].obs, "physical_edge_ids", None) or []
-                for pos, on_path in enumerate(m):
-                    if on_path and pos < len(ids_u):
-                        window_ids.add(ids_u[pos])
-            now_ids: set[str] = set()
-            if mode == "new":
-                m_t = masks[t]
-                ids_t = getattr(step.obs, "physical_edge_ids", None) or []
-                if m_t:
-                    for pos, on_path in enumerate(m_t):
-                        if on_path and pos < len(ids_t):
-                            now_ids.add(ids_t[pos])
-            ids_t = getattr(step.obs, "physical_edge_ids", None) or []
+                window_ids |= on_path[u]
+            now_ids = on_path[t] if future else set()
             for pos, eid in enumerate(ids_t):
                 if eid in window_ids and eid not in now_ids:
                     label[pos] = 1.0
+            if mode == "shuffle":
+                # Control (a): same per-step positive count as "new", edge
+                # identity destroyed. Private generator -> the global torch RNG
+                # (and hence the rollouts) stay identical to the "new" arm.
+                gen = torch.Generator()
+                gen.manual_seed(1_000_003 * t + 7_919 * size_t + int(label.sum().item()))
+                label = label[torch.randperm(size_t, generator=gen)]
             step.usage_label = label
 
     def sample(

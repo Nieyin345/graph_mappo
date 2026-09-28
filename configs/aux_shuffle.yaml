@@ -1,0 +1,7 @@
+# 期刊实验 (a)：内容移除对照（2026-09-28）。叠加在 Ours（no_attention + v8_bias）之后。
+# 单变量：标签 "new" → "shuffle"（同一步内随机置换 "new" 标签：正例数/类别平衡/
+# 额外梯度量完全相同，但不含"哪条边"的信息）。pos_weight 沿用 8.5（正例率相同）。
+model:
+  actor:
+    usage_forecast:
+      label_mode: shuffle

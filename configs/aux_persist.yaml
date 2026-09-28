@@ -1,0 +1,10 @@
+# 期刊实验 (a)：通用辅助任务对照（2026-09-28）。叠加在 Ours（no_attention + v8_bias）之后。
+# 单变量：预测头标签 "new"（边将新落在待服务请求路径上）→ "persist"
+# （边在未来 K 步内持续可用；与需求无关的信道/可用性预测）。头、损失、偏置管线不变。
+# pos_weight 按与 "new" 相同的规则 (1-p)/p 设定：实测 persist 正例率 p=0.621
+# （真实 k_max>=1、K=8、训练日 0-295 抽样）⟹ 0.61。
+model:
+  actor:
+    usage_forecast:
+      label_mode: persist
+      pos_weight: 0.61
