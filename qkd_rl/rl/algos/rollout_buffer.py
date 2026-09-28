@@ -174,7 +174,10 @@ def state_free_obs(obs: GraphObservation | None) -> GraphObservation | None:
 # Label targets for the usage-forecast head. "used"/"new" are the method's
 # labels; "persist"/"shuffle" are journal controls (generic availability
 # forecast / content-free label with the same class balance).
-USAGE_LABEL_MODES = ("used", "new", "persist", "shuffle")
+# "deficit" (improvement 2, 2026-09-28) = "new" AND the edge's stock at step t
+# is below usage_forecast.deficit_threshold -- "needed soon but not prepared".
+# The threshold test lives in the v8 GraphBuilder (obs.physical_edge_low_stock).
+USAGE_LABEL_MODES = ("used", "new", "persist", "shuffle", "deficit")
 
 
 class RolloutBuffer:
@@ -278,6 +281,9 @@ class RolloutBuffer:
                     (t, t + horizon] -- demand-agnostic availability forecast
             "shuffle": (control) the "new" label randomly permuted within the
                     step -- same positive count, no edge identity
+            "deficit": the "new" label AND obs.physical_edge_low_stock at step
+                    t (stock below usage_forecast.deficit_threshold, decided
+                    by the v8 GraphBuilder). Missing field -> ValueError.
 
         Source: ``obs.request_path_edge_mask``, which the graph builder already
         fills every step (per physical edge, aligned with physical_edge_ids). It
@@ -353,6 +359,17 @@ class RolloutBuffer:
             for pos, eid in enumerate(ids_t):
                 if eid in window_ids and eid not in now_ids:
                     label[pos] = 1.0
+            if mode == "deficit":
+                low = getattr(step.obs, "physical_edge_low_stock", None)
+                if low is None or len(low) != size_t:
+                    raise ValueError(
+                        "usage label_mode 'deficit' needs obs.physical_edge_low_stock "
+                        f"aligned with physical_edge_ids (got {None if low is None else len(low)} "
+                        f"for {size_t} edges); set usage_forecast.label_mode: deficit so the "
+                        "v8 GraphBuilder fills it"
+                    )
+                label = label * torch.tensor([1.0 if flag else 0.0 for flag in low],
+                                             dtype=torch.float32)
             if mode == "shuffle":
                 # Control (a): same per-step positive count as "new", edge
                 # identity destroyed. Private generator -> the global torch RNG

@@ -1,0 +1,11 @@
+# 改进项 2（2026-09-28）：缺额预测标签。叠加在完整模型（v8_bias）之后，单变量：
+# 预测头标签 "new" → "deficit" = new ∧ 当前库存 < deficit_threshold（bit）。
+# 阈值 = 平均请求量 amount_mean（configs/env_full.yaml: 1e5）。
+# pos_weight 按与 "new" 相同的规则 (1-p)/p：专家策略 rollout 实测 p=0.054(2×)/0.056(3×)
+# （scripts/diag/deficit_label_rate.py，种子 11,12；同口径 new 为 0.141/0.153）⟹ 17。
+model:
+  actor:
+    usage_forecast:
+      label_mode: deficit
+      deficit_threshold: 100000.0
+      pos_weight: 17.0

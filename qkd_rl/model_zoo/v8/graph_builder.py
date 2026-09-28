@@ -60,6 +60,12 @@ class GraphObservation:
     # demand and inventory shortfall provide a stage-two preparation prior.
     pair_current: list[bool] = field(default_factory=list)
     preparation_edge_values: list[float] = field(default_factory=list)
+    # Improvement 2 (2026-09-28): per physical edge (aligned with
+    # physical_edge_ids), stock at this step < usage_forecast.deficit_threshold.
+    # Only filled when usage_forecast.label_mode == "deficit" (the label source
+    # for RolloutBuffer); None otherwise, so every existing arm is unchanged.
+    # Not a model input.
+    physical_edge_low_stock: list[bool] | None = None
 
     @property
     def generation_edge_ids(self) -> list[str]:
@@ -318,6 +324,11 @@ class GraphBuilder:
         else:
             node_history, phys_history, demand_history = [], [], []
             history_valid = [[], [], []]
+        _ucfg = (self.config.get("model", {}).get("actor", {}) or {}).get("usage_forecast", {}) or {}
+        low_stock: list[bool] | None = None
+        if str(_ucfg.get("label_mode", "") or "") == "deficit":
+            _thr = float(_ucfg.get("deficit_threshold", 1.0e5))
+            low_stock = [bool(float(self.qkp.get_level(edge.edge_id)) < _thr) for edge in active_edges]
         return GraphObservation(
             node_features=self.build_node_features(env_state, requests, request_history),
             edge_index=self.build_edge_index(active_edges, demand_pairs),
@@ -345,6 +356,7 @@ class GraphBuilder:
             pair_path_weights=pair_path_weights,
             pair_current=pair_current,
             preparation_edge_values=preparation_edge_values,
+            physical_edge_low_stock=low_stock,
         )
 
     def _pair_shortest_path_masks(
