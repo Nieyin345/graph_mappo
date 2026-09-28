@@ -1483,12 +1483,33 @@ class GraphMAPPOActorCritic(nn.Module):
         )
         self.actor = SharedNodeActor(hidden_dim, model_cfg, invalid_logit_value)
         n_nodes = len(action_space.node_ids)
-        if n_nodes <= hidden_dim:
-            identity = torch.eye(n_nodes, hidden_dim)
+        # 端点身份（路径注意力 token 用）。默认 "position"：按当前节点位置取行。
+        # "reference"（2026-09-28，节点失效评测）：按无失效场景（去掉
+        # scenario.active_nodes.fail）的节点顺序取行 ⟹ 其他节点失效时每个存活节点保持
+        # 训练时自己的身份；无失效时与 position 逐位相同。
+        ident_mode = str(model_cfg.get("endpoint_identity", "position") or "position")
+        ident_rows = None
+        n_ident = n_nodes
+        if ident_mode == "reference":
+            from qkd_rl.data.scenario_builder import reference_node_ids
+
+            ref = reference_node_ids(config)
+            ref_pos = {name: i for i, name in enumerate(ref)}
+            unknown = [n for n in action_space.node_ids if n not in ref_pos]
+            if unknown:
+                raise ValueError(f"endpoint_identity=reference: nodes not in reference scenario: {unknown[:5]}")
+            ident_rows = [ref_pos[n] for n in action_space.node_ids]
+            n_ident = len(ref)
+        elif ident_mode != "position":
+            raise ValueError(f"unknown model.endpoint_identity {ident_mode!r}; expected position|reference")
+        if n_ident <= hidden_dim:
+            identity = torch.eye(n_ident, hidden_dim)
         else:
             generator = torch.Generator().manual_seed(31)
-            identity = torch.randn(n_nodes, hidden_dim, generator=generator)
+            identity = torch.randn(n_ident, hidden_dim, generator=generator)
             identity = torch.nn.functional.normalize(identity, dim=-1)
+        if ident_rows is not None:
+            identity = identity[torch.as_tensor(ident_rows, dtype=torch.long)]
         self.register_buffer("endpoint_identity", identity, persistent=False)
         self.critic = GlobalCritic(hidden_dim, model_cfg)
 

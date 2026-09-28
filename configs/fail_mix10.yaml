@@ -1,0 +1,10 @@
+# 改进项 4（2026-09-28）：节点失效零样本评测。scenario.active_nodes.fail 在 smart 选择/排序之后删节点
+# （连带其边），名单由固定种子抽取（sat: random.Random(2026).sample(30 SAT,10)，前 5 个 = sat5；
+# hap: random.Random(2027).sample(29 HAP,10)，前 5 个 = hap5；嵌套 ⟹ 可看单调退化）。
+# 失效 5 颗卫星 + 5 个 HAP（sat5 ∪ hap5）
+scenario:
+  active_nodes:
+    fail: [HAP_Chicago, HAP_Jakarta, HAP_Nairobi, HAP_NewYork, HAP_SanFrancisco, Sat_LEO_1d, Sat_LEO_2e, Sat_LEO_3e, Sat_LEO_4c, Sat_LEO_5d]
+model:
+  # 完整模型路径注意力的端点身份按无失效场景顺序取（不错位）；lite/专家/上界不受影响。
+  endpoint_identity: reference

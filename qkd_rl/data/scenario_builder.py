@@ -59,6 +59,53 @@ def _sat_orbit_rank(name: str) -> int:
     return 1
 
 
+def registry_node_rows(config: dict) -> list[dict]:
+    """node_registry.csv 的行，按 node_id 升序（= 完整场景的节点顺序）。
+
+    build_full 与 model.endpoint_identity: registry（节点失效评测的身份对齐，
+    2026-09-28）共用这一实现。
+    """
+    h5_cfg = config["rate_provider"].get("h5", {})
+    dataset_dir = Path(h5_cfg.get("dataset_dir", "dataset/global"))
+    node_registry_path = Path(h5_cfg.get("node_registry_path") or dataset_dir / "node_registry.csv")
+    if not node_registry_path.exists():
+        raise FileNotFoundError(f"node_registry.csv not found: {node_registry_path}")
+    node_rows = []
+    with node_registry_path.open("r", encoding="utf-8", newline="") as f:
+        for row in csv.DictReader(f):
+            node_rows.append(row)
+    node_rows.sort(key=lambda row: int(row["node_id"]))
+    return node_rows
+
+
+def registry_nodes(config: dict) -> list[Node]:
+    """All registry nodes as ``Node`` objects, in node_id order (build_full's input)."""
+    nodes: list[Node] = []
+    for row in registry_node_rows(config):
+        node_type = _NODE_TYPE_MAP[row["type"].strip().upper()]
+        alt_km = float(row.get("alt_km") or 0.0)
+        nodes.append(
+            Node(
+                node_id=row["name"].strip(),
+                node_type=node_type,
+                lat=float(row.get("lat") or 0.0),
+                lon=float(row.get("lon") or 0.0),
+                alt_m=alt_km * 1000.0,
+            )
+        )
+    return nodes
+
+
+def reference_node_ids(config: dict) -> list[str]:
+    """Node order of the scenario WITHOUT ``scenario.active_nodes.fail``.
+
+    = the order a model trained on the failure-free scenario saw. Used by
+    model.endpoint_identity: reference so a node keeps its trained identity
+    when other nodes fail (improvement 4, 2026-09-28).
+    """
+    return [node.node_id for node in ScenarioBuilder(config)._apply_active_nodes(registry_nodes(config))]
+
+
 class ScenarioBuilder:
     def __init__(self, config: dict):
         self.config = config
@@ -227,35 +274,24 @@ class ScenarioBuilder:
         rate_time_cfg = self.config["rate_provider"]["time"]
         h5_cfg = self.config["rate_provider"].get("h5", {})
         dataset_dir = Path(h5_cfg.get("dataset_dir", "dataset/global"))
-        node_registry_path = Path(h5_cfg.get("node_registry_path") or dataset_dir / "node_registry.csv")
         link_registry_path = Path(h5_cfg.get("link_registry_path") or dataset_dir / "link_registry.csv")
         link_data_path = Path(h5_cfg.get("link_data_path") or dataset_dir / "link_data.h5")
 
-        if not node_registry_path.exists():
-            raise FileNotFoundError(f"node_registry.csv not found: {node_registry_path}")
-
-        node_rows = []
-        with node_registry_path.open("r", encoding="utf-8", newline="") as f:
-            for row in csv.DictReader(f):
-                node_rows.append(row)
-        node_rows.sort(key=lambda row: int(row["node_id"]))
-
-        nodes: list[Node] = []
-        for row in node_rows:
-            node_type = _NODE_TYPE_MAP[row["type"].strip().upper()]
-            alt_km = float(row.get("alt_km") or 0.0)
-            nodes.append(
-                Node(
-                    node_id=row["name"].strip(),
-                    node_type=node_type,
-                    lat=float(row.get("lat") or 0.0),
-                    lon=float(row.get("lon") or 0.0),
-                    alt_m=alt_km * 1000.0,
-                )
-            )
+        nodes = registry_nodes(self.config)
 
         all_nodes = nodes
         nodes = self._apply_active_nodes(nodes)
+        # 节点失效（2026-09-28，改进项 4）：scenario.active_nodes.fail 在 smart 选择与
+        # 排序**之后**删除节点 ⟹ 存活节点的相对顺序与无失效场景一致（见
+        # reference_node_ids）。默认空 = 行为不变。未知名字报错（防止拼写错误静默无效）。
+        fail = [str(n) for n in ((self.config.get("scenario", {}).get("active_nodes", {}) or {}).get("fail") or [])]
+        if fail:
+            present = {node.node_id for node in nodes}
+            unknown = [n for n in fail if n not in present]
+            if unknown:
+                raise ValueError(f"scenario.active_nodes.fail: unknown/inactive nodes {unknown}")
+            fail_set = set(fail)
+            nodes = [node for node in nodes if node.node_id not in fail_set]
         kept_ids = {node.node_id for node in nodes}
 
         link_rows: list[tuple[int, int, str]] = []

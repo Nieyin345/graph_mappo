@@ -1,0 +1,6 @@
+# 改进项 4b（2026-09-28）：小网络训练（lite 模型，完全参数共享，无节点身份输入）。
+# 去掉 10 颗卫星 + 10 个 HAP（= fail_sat10 ∪ hap10，88 → 68 节点），BC 与 RL 都只见小网络；
+# 之后用 net_full.yaml 在完整网络上零样本评测（放大泛化）。
+scenario:
+  active_nodes:
+    fail: [HAP_Bogota, HAP_Casablanca, HAP_Chicago, HAP_Jakarta, HAP_Madrid, HAP_Nairobi, HAP_NewYork, HAP_SanFrancisco, HAP_Sydney, HAP_Tokyo, Sat_LEO_1d, Sat_LEO_2b, Sat_LEO_2e, Sat_LEO_3e, Sat_LEO_3f, Sat_LEO_4b, Sat_LEO_4c, Sat_LEO_4e, Sat_LEO_5d, Sat_LEO_5f]

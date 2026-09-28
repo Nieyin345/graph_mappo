@@ -1,0 +1,4 @@
+# 改进项 4b：把 net_small 训练的 run 放回完整网络评测（fail 清空 = 训练场景的 88 节点）。
+scenario:
+  active_nodes:
+    fail: []
