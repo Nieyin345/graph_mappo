@@ -101,7 +101,13 @@ def rollout_collect(env, obs, use_expert: bool) -> tuple[list, float | None, int
     return arrivals, sr, t0
 
 
-def solve_bound(env, obs0_t: int, T: int, arrivals: list, bucket: int, threads: int = 1) -> dict:
+def solve_bound(env, obs0_t: int, T: int, arrivals: list, bucket: int, threads: int = 1,
+                integer_activation: bool = False, time_limit: float = 3600.0,
+                mip_rel_gap: float = 1e-4) -> dict:
+    """integer_activation=True（改进项 5，2026-09-28）：激活 a[e,t] ∈ {0,1}。
+    度 ≤2 的整数子图（路径/环）总能定向成每点 ≤1 发 ≤1 收 ⟹ 端口约束变为精确，
+    其余松弛不变 ⟹ 仍是严格上界且 ≤ LP 上界。未在 time_limit 内证最优时取
+    MILP 对偶界（HiGHS mip_dual_bound，仍是上界）。默认 False = 原 LP，逐位不变。"""
     t0 = obs0_t
     # ---- 边：env 注册的全部边（= QKP 池 = 路由图），不是 t0 快照
     edges = list(env.routing.edges)
@@ -202,21 +208,56 @@ def solve_bound(env, obs0_t: int, T: int, arrivals: list, bucket: int, threads: 
     c[off_x:off_x + R] = -1.0
 
     t_s = time.perf_counter()
-    res = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq,
-                  bounds=np.column_stack([lb, ub]), method="highs",
-                  options={"presolve": True, "time_limit": 3600.0})
-    solve_s = time.perf_counter() - t_s
-    served = -res.fun * SCALE if res.status == 0 else float("nan")
-    x = res.x[off_x:off_x + R] if res.status == 0 else None
+    mip_info: dict = {}
+    if not integer_activation:
+        res = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq,
+                      bounds=np.column_stack([lb, ub]), method="highs",
+                      options={"presolve": True, "time_limit": 3600.0})
+        solve_s = time.perf_counter() - t_s
+        served = -res.fun * SCALE if res.status == 0 else float("nan")
+        x = res.x[off_x:off_x + R] if res.status == 0 else None
+        status, message = int(res.status), str(res.message)
+    else:
+        from scipy.optimize import Bounds, LinearConstraint, milp
+
+        integrality = np.zeros(nvar)
+        integrality[off_a:off_a + nA] = 1
+        res = milp(c, integrality=integrality, bounds=Bounds(lb, ub),
+                   constraints=[LinearConstraint(A_ub, -np.inf, b_ub),
+                                LinearConstraint(A_eq, b_eq, b_eq)],
+                   options={"presolve": True, "time_limit": float(time_limit),
+                            "mip_rel_gap": float(mip_rel_gap), "disp": False})
+        solve_s = time.perf_counter() - t_s
+        dual = getattr(res, "mip_dual_bound", None)
+        # 最小化 −Σx：对偶界是 min 的下界 ⟹ −dual 是服务量的上界。status 0 = 证最优。
+        if res.status == 0 and res.fun is not None:
+            bound = -float(res.fun) if dual is None or not np.isfinite(dual) else -float(dual)
+        elif dual is not None and np.isfinite(dual):
+            bound = -float(dual)
+        else:
+            bound = float("nan")
+        served = bound * SCALE
+        x = res.x[off_x:off_x + R] if res.x is not None else None
+        # lp_status 在整数模式下表示"上界有效"（0）；原始求解状态放 mip_status。
+        status = 0 if np.isfinite(served) else int(res.status) or 9
+        message = str(res.message)
+        mip_info = {
+            "mip_status": int(res.status),
+            "mip_gap": float(getattr(res, "mip_gap", float("nan")) or 0.0),
+            "mip_node_count": int(getattr(res, "mip_node_count", 0) or 0),
+            "incumbent_served": (-float(res.fun) * SCALE) if res.fun is not None else None,
+            "n_binary": nA, "time_limit": float(time_limit),
+        }
     routable = sum(q[2] for q in reqs) * SCALE
     return {
         "t0": t0, "arrived": total, "n_requests": len(arrivals), "n_modeled": R,
         "routable_amount": routable, "ub_served": served,
         "ub_success": served / total if total else 0.0,
-        "lp_status": int(res.status), "lp_message": str(res.message)[:200],
+        "lp_status": status, "lp_message": message[:200],
         "solve_s": round(solve_s, 1), "n_edges": nE, "n_nodes": nV, "n_vars": nvar,
         "n_rows": int(A_eq.shape[0] + A_ub.shape[0]), "bucket": bucket,
         "req_saturated": int(sum(1 for q, xv in zip(reqs, x) if xv >= q[2] - 1e-6)) if x is not None else None,
+        "integer": bool(integer_activation), **mip_info,
     }
 
 
@@ -228,6 +269,10 @@ def main() -> None:
     ap.add_argument("--bucket", type=int, default=10)
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--no-expert", action="store_true")
+    ap.add_argument("--integer", action="store_true",
+                    help="整数激活（精确端口约束）；未证最优时报 MILP 对偶界")
+    ap.add_argument("--time-limit", type=float, default=3600.0, help="--integer 的 HiGHS 时间限制（秒）")
+    ap.add_argument("--mip-rel-gap", type=float, default=1e-4)
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     out = Path(a.out)
@@ -243,7 +288,9 @@ def main() -> None:
         env = build_env_from_config(config)
         obs = env.reset(seed=seed, start_seed=base + seed)
         arrivals, expert_sr, t0 = rollout_collect(env, obs, not a.no_expert)
-        r = solve_bound(env, t0, T, arrivals, a.bucket, a.threads)
+        r = solve_bound(env, t0, T, arrivals, a.bucket, a.threads,
+                        integer_activation=a.integer, time_limit=a.time_limit,
+                        mip_rel_gap=a.mip_rel_gap)
         r.update(seed=seed, expert_success=expert_sr)
         rows.append(r)
         print(json.dumps(r), flush=True)
@@ -251,7 +298,8 @@ def main() -> None:
             print(f"!!! seed {seed}: 专家 {expert_sr:.4f} > 上界 {r['ub_success']:.4f} —— 上界有错", flush=True)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"task_fingerprint": fp, "run": a.run, "overlays": a.overlay,
-                               "bucket": a.bucket, "rows": rows}, indent=2), encoding="utf-8")
+                               "bucket": a.bucket, "integer": a.integer,
+                               "time_limit": a.time_limit, "rows": rows}, indent=2), encoding="utf-8")
     ok = [r for r in rows if r["lp_status"] == 0]
     if ok:
         print(f"mean UB = {np.mean([r['ub_success'] for r in ok]):.4f} over {len(ok)} seeds; "

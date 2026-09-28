@@ -92,3 +92,49 @@ def test_bucket_rounding_only_loosens():
     exact = solve_bound(env, 0, T, r, bucket=1)["ub_served"]
     coarse = solve_bound(env, 0, T, r, bucket=4)["ub_served"]
     assert coarse >= exact - 1e-6
+
+
+# ---- 整数激活版（改进项 5，2026-09-28）：integer_activation=True
+# 激活 a[e,t] ∈ {0,1}。度 ≤2 的整数子图（路径/环）总能定向成每点 ≤1 发 ≤1 收，
+# 所以整数版的端口约束是**精确的**；其余松弛不变 ⟹ 仍是严格上界，且 ≤ LP 上界。
+# 时间限制内未证最优时用 MILP 的对偶界（仍是上界）。
+
+
+def _star_one_slot():
+    # 单时隙星形 X–A/B/C，速率 R；请求 X→A、X→B、X→C 各 2R/3，截止 t=0。
+    # LP：每边 a=2/3（X 度 = 2）⟹ 三条边各生成 2R/3 ⟹ 全部满足，上界 1。
+    # 整数：X 至多开 2 条边 ⟹ 至多服务 2 个请求 = 4R/3 ⟹ 上界 2/3。
+    env = _env([("X", "A"), ("X", "B"), ("X", "C")], np.full((1, 3), R))
+    reqs = [_req("X", v, 2 * R / 3, 0, 0) for v in ("A", "B", "C")]
+    return env, reqs
+
+
+def test_integer_closes_fractional_port_gap():
+    env, reqs = _star_one_slot()
+    lp = solve_bound(env, 0, 1, reqs, bucket=1)
+    ip = solve_bound(env, 0, 1, reqs, bucket=1, integer_activation=True)
+    assert lp["ub_success"] == pytest.approx(1.0, abs=1e-6)
+    assert ip["lp_status"] == 0 and ip["integer"] is True
+    assert ip["ub_success"] == pytest.approx(2 / 3, abs=1e-6)
+
+
+def test_integer_equals_lp_when_no_fractional_advantage():
+    # 星形 4 叶、10 槽：整数也能每槽开 2 条边轮换 ⟹ 与 LP 同为 10R
+    env = _env([("A", "X"), ("B", "X"), ("C", "X"), ("D", "X")], np.full((T, 4), R))
+    reqs = [_req("A", "B", 100 * R, 0, 9), _req("C", "D", 100 * R, 0, 9)]
+    ip = solve_bound(env, 0, T, reqs, bucket=1, integer_activation=True)
+    assert ip["ub_served"] == pytest.approx(10 * R, rel=1e-6)
+
+
+def test_integer_bound_never_exceeds_lp():
+    env = _env([("A", "X"), ("X", "B")], np.full((T, 2), R))
+    r = [_req("A", "B", 8 * R, 0, 4), _req("A", "X", 3 * R, 0, 6)]
+    lp = solve_bound(env, 0, T, r, bucket=1)["ub_served"]
+    ip = solve_bound(env, 0, T, r, bucket=1, integer_activation=True)["ub_served"]
+    assert ip <= lp + 1e-6
+
+
+def test_default_is_lp_and_marks_integer_false():
+    env, reqs = _star_one_slot()
+    out = solve_bound(env, 0, 1, reqs, bucket=1)
+    assert out["integer"] is False

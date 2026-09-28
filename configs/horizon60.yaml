@@ -1,0 +1,7 @@
+# 改进项 5（2026-09-28）：短时域实例（验证回合长 60 槽）。整数激活版流体上界（精确端口约束）在全 240 槽上
+# 30 分钟连根节点都解不完；短时域上可收敛 ⟹ 同一批截短回合上比较 RL / 专家 / LP 上界 / 整数上界，
+# 量化 LP 上界的松弛度与 RL 离最优的距离。RL 仍用 240 槽训练的 checkpoint（零样本，仅评测）。
+# 评测/专家/上界都经 test_protocol.run_validation_env_config ⟹ 键是 validation.episode_steps
+# （env.episode_steps 会被它覆盖）。开局时刻只由种子+窗口决定 ⟹ = 同一批留出回合的前 60 槽。
+validation:
+  episode_steps: 60
