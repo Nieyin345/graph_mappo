@@ -1,3 +1,4 @@
+import math
 ## Class entity definitions
 
 class SimConfig:
@@ -269,7 +270,31 @@ class GlobalSatellites(): ## Global Satellites Database
         {"name": "Sat_LEO_5f", "init_lat": 30.0, "init_lon": -72.0, "orbit_type": "LEO", "alt_km": 550.0, "inclination": 53.0}
     ]
     
-    @classmethod
-    def get_satellites(cls):
-        return cls.SATS[:SimConfig.NUM_SATS]
+    @staticmethod
+    def walker_delta(total=30, planes=5, phasing=1, inclination=53.0, alt_km=550.0):
+        """Walker-delta constellation i:T/P/F on circular orbits.
 
+        Plane p has RAAN 360*p/P; satellite k in it has argument of latitude
+        u = 360*k/S + 360*F*p/T at t = 0 (S = T/P), so the satellites are evenly
+        spaced along every plane.  ``init_u_deg`` carries u to the propagator;
+        ``init_lat`` is the matching geocentric latitude at t = 0 (for the registry).
+        """
+        per_plane = total // planes
+        out = []
+        for p in range(planes):
+            raan = (360.0 * p / planes + 180.0) % 360.0 - 180.0
+            for k in range(per_plane):
+                u = (360.0 * k / per_plane + 360.0 * phasing * p / total) % 360.0
+                lat = math.degrees(math.asin(math.sin(math.radians(inclination)) * math.sin(math.radians(u))))
+                out.append({"name": f"Sat_LEO_{p + 1}{chr(ord('a') + k)}", "init_lat": lat, "init_lon": raan,
+                            "init_u_deg": u, "orbit_type": "LEO", "alt_km": alt_km, "inclination": inclination})
+        return out
+
+    @classmethod
+    def get_satellites(cls, constellation="legacy"):
+        """``legacy``: the hand-written list above (dataset/global); ``walker``: Walker-delta 53:30/5/1."""
+        if constellation == "walker":
+            return cls.walker_delta()[:SimConfig.NUM_SATS]
+        if constellation != "legacy":
+            raise ValueError(f"unknown constellation {constellation!r}")
+        return cls.SATS[:SimConfig.NUM_SATS]

@@ -106,3 +106,37 @@ def test_compute_link_timeline_return_shape(tmp_path, monkeypatch):
     assert kmax.shape == (1440,)
     # no weather (None) -> kmax stays zero (no valid visible steps with coords at origin)
     assert kmax.dtype == np.float32
+
+
+def test_legacy_constellation_unchanged():
+    from legacy_data import GlobalSatellites
+    sats = GlobalSatellites.get_satellites()
+    assert sats == GlobalSatellites.SATS[:len(sats)]
+    assert all("init_u_deg" not in c for c in sats)
+
+
+def test_walker_delta_constellation_is_uniform():
+    """Walker-delta 53:30/5/1: 5 planes 72 deg apart, 6 sats 60 deg apart, 12 deg inter-plane phase."""
+    from legacy_data import GlobalSatellites
+    sats = GlobalSatellites.get_satellites("walker")
+    assert len(sats) == 30
+    assert {c["inclination"] for c in sats} == {53.0} and {c["alt_km"] for c in sats} == {550.0}
+    raans = sorted({round(c["init_lon"] % 360.0, 9) for c in sats})
+    assert np.allclose(raans, [0.0, 72.0, 144.0, 216.0, 288.0])
+    for p, r in enumerate([0.0, 72.0, 144.0, 216.0, 288.0]):
+        u = sorted(c["init_u_deg"] % 360.0 for c in sats if abs((c["init_lon"] - r + 180.0) % 360.0 - 180.0) < 1e-9)
+        assert len(u) == 6
+        assert np.allclose(np.diff(u), 60.0)
+        assert abs(u[0] - (12.0 * p) % 60.0) < 1e-9
+    for c in sats:  # init_lat is the geocentric latitude at t = 0
+        assert abs(c["init_lat"] - np.degrees(np.arcsin(np.sin(np.radians(53.0)) * np.sin(np.radians(c["init_u_deg"]))))) < 1e-9
+
+
+def test_vectorized_sat_positions_use_argument_of_latitude():
+    cfg = {"alt_km": 550.0, "inclination": 53.0, "init_lon": 72.0, "init_lat": 0.0, "init_u_deg": 150.0}
+    prop = KeplerianPropagator(6371.0 + cfg["alt_km"], 0.0, cfg["inclination"], cfg["init_lon"], 0.0, cfg["init_u_deg"])
+    t = np.array([0.0, 61.0, 3600.0, 86399.0])
+    lat, lon, alt = bgt._vectorized_sat_positions(cfg, t)
+    for i, tt in enumerate(t):
+        s_lat, s_lon, s_alt = prop.get_position_at_time(tt)
+        assert abs(lat[i] - s_lat) < 1e-6 and abs(lon[i] - s_lon) < 1e-6 and abs(alt[i] - s_alt) < 1e-6

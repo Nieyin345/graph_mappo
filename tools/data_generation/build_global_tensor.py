@@ -35,6 +35,9 @@ _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
 MIN_ELEVATION_DEG = 5.0
 ENABLE_STATIC_HAP_GS_PREFILTER = True
 MAX_HAP_GS_DISTANCE_KM = 700.0
+# Satellite constellation: "legacy" (default, reproduces dataset/global) or "walker"
+# (Walker-delta 53:30/5/1 with evenly spaced satellites; see GlobalSatellites.walker_delta).
+SAT_CONSTELLATION = os.environ.get("QKD_SAT_CONSTELLATION", "legacy")
 
 # 无地面端链路 (SAT-HAP / SAT-SAT) 的晴空夜间默认天气，与 load_weather_data 的默认值一致。
 # 只读共享，避免每个 worker 重复分配 52 万步的 10 个数组。
@@ -440,7 +443,9 @@ def _vectorized_sat_positions(cfg, t_seconds):
     aop = 0.0
     init_lat = float(cfg.get("init_lat", 0.0))
     i_rad = math.radians(inclination_deg)
-    if inclination_deg == 0:
+    if "init_u_deg" in cfg:  # circular orbit: mean anomaly = argument of latitude
+        m0 = math.radians(float(cfg["init_u_deg"]))
+    elif inclination_deg == 0:
         m0 = 0.0
     else:
         val = max(-1.0, min(1.0, math.sin(math.radians(init_lat)) / math.sin(i_rad)))
@@ -564,7 +569,7 @@ def build_all(out_dir=None, ideal_channel=False):
     syst_hap = system(range(T_HAP), THETA, np.array([[1, 1]]))
     hnodes = [hap({0: c["lon"]}, {0: c["lat"]}, {0: c["alt_km"]}, 1e9, c["name"]) for c in hap_configs]
     
-    sat_configs = GlobalSatellites.get_satellites()[:SimConfig.NUM_SATS]
+    sat_configs = GlobalSatellites.get_satellites(SAT_CONSTELLATION)[:SimConfig.NUM_SATS]
     # No longer store t->coord dictionaries to save memory
     snodes = [sat({0: c.get("init_lon", 0.0)}, {0: c.get("init_lat", 0.0)}, {0: c["alt_km"]}, 1e9, c["name"]) for c in sat_configs]
 
@@ -659,6 +664,8 @@ def build_all(out_dir=None, ideal_channel=False):
         "weather_fallback_steps_total": int(sum(row["fallback_steps"] for row in weather_coverage)),
         "ideal_channel": bool(ideal_channel),
     }
+    if SAT_CONSTELLATION != "legacy":
+        metadata["sat_constellation"] = SAT_CONSTELLATION
     with open(os.path.join(out_dir, "build_metadata.json"), "w", encoding="utf-8") as fh:
         json.dump(metadata, fh, indent=2)
 
