@@ -1,0 +1,8 @@
+# 预测头只作为读出层训练：BCE 只更新 usage_forecast 头，不更新共享 encoder。
+# 依据（v2c 诊断 2026-10-01/02）：头开启、bias_weight=0 的臂在 3x 下仍比专家低
+# 0.156，说明策略崩溃来自 BCE 对共享表征的更新，而非 bias 本身。打开本开关后
+# lite(v8+no_attention+v8_bias) 在 3x 三个种子上为 +0.003~+0.007（vs 专家）。
+# 默认（不加本 overlay）行为与此前逐位相同。
+train:
+  ppo:
+    usage_head_train_encoder: false

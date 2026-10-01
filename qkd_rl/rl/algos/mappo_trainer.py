@@ -328,8 +328,15 @@ class MAPPOTrainer:
         lr = float(ppo.get("usage_head_lr", ppo.get("actor_lr", 3e-4)) or 3e-4)
         epochs = int(ppo.get("usage_head_epochs", 1) or 1)
         bs = int(ppo.get("usage_head_batch", 256) or 256)
+        # usage_head_train_encoder=False（v2c 诊断 2026-10-01，opt-in）：BCE 只训头，
+        # 头成为冻结表征上的读出层。v2c 上 head 开启且 bias_weight=0 的臂仍崩溃
+        # （3x −0.156），说明破坏策略的是 BCE 对共享 encoder 的更新而非 bias。
+        # 默认 True，既有臂逐位不变。
+        train_encoder = bool(ppo.get("usage_head_train_encoder", True))
         if self._usage_head_opt is None:
-            params = list(head.parameters()) + list(self.model.encoder.parameters())
+            params = list(head.parameters())
+            if train_encoder:
+                params += list(self.model.encoder.parameters())
             self._usage_head_opt = torch.optim.Adam(params, lr=lr)
         opt = self._usage_head_opt
         pos_weight = (
@@ -359,6 +366,11 @@ class MAPPOTrainer:
                 opt.step()
                 total += float(loss.detach().cpu())
                 nb += 1
+        if not train_encoder:
+            # 反传仍会把梯度写进 encoder（及 actor 其余部分）的 .grad；清掉，
+            # 免得被后续任何不先 zero_grad 的优化器误用。
+            for p in self.model.parameters():
+                p.grad = None
         # 在线 AUC（代码审查 A2.2）：训练后在至多 128 个随机步上重算 logits，
         # rank AUC。batch-1 的 AUC≈0.5（头没学到）本可以在第 2 个 update 就被
         # 看见，而不是等整条 run 跑完离线测。负例下采样到 2000 条控内存。
