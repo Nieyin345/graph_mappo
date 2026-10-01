@@ -1,0 +1,18 @@
+# 正式数据集（2026-10-01）：v2 信道模型 + 有限码长 + 覆盖率云模型（--cloud-model coverage_layers），
+# 由 tools/dataset_v2/build_dataset_v2.py 生成到 dataset/global_v2c（dataset/global、dataset/global_v2 不变）。
+# 低云+中云覆盖率 = 时隙内遮挡时间比例 f，有限码长按 f*N 个脉冲的块计算；高云按薄卷云衰减（tau = 0.3）。
+# 候选池 45 GS + 45 HAP（静止于城市上空 20 km）+ Walker 53:30/5/1；node_registry 的 base 列 = 1
+# 为基础网络 30 GS + 30 HAP，排在最前，所以 first_n 取 30/30/30 就是基础网络。
+# 用法：在 env_full.yaml 之后叠加本文件。
+rate_provider:
+  normalization:
+    stats_path: null            # -> dataset/global_v2c/rate_stats.json
+  h5:
+    dataset_dir: dataset/global_v2c
+scenario:
+  active_nodes:
+    mode: first_n
+    gs_count: 30
+    hap_count: 30
+    sat_count: 30
+    exclude: []                 # 旧数据集的 Stockholm 孤岛问题在新数据集中不存在（重建后需复核 link_diag.csv）
