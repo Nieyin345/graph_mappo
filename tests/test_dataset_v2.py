@@ -95,3 +95,66 @@ def test_smoke_build(tmp_path):
     assert meta["num_links"] == len(links) and meta["build_config"]["sat_constellation"] == "walker"
     with pytest.raises(SystemExit):                      # existing output needs --overwrite
         B.main(common + ["--out", str(out), "--days", "1", "--workers", "1"])
+
+
+def test_key_length_block_size_override():
+    fk = F.FiniteKeyParams()
+    eta = 10 ** (np.array([-14.1, -30.0, -35.8, -40.0]) / 10)
+    full = F.key_length(eta, 5e-7)
+    np.testing.assert_array_equal(F.key_length(eta, 5e-7, fk, n_pulses=fk.n_pulses), full)   # bit-identical
+    half = F.key_length(eta, 5e-7, fk, n_pulses=0.5 * fk.n_pulses)
+    assert np.all(half <= 0.5 * full + 1)             # finite-size penalty: smaller block, less than linear
+    assert half[0] > 0.45 * full[0]                   # strong link: nearly linear in the block size
+    tiny = F.key_length(eta, 5e-7, fk, n_pulses=np.array([1e3, 1e3, 1e3, 1e3]))
+    assert np.all(tiny == 0)
+
+
+def _write_layers(tmp: Path, low: dict, mid: dict, high: dict) -> Path:
+    d = tmp / "layers"
+    d.mkdir(exist_ok=True)
+    for n in ("Alpha", "Beta"):
+        with open(d / f"{n}.csv", "w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(["time", "cloud_cover", "cloud_cover_low", "cloud_cover_mid", "cloud_cover_high"])
+            w.writerows([["2023-01-01T00:00", 0.0, low[n], mid[n], high[n]]] * B.YEAR_HOURS)
+    return d
+
+
+def test_coverage_cloud_model(tmp_path):
+    import h5py
+    st = _write_inputs(tmp_path)
+    common = ["--stations", str(st), "--weather-dir", str(tmp_path / "wx"), "--era5-dir", str(tmp_path / "era5"),
+              "--days", "1", "--workers", "1", "--no-stats", "--keep-zero-links"]
+    cov = common + ["--cloud-model", "coverage_layers"]
+    assert B.main(cov[:6] + ["--cloud-model", "coverage_layers", "--check-inputs"]) == 1   # layer files missing
+    ldir = _write_layers(tmp_path, low={"Alpha": 50.0, "Beta": 0.0}, mid={"Alpha": 0.0, "Beta": 0.0},
+                         high={"Alpha": 0.0, "Beta": 100.0})
+    assert B.main(cov + ["--cloud-layers-dir", str(ldir), "--check-inputs"]) == 0
+    assert B.main(common + ["--out", str(tmp_path / "clear")]) == 0               # binary, cloud_cover = 0
+    assert B.main(cov + ["--cloud-layers-dir", str(ldir), "--out", str(tmp_path / "cov")]) == 0
+    reg = list(csv.DictReader(open(tmp_path / "cov" / "link_registry.csv", encoding="utf-8")))
+    assert reg == list(csv.DictReader(open(tmp_path / "clear" / "link_registry.csv", encoding="utf-8")))
+    with h5py.File(tmp_path / "clear" / "link_data.h5", "r") as f:
+        k0 = f["k_max"][:]
+    with h5py.File(tmp_path / "cov" / "link_data.h5", "r") as f:
+        k1 = f["k_max"][:]
+    col = {(int(r["node_u"]), int(r["node_v"])): i for i, r in enumerate(reg)}
+    a, b = col[(0, 2)], col[(1, 3)]                    # own HAP-GS links of Alpha and Beta
+    # Alpha: half the slot cloud-free -> about half the key, never zero (no binary outage)
+    assert (k1[:, a] > 0).all() and np.all(k1[:, a] < 0.5 * k0[:, a] + 1) and np.all(k1[:, a] > 0.45 * k0[:, a])
+    # Beta: cirrus overhead = attenuation exp(-0.3) at zenith, link stays usable
+    assert (k1[:, b] > 0).all() and np.all(k1[:, b] < k0[:, b]) and np.all(k1[:, b] > 0.5 * k0[:, b])
+    sats = [i for i, r in enumerate(reg) if r["link_type"] in ("SAT-HAP", "SAT-SAT")]
+    np.testing.assert_array_equal(k1[:, sats], k0[:, sats])    # only ground-terminated links change
+    meta = json.loads((tmp_path / "cov" / "build_metadata.json").read_text(encoding="utf-8"))
+    assert meta["build_config"]["cloud_model"] == "coverage_layers"
+    ldir2 = tmp_path / "l2"
+    ldir2.mkdir()
+    for n in ("Alpha", "Beta"):                          # overcast low cloud -> ground links off
+        (ldir2 / f"{n}.csv").write_text("time,cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high\n"
+                                        + "2023-01-01T00:00,100,100,0,0\n" * B.YEAR_HOURS, encoding="utf-8")
+    assert B.main(cov + ["--cloud-layers-dir", str(ldir2), "--out", str(tmp_path / "ovc")]) == 0
+    with h5py.File(tmp_path / "ovc" / "link_data.h5", "r") as f:
+        k2 = f["k_max"][:]
+    gl = [i for i, r in enumerate(reg) if r["link_type"] in ("HAP-GS", "SAT-GS")]
+    assert (k2[:, gl] == 0).all()

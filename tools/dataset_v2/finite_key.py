@@ -43,14 +43,18 @@ def h2(x):
     return -x * np.log2(x) - (1.0 - x) * np.log2(1.0 - x)
 
 
-def key_length(eta, y0, fk: FiniteKeyParams = FiniteKeyParams()):
-    """Secret key length ell [bit] of one block (eq. (C7)); zero where no key can be extracted."""
+def key_length(eta, y0, fk: FiniteKeyParams = FiniteKeyParams(), n_pulses=None):
+    """Secret key length ell [bit] of one block (eq. (C7)); zero where no key can be extracted.
+
+    ``n_pulses`` (scalar or array broadcastable to ``eta``) overrides the block size N = f_rep * Delta;
+    the coverage cloud model passes N_eff = f * N, f = cloud-free fraction of the slot.  None keeps
+    the original scalar N (bit-identical to the version used for dataset/global_v2)."""
     eta = np.asarray(eta, dtype=np.float64)
     y0 = np.broadcast_to(np.asarray(y0, dtype=np.float64), eta.shape)
     mu1, mu2, mu3 = fk.mu
     if mu3 != 0.0:
         raise NotImplementedError("the closed forms below assume a vacuum decoy (mu3 = 0)")
-    N = fk.n_pulses
+    N = fk.n_pulses if n_pulses is None else np.broadcast_to(np.asarray(n_pulses, dtype=np.float64), eta.shape)
     beta = math.log(21.0 / fk.eps_sec)
     tau0 = sum(p * math.exp(-m) for p, m in zip(fk.p_mu, fk.mu))
     tau1 = sum(p * math.exp(-m) * m for p, m in zip(fk.p_mu, fk.mu))
@@ -107,6 +111,6 @@ def key_length(eta, y0, fk: FiniteKeyParams = FiniteKeyParams()):
     return np.where(okp, np.maximum(np.floor(ell), 0.0), 0.0)
 
 
-def slot_rate(eta, y0, fk: FiniteKeyParams = FiniteKeyParams()):
+def slot_rate(eta, y0, fk: FiniteKeyParams = FiniteKeyParams(), n_pulses=None):
     """Slot key rate ell / Delta [bit/s] before the cloud indicator (paper eq. (18))."""
-    return key_length(eta, y0, fk) / fk.slot_s
+    return key_length(eta, y0, fk, n_pulses) / fk.slot_s

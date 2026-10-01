@@ -15,8 +15,16 @@ What it does
 * per slot (Delta = 60 s, 2023, t = minutes since 2023-01-01 00:00 UTC): geometry, visibility, mean
   transmittance and background probability from ``tools/channel_v2/rate_model_v2.RateModelV2``
   (ERA5 Monin-Obukhov C_n^2, CAMS AOD, SMF Monte-Carlo table, kappa_x), the finite-key length of
-  ``finite_key.key_length`` and the Lund-Shanklin cloud indicator chi (one uniform per station and hour,
-  shared by all links of that station, eq. (17)); rate R = chi * ell / Delta (eq. (18));
+  ``finite_key.key_length`` and the cloud term of ``--cloud-model``:
+    - ``binary_total`` (default, = dataset/global_v2): Lund-Shanklin indicator chi from the total cloud
+      cover (one uniform per station and hour, shared by all links of that station, eq. (17));
+      rate R = chi * ell / Delta (eq. (18));
+    - ``coverage_layers`` (10-01, user decision): the low+mid cloud cover is read as the cloud-blocked
+      fraction of the slot (advected cloud field: blocked time fraction = coverage), so the cloud-free
+      fraction f = P_LS(alpha, C_lm), C_lm = 1-(1-C_low)(1-C_mid) (random overlap), and the key is the
+      finite-key length of a block of f*N pulses; high (ice) cloud is a mean transmittance
+      T_ci = 1 - C_high (1 - exp(-tau_ci m(alpha))) on eta (thin cirrus as attenuation at 1.55 um,
+      Poulenard et al., Proc. SPIE 8971, 897107, 2014); R = ell(T_ci eta, Y0; f N) / Delta;
 * links with zero rate over the whole period are dropped (as in the current dataset) and listed in
   ``link_registry_skipped.csv``.
 
@@ -54,8 +62,8 @@ for sub in ("tools/channel_v2", "tools/data_generation", "tools/dataset_v2"):
         sys.path.insert(0, p)
 
 from finite_key import FiniteKeyParams, slot_rate  # noqa: E402
-from rate_model_v2 import (ParamsV2, RateModelV2, cn2_monin_obukhov, p_clear_lund_shanklin,  # noqa: E402
-                           sun_elevation_deg)
+from rate_model_v2 import (ParamsV2, RateModelV2, airmass_kasten_young, cn2_monin_obukhov,  # noqa: E402
+                           p_clear_lund_shanklin, sun_elevation_deg)
 
 MARKER = ".built_by_build_dataset_v2"
 YEAR_HOURS = 8760
@@ -76,6 +84,11 @@ class BuildConfig:
     cloud_seed: int = 2023
     year: int = 2023
     protocol: str = "finite_key"  # "finite_key" (paper eq. (18)) | "asymptotic" (diagnostics only)
+    cloud_model: str = "binary_total"   # "binary_total" (dataset/global_v2) | "coverage_layers" (10-01)
+    # visible optical depth of a high (ice) cloud layer; at 1.55 um the ice-crystal extinction efficiency
+    # is ~2 as in the visible (geometric-optics limit), so the visible value is used. 0.3 = boundary
+    # thin/opaque cirrus (Sassen & Cho 1992 classes); CALIPSO / ground-lidar annual means ~0.3.
+    tau_cirrus: float = 0.3
 
 
 # ----------------------------------------------------------------------------- inputs
@@ -99,7 +112,10 @@ def _read_csv_columns(path: Path, cols: list[str]) -> dict[str, np.ndarray]:
     return {c: df[c].astype(float).to_numpy() for c in cols}
 
 
-def check_inputs(stations, weather_dir: Path, era5_dir: Path) -> dict:
+LAYER_COLS = ["cloud_cover_low", "cloud_cover_mid", "cloud_cover_high"]
+
+
+def check_inputs(stations, weather_dir: Path, era5_dir: Path, layers_dir: Path | None = None) -> dict:
     """Per station: Open-Meteo weather (cloud, AOD) and ERA5 fluxes present, 8760 rows, NaN counts."""
     rep = {}
     for s in stations:
@@ -120,8 +136,37 @@ def check_inputs(stations, weather_dir: Path, era5_dir: Path) -> dict:
         else:
             r["era5_rows"] = 0
         r["ok"] = r["weather_rows"] == YEAR_HOURS and r["era5_rows"] == YEAR_HOURS
+        if layers_dir is not None:
+            f = layers_dir / f"{s['name']}.csv"
+            if f.exists():
+                d = _read_csv_columns(f, LAYER_COLS)
+                r["layer_rows"] = int(len(d[LAYER_COLS[0]]))
+                r["layer_nan"] = int(np.isnan(np.stack(list(d.values()))).sum())
+            else:
+                r["layer_rows"] = 0
+            r["ok"] = r["ok"] and r["layer_rows"] == YEAR_HOURS
         rep[s["name"]] = r
     return rep
+
+
+def load_cloud_layers(stations, layers_dir: Path):
+    """(G, 8760) low+mid combined cover C_lm = 1-(1-C_low)(1-C_mid) and high cover, fractions 0..1."""
+    G = len(stations)
+    c_lm = np.zeros((G, YEAR_HOURS))
+    c_hi = np.zeros((G, YEAR_HOURS))
+    fill = {}
+    for gi, s in enumerate(stations):
+        d = _read_csv_columns(layers_dir / f"{s['name']}.csv", LAYER_COLS)
+        if len(d[LAYER_COLS[0]]) != YEAR_HOURS:
+            raise SystemExit(f"{s['name']}: cloud-layer file has {len(d[LAYER_COLS[0]])} rows, need {YEAR_HOURS}")
+        v = {}
+        for c in LAYER_COLS:
+            x = d[c]
+            fill.setdefault(s["name"], {})[c + "_nan"] = int(np.isnan(x).sum())
+            v[c] = np.clip(np.nan_to_num(x, nan=float(np.nanmean(x)) if np.isfinite(x).any() else 0.0) / 100.0, 0, 1)
+        c_lm[gi] = 1.0 - (1.0 - v["cloud_cover_low"]) * (1.0 - v["cloud_cover_mid"])
+        c_hi[gi] = v["cloud_cover_high"]
+    return c_lm, c_hi, fill
 
 
 def load_weather(stations, weather_dir: Path, era5_dir: Path, p: ParamsV2, allow_era5_fallback: bool):
@@ -352,6 +397,7 @@ def compute_block(b0: int, b1: int):
                 continue
             kw = {}
             chi = np.ones(li.size)
+            cov_f = None
             if lt in ("HAP-GS", "SAT-GS"):
                 g = u[li]                                   # GS is always the lower node id
                 hr = hours[ti]
@@ -359,18 +405,35 @@ def compute_block(b0: int, b1: int):
                 a = W["a_cn2"][g, hr]
                 a_fb = np.where(s_rx > 0.0, p.a_day, p.a_night)
                 kw.update(sun_rx_deg=s_rx, aod550=W["aod"][g, hr], a_cn2=np.where(W["era5_ok"][g, hr], a, a_fb))
-                pclr = p_clear_lund_shanklin(elev[li, ti], W["cloud"][g, hr])
-                chi = (W["u_cloud"][g, hr] < pclr).astype(float)
+                if cfg.cloud_model == "coverage_layers":
+                    cov_f = p_clear_lund_shanklin(elev[li, ti], W["c_lm"][g, hr])
+                    t_ci = 1.0 - W["c_hi"][g, hr] * (1.0 - np.exp(-cfg.tau_cirrus
+                                                               * airmass_kasten_young(elev[li, ti])))
+                else:
+                    pclr = p_clear_lund_shanklin(elev[li, ti], W["cloud"][g, hr])
+                    chi = (W["u_cloud"][g, hr] < pclr).astype(float)
             elif lt == "SAT-HAP":
                 kw.update(sun_rx_deg=sun[u[li] - G, ti])
             r_asym, parts = m.link_rate(lt, dist[li, ti] * 1e3, elev[li, ti], return_parts=True, **kw)
-            if cfg.protocol == "asymptotic":
-                r = np.asarray(r_asym, dtype=float) * chi
+            if cov_f is not None:
+                eta_c = parts["eta"] * t_ci
+                r = np.zeros(li.size)
+                ok = cov_f > 0
+                if cfg.protocol == "asymptotic":
+                    r[ok] = m.skr(eta_c[ok], np.broadcast_to(parts["y0"], eta_c.shape)[ok]) * cov_f[ok]
+                else:
+                    r[ok] = slot_rate(eta_c[ok], np.broadcast_to(parts["y0"], eta_c.shape)[ok], fk,
+                                      n_pulses=cov_f[ok] * fk.n_pulses)
+                blocked = ~ok
             else:
-                r = slot_rate(parts["eta"], parts["y0"], fk) * chi
+                if cfg.protocol == "asymptotic":
+                    r = np.asarray(r_asym, dtype=float) * chi
+                else:
+                    r = slot_rate(parts["eta"], parts["y0"], fk) * chi
+                blocked = chi == 0
             out[ti, cols[li]] = r.astype(np.float32)
             np.add.at(n_pos, cols[li], (r > 0).astype(np.int64))
-            np.add.at(n_cloud, cols[li], (chi == 0).astype(np.int64))
+            np.add.at(n_cloud, cols[li], blocked.astype(np.int64))
     return b0, out, n_vis, n_pos, n_cloud
 
 
@@ -426,6 +489,11 @@ def main(argv=None) -> int:
                     help="diagnostics: legacy = the hand-written list of dataset/global")
     ap.add_argument("--protocol", default=BuildConfig.protocol, choices=["finite_key", "asymptotic"],
                     help="diagnostics: asymptotic = GLLP rate of rate_model_v2 instead of eq. (18)")
+    ap.add_argument("--cloud-model", default=BuildConfig.cloud_model, choices=["binary_total", "coverage_layers"],
+                    help="binary_total = hourly Lund-Shanklin indicator on total cover (dataset/global_v2); "
+                         "coverage_layers = low+mid cover as blocked slot fraction, high cloud as attenuation")
+    ap.add_argument("--tau-cirrus", type=float, default=BuildConfig.tau_cirrus)
+    ap.add_argument("--cloud-layers-dir", default=".tmp/channel_v2/cloud_layers")
     ap.add_argument("--allow-era5-fallback", action="store_true",
                     help="stations without an ERA5 file use the day/night A of Liorni 2019 (smoke tests only)")
     ap.add_argument("--keep-zero-links", action="store_true", help="do not drop links that are zero all period")
@@ -437,8 +505,9 @@ def main(argv=None) -> int:
     rel = lambda x: (ROOT / x) if not Path(x).is_absolute() else Path(x)  # noqa: E731
     stations = read_stations(rel(args.stations))
     wdir, edir, out = rel(args.weather_dir), rel(args.era5_dir), rel(args.out)
+    ldir = rel(args.cloud_layers_dir)
     if args.check_inputs:
-        rep = check_inputs(stations, wdir, edir)
+        rep = check_inputs(stations, wdir, edir, ldir if args.cloud_model == "coverage_layers" else None)
         bad = [n for n, r in rep.items() if not r["ok"]]
         for n, r in rep.items():
             print(f"{n:14s} {'OK ' if r['ok'] else 'MISSING'} {r}")
@@ -448,13 +517,19 @@ def main(argv=None) -> int:
     import h5py
 
     t_start = time.time()
-    cfg = BuildConfig(cloud_seed=args.cloud_seed, sat_constellation=args.constellation, protocol=args.protocol)
+    cfg = BuildConfig(cloud_seed=args.cloud_seed, sat_constellation=args.constellation, protocol=args.protocol,
+                      cloud_model=args.cloud_model, tau_cirrus=args.tau_cirrus)
     params = ParamsV2()
     fk = FiniteKeyParams()
     T = args.days * 1440 // SLOT_MIN
     if not 1 <= args.days <= 365:
         raise SystemExit("--days must be in 1..365 (weather covers 2023)")
     cloud, aod, a_cn2, era5_ok, fill = load_weather(stations, wdir, edir, params, args.allow_era5_fallback)
+    c_lm = c_hi = None
+    if cfg.cloud_model == "coverage_layers":
+        c_lm, c_hi, lfill = load_cloud_layers(stations, ldir)
+        for k, v in lfill.items():
+            fill.setdefault(k, {}).update(v)
     prepare_out(out, args.overwrite)
 
     sat_cfgs = satellite_configs(cfg.sat_constellation)
@@ -471,7 +546,7 @@ def main(argv=None) -> int:
                  gs_lat=np.array([s["lat"] for s in stations]), gs_lon=np.array([s["lon"] for s in stations]),
                  link_u=np.array([x[0] for x in links]), link_v=np.array([x[1] for x in links]),
                  link_type=np.array([x[2] for x in links]), cloud=cloud, aod=aod, a_cn2=a_cn2,
-                 era5_ok=era5_ok, u_cloud=u_cloud)
+                 era5_ok=era5_ok, u_cloud=u_cloud, c_lm=c_lm, c_hi=c_hi)
 
     tmp_path = out / "_link_data_all_candidates.h5"
     n_vis = np.zeros(L, dtype=np.int64)
@@ -535,7 +610,7 @@ def main(argv=None) -> int:
         fo.create_dataset("link_registry", data=reg)
         fo.attrs.update(dict(theta_sec=60, period_steps=T, period_hours=T, min_elevation_deg=cfg.alpha_min_deg,
                              h_min_km=cfg.h_min_km, max_hap_gs_distance_km=cfg.d_max_km, static_hap_gs_prefilter=1,
-                             rate_model="v2_finite_key"))
+                             rate_model="v2_finite_key", cloud_model=cfg.cloud_model))
     tmp_path.unlink()
 
     with h5py.File(out / "hap_positions.h5", "w") as fh:
@@ -579,7 +654,8 @@ def main(argv=None) -> int:
                            network_mean_bps_per_slot=float(r_sum[idx].sum() / T))
     inputs = {}
     for s in stations:
-        for kind, d in (("weather", wdir), ("era5", edir)):
+        for kind, d in (("weather", wdir), ("era5", edir)) + ((("cloud_layers", ldir),)
+                                                              if cfg.cloud_model == "coverage_layers" else ()):
             f = d / f"{s['name']}.csv"
             if f.exists():
                 inputs[f"{kind}/{s['name']}.csv"] = md5(f)
