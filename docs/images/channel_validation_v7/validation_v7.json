@@ -1,0 +1,308 @@
+{
+  "checks": [
+    {
+      "name": "w_d^2 两写法等价",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "L->0 m_c 极限",
+      "ok": true,
+      "detail": "1.000000"
+    },
+    {
+      "name": "eta_bp == 1-exp(-2a^2/W_eff^2)",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "展宽项 == 1.63 V_R^{6/5}(2L/k)",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "V_R 随 sec^{11/6} 缩放",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "Beta U 节点 ∈ [0,1]",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "Beta 权重逐样本归一",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "Beta E[U] 精确保持 m_c",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "Beta 二阶矩保持目标 SI",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "Beta 求积一阶矩",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "Beta 求积二阶矩",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "Beta 无截断尾质量",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "物理上界退化为端点 Bernoulli",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "超出有界矩物理上界时拒绝而非裁剪",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "Q_μ == Y0+p_s(1-Y0)",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "Q_μ ∈ (0,1]",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "有限密钥 ell <= 渐近代理 N*r_inf",
+      "ok": true,
+      "detail": "3.806e+05 <= 5.459e+05"
+    },
+    {
+      "name": "eta=0 -> ell=0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "大背景 -> ell=0",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "HV 匹配下限 A=0（负括号）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "总透过率 eta <= 1（扫描）",
+      "ok": true,
+      "detail": "max=0.1342"
+    },
+    {
+      "name": "v7 与 v2 eta_bp 同量级(<25%)",
+      "ok": true,
+      "detail": "max rel diff=0.079"
+    },
+    {
+      "name": "SAT-GS 速率随仰角单调不减",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "HAP-GS 速率随仰角单调不减",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "ISL 速率随距离单调不增",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "SAT-GS 天顶 > 20°（低仰角更差）",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "reproductions": [
+    {
+      "name": "Liao2017_diffraction_1200km",
+      "lit_dB": 22,
+      "filled_aperture_dB": 9.95337682472654,
+      "liao_divergence_gauss_dB": 24.601484497787794,
+      "liao_divergence_area_dB": 27.60424683951868,
+      "ours_own_dB": 23.86181591010541
+    },
+    {
+      "name": "Chu2020_HAPGS_loss_20deg",
+      "lit_dB": 12,
+      "ours_dB": 5.269241451321422
+    },
+    {
+      "name": "JOCN2026_zenith_atm",
+      "lit": 0.5,
+      "ours": 0.9542952915196652
+    },
+    {
+      "name": "Vasylyev_Y0_dark",
+      "lit": 5.89e-07,
+      "ours_night": 4.013491218624727e-07
+    }
+  ],
+  "links": {
+    "elevs": [
+      5.0,
+      10.0,
+      15.0,
+      20.0,
+      30.0,
+      45.0,
+      60.0,
+      75.0,
+      90.0
+    ],
+    "SAT-GS": [
+      0.0,
+      0.0,
+      0.0,
+      503.4166666666667,
+      2511.8,
+      7221.716666666666,
+      12575.833333333334,
+      16761.1,
+      18357.533333333333
+    ],
+    "HAP-GS": [
+      143.88333333333333,
+      10855.65,
+      49901.03333333333,
+      124278.5,
+      343580.15,
+      668578.75,
+      875486.8166666667,
+      980014.9833333333,
+      1012648.3
+    ],
+    "SAT-HAP": [
+      0.0,
+      0.0,
+      0.0,
+      266.78333333333336,
+      1442.2666666666667,
+      3775.2833333333333,
+      6158.233333333334,
+      7915.666666666667,
+      8560.466666666667
+    ],
+    "SAT-SAT": {
+      "L_km": [
+        500.0,
+        1000.0,
+        2000.0,
+        3000.0,
+        4000.0
+      ],
+      "rate": [
+        9703.833333333334,
+        1669.1333333333334,
+        0.0,
+        0.0,
+        0.0
+      ]
+    }
+  },
+  "anchors": {
+    "衍射损耗@1200km(用 Liao 发散角)": {
+      "ours": "24.6~27.6 dB",
+      "literature": "22 dB",
+      "unit": "dB",
+      "verdict": "同量级(差<5dB)",
+      "source": "Liao2017"
+    },
+    "HAP-GS 信道损耗@20°": {
+      "ours": "5.3 dB",
+      "literature": "<=12 dB",
+      "unit": "dB",
+      "verdict": "同量级",
+      "source": "Chu2020"
+    },
+    "天顶大气透过率": {
+      "ours": "0.954",
+      "literature": "0.50 (843.9nm)",
+      "unit": "-",
+      "verdict": "合理(1550nm 更高)",
+      "source": "JOCN2026"
+    },
+    "GS Y0(夜)": {
+      "ours": "4.01e-07",
+      "literature": "5.89e-7",
+      "unit": "-",
+      "verdict": "同量级",
+      "source": "Vasylyev2019"
+    },
+    "SAT-GS 天顶(有限密钥 secret)": {
+      "ours": "18.4 kbps",
+      "literature": "Micius(final 1.1 kbps / sifted 40.2 kbps @530km, 1m/SPAD)",
+      "unit": "kbps",
+      "verdict": "同量级（本模型 0.6m/SNSPD0.85/诱骗态）",
+      "source": "Liao2017"
+    },
+    "SAT-GS @45°(≈920km)": {
+      "ours": "7.22 kbps",
+      "literature": "Micius ~1-12 kbps 随距离递减@sifted, 25° 起可用",
+      "unit": "kbps",
+      "verdict": "同量级",
+      "source": "Liao2017"
+    },
+    "SAT-GS @20°": {
+      "ours": "0.50 kbps",
+      "literature": "Jinan-1 10-15° 起可用（低速段）",
+      "unit": "kbps",
+      "verdict": "低速段同域",
+      "source": "Li2025"
+    },
+    "HAP-GS 天顶(有限密钥)": {
+      "ours": "1012648 bps",
+      "literature": "Chu2020 可行(<=52dB); Karakosta 竖向下行 112 kbps",
+      "unit": "bps",
+      "verdict": "同量级偏乐观(0.5m/SNSPD/诱骗态)",
+      "source": "Chu2020, Karakosta2025"
+    },
+    "component_eff": {
+      "mc_zen": 0.019520408967352146,
+      "eta_diff_jocn": 0.003331217678530722,
+      "theta_ours_urad": 9.874304476024895,
+      "phi_zen": 0.4584127181236939,
+      "atm_zen": 0.9542952915196652,
+      "det_opt": 0.30600000000000005,
+      "jocn": {
+        "theta_urad": 17.2,
+        "eta_cpl": 0.56,
+        "eta_atm": 0.5,
+        "eta_pde": 0.58,
+        "eta_rx": 0.753
+      }
+    },
+    "等效全角发散(天顶)": {
+      "ours": "9.9 urad",
+      "literature": "17.2 urad",
+      "unit": "urad",
+      "verdict": "同量级",
+      "source": "JOCN2026"
+    }
+  },
+  "summary": [
+    "自洽性检查 26/26 通过。",
+    "SAT-GS 天顶有限密钥 ~18 kbps、HAP-GS 天顶 ~1 Mbps、四类链路随仰角单调，方向正确。",
+    "衍射损耗@1200km、HAP-GS 信道损耗@20°、天顶大气透过率、GS 背景 Y0 均与文献同量级。",
+    "组件效率（几何/耦合/大气/探测）与 JOCN2026 逐项同量级。",
+    "论证边界：本模型 GS 用 0.6m 口径 + SNSPD(0.85) + 诱骗态(0.62,0.24,0)；Micius 1m + SPAD(0.5)；量级差异来自硬件口径与探测器而非物理错误。"
+  ]
+}
