@@ -274,9 +274,12 @@ class RateModelV7(RateModelV2):
     def y0(self, rx, lb):
         return -np.expm1(-super().y0(rx, lb))
 
-    def optical_states(self, ltype, L, elev, *, A=None, aod=0.0, sun=0.0,
+    def optical_states(self, ltype, L, elev, *, A=None, vis_km=0.0, sun=0.0,
                        high_cloud=0.0, tau_cirrus=0.3, h_gs_km=0.0):
-        """Caller applies LOS/elevation. Returns state statistics and domain diagnostics."""
+        """Caller applies LOS/elevation. Returns state statistics and domain diagnostics.
+
+        ``vis_km`` is the station-hour visibility (km) driving the v7.5 Koschmieder-Kim
+        weather extinction via ``eta_wx`` (replaces the earlier AOD column)."""
         from tools.channel_v2.rate_model_v2 import airmass_kasten_young
         if not np.isfinite(tau_cirrus) or tau_cirrus < 0:
             raise ValueError("tau_cirrus must be finite and nonnegative")
@@ -292,11 +295,11 @@ class RateModelV7(RateModelV2):
         if ground:
             if A is None or sun is None:
                 raise ValueError("ground links require matched HV coefficient A and solar elevation")
-            A, aod = np.asarray(A, float), np.asarray(aod, float)
+            A, vis_km = np.asarray(A, float), np.asarray(vis_km, float)
             if np.any(~np.isfinite(A)) or np.any(A < 0):
                 raise ValueError("matched HV coefficient A must be finite and nonnegative")
-            if np.any(~np.isfinite(aod)) or np.any(aod < 0):
-                raise ValueError("AOD must be finite and nonnegative")
+            if np.any(~np.isfinite(vis_km)) or np.any(vis_km <= 0):
+                raise ValueError("visibility must be finite and positive (km)")
         rx = "GS" if ground else ("HAP" if ltype == "SAT-HAP" else "SAT")
         if ground:
             if np.ndim(h_gs_km) != 0:
@@ -354,7 +357,7 @@ class RateModelV7(RateModelV2):
             # Molecular column uses the absolute GS/transmitter altitude
             # engineering reference (DEM/geopotential-height baseline), while
             # turbulence uses the locally shifted AGL-HV profile above.
-            clear = self.eta_mol(elev, tx_top_km, h_gs_km) * self.eta_aer(elev, aod)
+            clear = self.eta_mol(elev, tx_top_km, h_gs_km) * self.eta_wx(elev, vis_km)
             lb = np.where(np.asarray(sun)>0, self.p.lb_day, self.p.lb_night)
         else:
             vr = np.zeros_like(L)

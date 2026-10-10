@@ -95,6 +95,11 @@ class ParamsV2:
     tau_abs: float = 0.0193
     h_mol_km: float = 8.4
     angstrom: float = 1.3           # Angstrom 1964 Tellus 16:64 average for natural atmospheres (1.3 +- 0.5)
+    # v7.5 weather extinction from visibility (Koschmieder-Kim); replaces the CAMS AOD column.
+    # tau_wx = 3.91 * (1/V - 1/V_max) * (lam/550)^-q * H_w : the increment over the clear-sky
+    # reference V_max, so it never double-counts the fixed molecular background in eta_mol.
+    weather_layer_km: float = 2.0   # H_w: near-ground fog/haze layer thickness (StratoQ _LAYER_KM fog=2)
+    clear_visibility_km: float = 50.0  # V_max: visibility treated as extreme-clear (tau_wx -> 0)
     hv_wind: float = 21.0           # HV-5/7 (Andrews 2005 ch. 12; Liorni 2019 text after eq. (E.1))
     a_day: float = 2.75e-14         # fallback near-ground Cn2 (Liorni 2019 App. E, after eq. (E.1)) when no ERA5 flux
     a_night: float = 1.10e-14
@@ -417,10 +422,39 @@ class RateModelV2:
         return np.exp(-tau * airmass_kasten_young(elev_deg))
 
     def eta_aer(self, elev_deg, aod550):
-        """Paper eq. (11): CAMS AOD550 (Open-Meteo AQ API) scaled by the Angstrom law."""
+        """Paper eq. (11): CAMS AOD550 (Open-Meteo AQ API) scaled by the Angstrom law.
+
+        Retained for legacy v2 datasets; the v7.5 baseline uses ``eta_wx`` (visibility)
+        instead, so the aerosol column and this method are no longer in the main path.
+        """
         p = self.p
         tau = np.asarray(aod550) * (p.lam * 1e9 / 550.0) ** (-p.angstrom)
         return np.exp(-tau * airmass_kasten_young(elev_deg))
+
+    def eta_wx(self, elev_deg, vis_km):
+        """v7.5 tropospheric weather extinction from visibility (Koschmieder-Kim).
+
+        Returns ``exp(-tau_wx * m(alpha))`` with the column optical depth
+
+            tau_wx = 3.91 * (1/V - 1/V_max) * (lam/550 nm)^-q * H_w,
+
+        an **increment over the extreme-clear reference** V_max, not a total. The fixed
+        clear-sky background (Rayleigh + molecular absorption) stays in ``eta_mol``; this
+        term only adds the weather-induced part, so ``tau_wx -> 0`` as V -> V_max and the
+        two are never double-counted. 3.91/V is the Koschmieder extinction coefficient
+        [Middleton1952], q the Kim wavelength exponent [Kim2001], H_w the near-ground
+        weather-layer thickness. Fog, haze, aerosol and precipitation all enter through
+        the single visibility value; no separate rain/snow rate term is added.
+        """
+        p = self.p
+        v = np.asarray(vis_km, dtype=float)
+        v_eff = np.maximum(v, 1e-6)
+        q = np.where(v_eff > 50.0, 1.6,
+                     np.where(v_eff > 6.0, 1.3, 0.585 * np.power(v_eff, 1.0 / 3.0)))
+        k_lam = (p.lam * 1e9 / 550.0) ** (-q)
+        tau_wx = 3.91 * (1.0 / v_eff - 1.0 / p.clear_visibility_km) * k_lam * p.weather_layer_km
+        tau_wx = np.maximum(tau_wx, 0.0)
+        return np.exp(-tau_wx * airmass_kasten_young(elev_deg))
 
     # --- background, paper eq. (20)-(21)
     # Y0 = eta_rx eta_det N_b + n_det f_dark dt: 2025-wavelength-sat-qkd eq. (8)
@@ -502,10 +536,14 @@ class RateModelV2:
         return p.f_rep * np.maximum(r, 0.0)
 
     # --- one link over many steps
-    def link_rate(self, ltype, L_m, elev_deg, *, sun_rx_deg=None, aod550=None, a_cn2=None,
+    def link_rate(self, ltype, L_m, elev_deg, *, sun_rx_deg=None, aod550=None, vis_km=None, a_cn2=None,
                   return_parts=False, isl_illumination=None, grazing_alt_km=None):
         """Clear-sky slot rate (cloud handled by the caller). ltype in
-        {'SAT-GS','HAP-GS','SAT-HAP','SAT-SAT'}; transmitter = higher node."""
+        {'SAT-GS','HAP-GS','SAT-HAP','SAT-SAT'}; transmitter = higher node.
+
+        Ground links take their tropospheric weather extinction from ``vis_km``
+        (visibility, v7.5 Koschmieder-Kim) when supplied, else fall back to the
+        legacy ``aod550`` column. Exactly one of the two is expected in production."""
         p = self.p
         parts = {}
         if ltype in ("SAT-GS", "HAP-GS"):
@@ -518,7 +556,7 @@ class RateModelV2:
             bp, T = self.eta_bp(L_m, tx, "GS", elev_deg, a_cn2, hv)
             phi, r0 = self.eta_phi(elev_deg, a_cn2, hv)
             mol = self.eta_mol(elev_deg, h_top_km)
-            aer = self.eta_aer(elev_deg, aod550)
+            aer = self.eta_wx(elev_deg, vis_km) if vis_km is not None else self.eta_aer(elev_deg, aod550)
             sys_ = p.eta_tx_opt * p.eta_rx_opt * p.detector["GS"][0]
             xs = 10.0 ** (-p.kappa_x_db * np.maximum(airmass_kasten_young(elev_deg) - 1.0, 0.0) / 10.0)
             eta = bp * phi * mol * aer * sys_ * xs

@@ -30,12 +30,12 @@ from tools.dataset_v2.build_dataset_v2 import (
 from tools.dataset_v2.finite_key import FiniteKeyParams, key_length_gains
 
 SCENARIOS = {
-    "clear": dict(A=1.1e-14, aod=0.1, high=0., lowmid=0.),
-    "aerosol": dict(A=1.1e-14, aod=0.8, high=0., lowmid=0.),
-    "strong_turbulence": dict(A=1e-13, aod=0.1, high=0., lowmid=0.),
-    "cirrus": dict(A=1.1e-14, aod=0.1, high=1., lowmid=0.),
-    "broken_cloud": dict(A=1.1e-14, aod=0.1, high=0., lowmid=0.5),
-    "overcast": dict(A=1.1e-14, aod=0.1, high=0., lowmid=1.),
+    "clear": dict(A=1.1e-14, vis_km=23.0, high=0., lowmid=0.),
+    "aerosol": dict(A=1.1e-14, vis_km=9.0, high=0., lowmid=0.),
+    "strong_turbulence": dict(A=1e-13, vis_km=23.0, high=0., lowmid=0.),
+    "cirrus": dict(A=1.1e-14, vis_km=23.0, high=1., lowmid=0.),
+    "broken_cloud": dict(A=1.1e-14, vis_km=23.0, high=0., lowmid=0.5),
+    "overcast": dict(A=1.1e-14, vis_km=23.0, high=0., lowmid=1.),
 }
 
 
@@ -64,7 +64,7 @@ def static_grid(model, fk):
                     kw = dict(sun=np.array([30 if day else -30]))
                     ground = lt in ("HAP-GS", "SAT-GS")
                     if ground:
-                        kw.update(A=np.array([weather["A"]]), aod=weather["aod"],
+                        kw.update(A=np.array([weather["A"]]), vis_km=weather["vis_km"],
                                   high_cloud=weather["high"], tau_cirrus=0.3)
                     st = model.optical_states(lt, np.array([distance]), np.array([elev]), **kw)
                     q, e, v, y, t = asymptotic_components(st["eta"], st["y0"], st["weights"], fk)
@@ -167,7 +167,7 @@ def main():
         print(f"starting {name}: {T} slots, {L} links", flush=True)
         cloud, _ = generate_station_cloud_state(np.full((G,24),weather["lowmid"]), T, seed=2023)
         state.update(cloud_state=cloud, c_hi=np.full((G,24),weather["high"]),
-                     aod=np.full((G,24),weather["aod"]), a_cn2=np.full((G,24),weather["A"]))
+                     vis_km=np.full((G,24),weather["vis_km"]), a_cn2=np.full((G,24),weather["A"]))
         chunks = [compute_block(state, start, min(start+120,T), geometry, sat_positions)
                   for start in range(0,T,120)]
         rate = np.concatenate([x[1] for x in chunks])

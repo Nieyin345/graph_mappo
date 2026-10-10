@@ -63,8 +63,8 @@ def _write_inputs(tmp: Path) -> Path:
     for n in ("Alpha", "Beta"):
         with open(tmp / "wx" / f"{n}.csv", "w", newline="", encoding="utf-8") as fh:
             w = csv.writer(fh)
-            w.writerow(["time", "cloud_cover", "aod550", "aod_source_model"])
-            w.writerows([[h, 0.0, 0.1, "cams_global"] for h in hours])
+            w.writerow(["time", "cloud_cover", "visibility", "weather_source_model"])
+            w.writerows([[h, 0.0, 23000.0, "era5"] for h in hours])
         with open(tmp / "era5" / f"{n}.csv", "w", newline="", encoding="utf-8") as fh:
             w = csv.writer(fh)
             w.writerow(["time", "H_up_Wm2", "ustar", "t2m_K", "sp_Pa"])

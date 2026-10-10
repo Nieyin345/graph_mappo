@@ -15,9 +15,10 @@ What it does
 * candidate links (eq. (1)): every SAT-GS, SAT-HAP and SAT-SAT pair, and the one-to-one HAP-GS home
   pairs (HAP_i <-> GS_i); HAP-GS availability is decided per slot from the (moving) HAP position and
   the ``alpha_min`` elevation mask, with no static prefilter;
-* per slot (Delta = 60 s, 2023, t = minutes since 2023-01-01 00:00 UTC): geometry, visibility, mean
-  transmittance and background probability from ``tools/channel_v2/rate_model_v2.RateModelV2``
-  (ERA5 Monin-Obukhov C_n^2, CAMS AOD, SMF Monte-Carlo table; rate-model-v2 §3 upper atmosphere, §5.3 scintillation
+* per slot (Delta = 60 s, 2023, t = minutes since 2023-01-01 00:00 UTC): geometry, LOS visibility,
+  mean transmittance and background probability from ``tools/channel_v2/rate_model_v2.RateModelV2``
+  (ERA5 Monin-Obukhov C_n^2, ERA5 visibility via the v7.5 Koschmieder-Kim weather extinction, SMF
+  Monte-Carlo table; rate-model-v2 §3 upper atmosphere, §5.3 scintillation
   expectation (log-normal) and §1.3 ISL background tiers always on; no empirical excess loss), the finite-key length of
   ``finite_key.key_length`` and the cloud term of ``--cloud-model``:
     - ``binary_total`` (default, = dataset/global_v2): Lund-Shanklin indicator chi from the total cloud
@@ -283,7 +284,7 @@ LAYER_COLS = ["cloud_cover_low", "cloud_cover_mid", "cloud_cover_high"]
 
 def check_inputs(stations, weather_dir: Path, era5_dir: Path, layers_dir: Path | None = None,
                  strict: bool = False) -> dict:
-    """Per station: Open-Meteo weather (cloud, AOD) and ERA5 fluxes present, 8760 rows, NaN counts."""
+    """Per station: Open-Meteo weather (visibility for v7, cloud/AOD for legacy v2) and ERA5 fluxes present, 8760 rows, NaN counts."""
     rep = {}
     for s in stations:
         r = {
@@ -295,19 +296,26 @@ def check_inputs(stations, weather_dir: Path, era5_dir: Path, layers_dir: Path |
         w = weather_dir / f"{s['name']}.csv"
         e = era5_dir / f"{s['name']}.csv"
         if w.exists():
-            # Strict v7 uses this file only for CAMS AOD. Low/mid/high cloud
-            # comes exclusively from the ERA5 layered-cloud input below.
-            weather_cols = ["aod550"] if strict else ["cloud_cover", "aod550"]
-            d = _read_csv_columns(w, weather_cols, require_2023_hourly_utc=True)
-            tags = _read_source_tags(w, ("weather_source_model", "aod_source_model"))
-            r["weather_source_model"] = tags["weather_source_model"]
-            r["aod_source_model"] = tags["aod_source_model"]
-            r["weather_rows"] = int(len(d["aod550"]))
-            r["aod_nan"] = int((~np.isfinite(d["aod550"])).sum())
-            r["aod_negative"] = int(np.count_nonzero(
-                np.isfinite(d["aod550"]) & (d["aod550"] < 0)
-            ))
-            if not strict:
+            if strict:
+                # v7.5 uses this file only for visibility (weather extinction).
+                # Low/mid/high cloud comes exclusively from the ERA5 layered-cloud
+                # input below.
+                d = _read_csv_columns(w, ["visibility"], require_2023_hourly_utc=True)
+                vis_m = d["visibility"]
+                r["weather_rows"] = int(len(vis_m))
+                r["vis_nan"] = int((~np.isfinite(vis_m)).sum())
+                r["vis_nonpositive"] = int(np.count_nonzero(np.isfinite(vis_m) & (vis_m <= 0.0)))
+            else:
+                # Legacy v2 keeps the CAMS AOD column (and optional cloud cover).
+                d = _read_csv_columns(w, ["cloud_cover", "aod550"], require_2023_hourly_utc=True)
+                tags = _read_source_tags(w, ("weather_source_model", "aod_source_model"))
+                r["weather_source_model"] = tags["weather_source_model"]
+                r["aod_source_model"] = tags["aod_source_model"]
+                r["weather_rows"] = int(len(d["aod550"]))
+                r["aod_nan"] = int((~np.isfinite(d["aod550"])).sum())
+                r["aod_negative"] = int(np.count_nonzero(
+                    np.isfinite(d["aod550"]) & (d["aod550"] < 0)
+                ))
                 r["cloud_nan"] = int((~np.isfinite(d["cloud_cover"])).sum())
                 r["cloud_out_of_range"] = int(np.count_nonzero(
                     np.isfinite(d["cloud_cover"])
@@ -334,10 +342,9 @@ def check_inputs(stations, weather_dir: Path, era5_dir: Path, layers_dir: Path |
         if strict and (not r["gs_altitude_explicit"] or not r["era5_altitude_explicit"]):
             r["ok"] = False
         if strict and (
-            r.get("aod_source_model") != "cams_global"
-            or r.get("aod_nan", 0)
+            r.get("vis_nan", 0)
+            or r.get("vis_nonpositive", 0)
             or r.get("era5_nan_hours", 0)
-            or r.get("aod_negative", 0)
         ):
             r["ok"] = False
         if layers_dir is not None:
@@ -446,33 +453,35 @@ def load_weather(stations, weather_dir: Path, era5_dir: Path, p: ParamsV2, allow
     """
     G = len(stations)
     cloud = np.zeros((G, YEAR_HOURS))
+    vis_km = np.full((G, YEAR_HOURS), np.nan)
     aod = np.zeros((G, YEAR_HOURS))
     a_cn2 = np.full((G, YEAR_HOURS), np.nan)
     ok = np.zeros((G, YEAR_HOURS), dtype=bool)
     fill = {}
     for gi, s in enumerate(stations):
         weather_path = weather_dir / f"{s['name']}.csv"
-        weather_cols = ["aod550"] if strict else ["cloud_cover", "aod550"]
-        d = _read_csv_columns(weather_path, weather_cols, require_2023_hourly_utc=True)
         if strict:
-            tags = _read_source_tags(weather_path, ("aod_source_model",))
-            if tags["aod_source_model"] != "cams_global":
+            # v7.5: tropospheric weather extinction comes from visibility (Koschmieder-Kim).
+            d = _read_csv_columns(weather_path, ["visibility"], require_2023_hourly_utc=True)
+            v = d["visibility"] / 1000.0  # m -> km
+            if len(v) != YEAR_HOURS:
+                raise SystemExit(f"{s['name']}: visibility file has {len(v)} rows, need {YEAR_HOURS}")
+            if not np.isfinite(v).all():
                 raise SystemExit(
-                    f"{s['name']}: v7.5 AOD requires aod_source_model=cams_global; "
-                    "regenerate with fetch_inputs_v2.py"
+                    f"{s['name']}: visibility contains missing values; "
+                    "prefill from training-period or historical data"
                 )
-        if len(d["aod550"]) != YEAR_HOURS:
-            raise SystemExit(f"{s['name']}: AOD file has {len(d['aod550'])} rows, need {YEAR_HOURS}")
-        a = d["aod550"]
-        if strict and not np.isfinite(a).all():
-            raise SystemExit(
-                f"{s['name']}: CAMS AOD contains missing values; "
-                "prefill from training-period or historical data"
-            )
-        if strict and np.any(a < 0):
-            raise SystemExit(f"{s['name']}: CAMS AOD must be nonnegative")
-        fill[s["name"]] = {"aod_nan": int(np.isnan(a).sum())}
-        if not strict:
+            if np.any(v <= 0.0):
+                raise SystemExit(f"{s['name']}: visibility must be strictly positive (km)")
+            vis_km[gi] = v
+            fill[s["name"]] = {"vis_nan": int(np.isnan(d['visibility']).sum())}
+        else:
+            # Legacy v2 keeps the AOD column (and its optional cloud-cover column).
+            d = _read_csv_columns(weather_path, ["cloud_cover", "aod550"], require_2023_hourly_utc=True)
+            a = d["aod550"]
+            if len(a) != YEAR_HOURS:
+                raise SystemExit(f"{s['name']}: AOD file has {len(a)} rows, need {YEAR_HOURS}")
+            fill[s["name"]] = {"aod_nan": int(np.isnan(a).sum())}
             c = d["cloud_cover"]
             fill[s["name"]]["cloud_nan"] = int(np.isnan(c).sum())
             cloud[gi] = (
@@ -482,7 +491,7 @@ def load_weather(stations, weather_dir: Path, era5_dir: Path, p: ParamsV2, allow
                 )
                 / 100.0
             )
-        aod[gi] = np.nan_to_num(a, nan=float(np.nanmedian(a)) if np.isfinite(a).any() else 0.1)
+            aod[gi] = np.nan_to_num(a, nan=float(np.nanmedian(a)) if np.isfinite(a).any() else 0.1)
         e = era5_dir / f"{s['name']}.csv"
         if not e.exists():
             if not allow_era5_fallback:
@@ -567,7 +576,7 @@ def load_weather(stations, weather_dir: Path, era5_dir: Path, p: ParamsV2, allow
         a_cn2[gi] = np.where(valid, A, np.nan)
         ok[gi] = valid
         fill[s["name"]]["era5_nan_hours"] = int((~valid).sum())
-    return cloud, aod, a_cn2, ok, fill
+    return cloud, aod, vis_km, a_cn2, ok, fill
 
 
 # ----------------------------------------------------------------------------- nodes and candidate links
@@ -1159,7 +1168,7 @@ def main(argv=None) -> int:
     if not 1 <= args.days <= 365:
         raise SystemExit("--days must be in 1..365 (weather covers 2023)")
     strict_inputs = channel_model == "v7"
-    cloud, aod, a_cn2, era5_ok, fill = load_weather(
+    cloud, aod, vis_km, a_cn2, era5_ok, fill = load_weather(
         stations, wdir, edir, params, args.allow_era5_fallback,
         strict=strict_inputs,
         apply_height_correction=(channel_model == "v7"),
@@ -1197,7 +1206,7 @@ def main(argv=None) -> int:
                  hap_mob=cfg.hap_mobility,
                  hap_pos=build_hap_positions(stations, cfg, rel(args.hap_track)) if cfg.hap_mobility == "trajectory" else None,
                  link_u=np.array([x[0] for x in links]), link_v=np.array([x[1] for x in links]),
-                 link_type=np.array([x[2] for x in links]), cloud=cloud, aod=aod, a_cn2=a_cn2,
+                 link_type=np.array([x[2] for x in links]), cloud=cloud, aod=aod, vis_km=vis_km, a_cn2=a_cn2,
                  era5_ok=era5_ok, u_cloud=u_cloud, cloud_state=cloud_state,
                  c_lm=c_lm, c_hi=c_hi)
 
@@ -1627,7 +1636,7 @@ def main(argv=None) -> int:
         input_sources=(
             {
                 "cloud_layers": "ERA5 via Open-Meteo Historical Weather API (models=era5, elevation=nan)",
-                "aod550": "CAMS global via Open-Meteo Air Quality API",
+                "visibility": "ERA5 via Open-Meteo Historical Weather API (models=era5); drives the v7.5 Koschmieder-Kim weather extinction",
                 "surface_most": "ERA5 single-levels via CDS",
             }
             if cfg.channel_model == "v7" else {}
@@ -1637,7 +1646,7 @@ def main(argv=None) -> int:
                 "axis": "exact 2023 UTC hourly validity timestamps; all input CSV time columns are validated before use",
                 "minute_slots": "hour h values are held for scheduling slots [h:00, h:59]",
                 "cloud_layers": "ERA5 hourly value at validity hour h, held over that UTC hour",
-                "aod550": "CAMS hourly value at UTC hour h, held over that UTC hour",
+                "visibility": "ERA5 hourly value at UTC hour h, held over that UTC hour",
                 "t2m_sp_ustar": "ERA5 values at validity hour h, held over that UTC hour",
                 "sshf": (
                     "ERA5 one-hour accumulation ending at validity hour h, converted to W/m2 "

@@ -253,7 +253,7 @@ def compute_block(state, b0, b1, geometry, sat_positions):
                 if era5_ok is not None:
                     valid_era5 = np.asarray(era5_ok)[g, hr_sub[ti]]
                     a = np.where(valid_era5, a, np.where(sun[g, ti] > 0, m.p.a_day, m.p.a_night))
-                aod = state["aod"][g, hr_sub[ti]]
+                vis_km = state["vis_km"][g, hr_sub[ti]]
                 sun_g = sun[g, ti]
 
                 # v7.5 atmospheric integrals depend on the real GS elevation.
@@ -270,7 +270,7 @@ def compute_block(state, b0, b1, geometry, sat_positions):
                         dist[li[sel], ti[sel]] * 1000,
                         elev[li[sel], ti[sel]],
                         A=a[sel],
-                        aod=aod[sel],
+                        vis_km=vis_km[sel],
                         sun=sun_g[sel],
                         high_cloud=high_cloud[sel],
                         tau_cirrus=cfg.tau_cirrus,

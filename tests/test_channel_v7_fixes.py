@@ -30,7 +30,7 @@ def _states(lt, elev, h_m, p=None):
     m = RateModelV7(p, sat_alt_km=550.0, hap_alt_km=20.0)
     L = _slant(elev, h_m)
     return m.optical_states(lt, L, np.asarray(elev, float), A=np.full_like(np.asarray(elev, float), p.a_night),
-                            aod=np.full_like(np.asarray(elev, float), 0.1),
+                            vis_km=np.full_like(np.asarray(elev, float), 23.0),
                             sun=np.full_like(np.asarray(elev, float), -10.0),
                             high_cloud=np.zeros_like(np.asarray(elev, float)), tau_cirrus=0.0), p
 

@@ -69,14 +69,14 @@ def slant_hap(elev_deg, h=H_HAP):
 ELEVS = np.array([5., 10., 15., 20., 30., 45., 60., 75., 90.])
 
 
-def v7_rate(ltype, L_m, elev, *, sun_rx, aod, A, high_cloud=0.0, tau_cirrus=0.0):
+def v7_rate(ltype, L_m, elev, *, sun_rx, vis_km, A, high_cloud=0.0, tau_cirrus=0.0):
     L_m = np.asarray(L_m, float); elev = np.asarray(elev, float)
     if ltype in ("HAP-GS", "SAT-GS"):
-        kw = dict(A=np.full_like(elev, A), aod=np.full_like(elev, aod),
+        kw = dict(A=np.full_like(elev, A), vis_km=np.full_like(elev, vis_km),
                   sun=np.full_like(elev, sun_rx), high_cloud=np.full_like(elev, high_cloud),
                   tau_cirrus=tau_cirrus)
     else:
-        kw = dict(sun=np.full_like(elev, sun_rx), aod=0.0)
+        kw = dict(sun=np.full_like(elev, sun_rx))
     st = m.optical_states(ltype, L_m, elev, **kw)
     q, err = state_gains(st["eta"], st["y0"], st["weights"], fk)
     return np.asarray(key_length_gains(q, err, fk.n_pulses, fk) / fk.slot_s, float)
@@ -159,7 +159,7 @@ check("HV 匹配下限 A=0（负括号）", Ac[0] == 0.0 and cl[0] and Ac[1] > 0
 max_eta = 0.0
 for lt, Lf in (("SAT-GS", slant_sat), ("HAP-GS", slant_hap)):
     st = m.optical_states(lt, Lf(ELEVS), ELEVS, A=np.full_like(ELEVS, p.a_night),
-                          aod=np.full_like(ELEVS, 0.1), sun=np.full_like(ELEVS, -10.0),
+                          vis_km=np.full_like(ELEVS, 23.0), sun=np.full_like(ELEVS, -10.0),
                           high_cloud=np.zeros_like(ELEVS), tau_cirrus=0.0)
     max_eta = max(max_eta, float(np.max(st["eta"])))
 check("总透过率 eta <= 1（扫描）", max_eta <= 1 + 1e-12, f"max={max_eta:.4f}")
@@ -195,7 +195,7 @@ beam_dia = 2 * wd_eff
 dB_area = -10 * math.log10((2 * a_liao / beam_dia) ** 2)
 # (iv) 本模型自带工作点（1550nm, w0=0.10, Rx=0.6m, 含湍流+指向）
 st12 = m.optical_states("SAT-GS", np.array([L1200]), np.array([19.8]),
-                        A=np.array([p.a_night]), aod=np.array([0.1]), sun=np.array([-10.0]),
+                        A=np.array([p.a_night]), vis_km=np.array([23.0]), sun=np.array([-10.0]),
                         high_cloud=np.zeros(1), tau_cirrus=0.0)
 mc_model_1200 = float(np.asarray(st12["collection_mean"]).reshape(-1)[0])
 geom_ours_dB = -10 * math.log10(mc_model_1200)
@@ -216,7 +216,7 @@ anchor("衍射损耗@1200km(用 Liao 发散角)", f"{dB_eff:.1f}~{dB_area:.1f} d
 el20 = np.array([20.0])
 L_hap20 = slant_hap(el20)
 st_hap = m.optical_states("HAP-GS", L_hap20, el20, A=np.array([p.a_night]),
-                          aod=np.array([0.1]), sun=np.array([-10.0]), high_cloud=np.zeros(1), tau_cirrus=0.0)
+                          vis_km=np.array([23.0]), sun=np.array([-10.0]), high_cloud=np.zeros(1), tau_cirrus=0.0)
 # 几何+大气（不含 SMF 耦合、探测器）——与 Chu 的 "channel loss" 口径接近
 mc_hap = float(np.asarray(st_hap["collection_mean"]).reshape(-1)[0])
 mol_hap = float(m.eta_mol(el20, m.hv_hap.h_top / 1000)[0])
@@ -252,12 +252,12 @@ print("C. 四类链路有限密钥速率（夜、晴、AOD=0.1、无云）")
 print("=" * 80)
 links = {}
 for lt, Lf in (("SAT-GS", slant_sat), ("HAP-GS", slant_hap)):
-    r = v7_rate(lt, Lf(ELEVS), ELEVS, sun_rx=-10.0, aod=0.1, A=p.a_night)
+    r = v7_rate(lt, Lf(ELEVS), ELEVS, sun_rx=-10.0, vis_km=23.0, A=p.a_night)
     links[lt] = r.tolist()
     print(f"{lt:9s}: " + "".join(f"{v:>11.1f}" for v in r))
 # SAT-HAP
 ssh_L = np.maximum((H_SAT - H_HAP) / np.sin(np.radians(ELEVS)), H_SAT - H_HAP)
-st_sh = m.optical_states("SAT-HAP", ssh_L, ELEVS, sun=np.full_like(ELEVS, -10.0), aod=0.0)
+st_sh = m.optical_states("SAT-HAP", ssh_L, ELEVS, sun=np.full_like(ELEVS, -10.0))
 q, e = state_gains(st_sh["eta"], st_sh["y0"], st_sh["weights"], fk)
 r_sh = np.asarray(key_length_gains(q, e, fk.n_pulses, fk) / fk.slot_s, float)
 links["SAT-HAP"] = r_sh.tolist()
@@ -265,7 +265,7 @@ print(f"{'SAT-HAP':9s}: " + "".join(f"{v:>11.1f}" for v in r_sh))
 # SAT-SAT
 ss_L = np.array([500e3, 1000e3, 2000e3, 3000e3, 4000e3])
 st_ss = m.optical_states("SAT-SAT", ss_L, np.full_like(ss_L, 90.0),
-                         sun=np.full_like(ss_L, -10.0), aod=0.0)
+                         sun=np.full_like(ss_L, -10.0))
 q, e = state_gains(st_ss["eta"], st_ss["y0"], st_ss["weights"], fk)
 r_ss = np.asarray(key_length_gains(q, e, fk.n_pulses, fk) / fk.slot_s, float)
 links["SAT-SAT"] = {"L_km": (ss_L / 1e3).tolist(), "rate": r_ss.tolist()}
@@ -300,7 +300,7 @@ anchor("HAP-GS 天顶(有限密钥)", f"{hap_zen:.0f} bps",
 print()
 print("C3. 组件效率对比 JOCN2026(843.9nm, 0.6m Rx, 17.2urad 全角发散, 550km 天顶)")
 st_z = m.optical_states("SAT-GS", slant_sat(np.array([90.0])), np.array([90.0]),
-                        A=np.array([p.a_night]), aod=np.array([0.1]), sun=np.array([-10.0]),
+                        A=np.array([p.a_night]), vis_km=np.array([23.0]), sun=np.array([-10.0]),
                         high_cloud=np.zeros(1), tau_cirrus=0.0)
 mc_z = float(np.asarray(st_z["collection_mean"]).reshape(-1)[0])
 phi_z = float(m.eta_phi(np.array([90.0]), np.array([p.a_night]), m.hv_sat)[0][0])

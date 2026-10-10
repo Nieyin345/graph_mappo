@@ -172,7 +172,7 @@ def _station_cloud_state(cloud_on, *, capture_time_s=5.0, n_sub=4):
         cloud_state=np.array([[int(bool(cloud_on))]], dtype=np.uint8),
         c_hi=np.zeros((G, 8760)),
         a_cn2=np.full((G, 8760), 1e-14),
-        aod=np.full((G, 8760), 0.1),
+        vis_km=np.full((G, 8760), 23.0),
     )
 
 

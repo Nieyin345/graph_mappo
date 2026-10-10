@@ -133,7 +133,7 @@ def test_era5_pressure_temperature_are_corrected_before_most(tmp_path, monkeypat
     stations = read_stations(station_file)
     (tmp_path / "Plateau.csv").touch()
     n = builder.YEAR_HOURS
-    weather = {"cloud_cover": np.zeros(n), "aod550": np.full(n, 0.1)}
+    weather = {"visibility": np.full(n, 23000.0)}
     era5 = {"H_up_Wm2": np.full(n, 50.), "ustar": np.full(n, 0.3),
             "t2m_K": np.full(n, 288.), "sp_Pa": np.full(n, 75000.)}
     monkeypatch.setattr(builder, "_read_csv_columns", lambda *a, **kw: weather)
@@ -147,7 +147,7 @@ def test_era5_pressure_temperature_are_corrected_before_most(tmp_path, monkeypat
 
     monkeypatch.setattr(builder, "cn2_monin_obukhov", most)
     builder.load_weather(stations, tmp_path, tmp_path, builder.ParamsV2(), False,
-                         apply_height_correction=True)
+                         strict=True, apply_height_correction=True)
     temperature, pressure = observed[0]
     expected_temperature = 288. - 0.0065 * 500.
     expected_pressure = 75000. * np.exp(-9.81 * 500. / (287.05 * (288. + expected_temperature) / 2))
