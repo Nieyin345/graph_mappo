@@ -1,0 +1,8 @@
+# v7.5 finite-key evaluation overlay: 300 s engineering block baseline.
+# This is a study setting, not a literature constant.
+# Overlay after dataset_v7.yaml + scenario_v7.yaml.
+env:
+  qkd_block:
+    enabled: true
+    release_mode: finite_key
+    max_duration_s: 300.0

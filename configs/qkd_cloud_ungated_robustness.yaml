@@ -1,0 +1,7 @@
+# §5.1 / §7 robustness overlay. Apply after dataset_v7.yaml + scenario_v7.yaml.
+# Scheduler information is unchanged: realized cloud remains hidden before action.
+# Only the terminal-side blocked-slot treatment changes: geometry-visible pulses
+# are still attempted, with signal transmittance zero and background retained.
+env:
+  qkd_block:
+    cloud_blocking_mode: background_only

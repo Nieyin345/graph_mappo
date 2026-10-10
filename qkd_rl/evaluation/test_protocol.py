@@ -74,10 +74,12 @@ def build_validation_env_config(
     episode_steps: int | None = None,
     start_mode: str | None = None,
 ) -> dict:
-    """Build one identical env config for validation runs.
+    """Build the canonical v7.5 paper environment for validation runs.
 
-    ``include_baselines=True`` also merges ``configs/baselines.yaml`` (needed
-    by baseline policies; harmless for the environment itself).
+    Task stack: default -> env_full -> env_full_demand_v2 -> dataset_v7 ->
+    scenario_v7. Validation changes only the held-out time window, episode
+    length and seeds. ``include_baselines=True`` additionally merges
+    ``configs/baselines.yaml`` for baseline policy settings.
     """
     root = Path(__file__).resolve().parents[2]
     start_day = int(profile["window_start_day"])
@@ -90,7 +92,17 @@ def build_validation_env_config(
     mode = start_mode or profile["start_mode"]
 
     config = load_default_config(root)
-    config = deep_merge(config, load_config([root / "configs" / "env_full.yaml"]))
+    # Canonical paper task: mirror the v7.5 environment stack used by the main
+    # training/evaluation runs.  Validation changes only the held-out time
+    # window and seeds; it must not silently fall back to legacy traffic,
+    # routing or rate surfaces.
+    for name in (
+        "env_full.yaml",
+        "env_full_demand_v2.yaml",
+        "dataset_v7.yaml",
+        "scenario_v7.yaml",
+    ):
+        config = deep_merge(config, load_config([root / "configs" / name]))
     if include_baselines:
         config = deep_merge(config, load_config([root / "configs" / "baselines.yaml"]))
     config["rate_provider"]["provider"] = "h5"
@@ -121,6 +133,12 @@ def checkpoint_validation_config(
     """
     config = deepcopy(validation_config)
     if checkpoint_config:
+        # The architecture version is part of the policy contract. Earlier
+        # versions copied only model/features, silently leaving experiment.model
+        # at the canonical v2 default even for v3/v7/v8 checkpoints.
+        checkpoint_model = (checkpoint_config.get("experiment") or {}).get("model")
+        if checkpoint_model is not None:
+            config.setdefault("experiment", {})["model"] = checkpoint_model
         for section in ("features", "model", "action_resolver"):
             if section in checkpoint_config:
                 config[section] = deep_merge(

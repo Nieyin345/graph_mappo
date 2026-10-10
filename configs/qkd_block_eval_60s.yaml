@@ -1,0 +1,7 @@
+# v7.5 finite-key evaluation overlay: one privacy-amplification block per 60 s scheduling slot.
+# Overlay after dataset_v7.yaml + scenario_v7.yaml.
+env:
+  qkd_block:
+    enabled: true
+    release_mode: finite_key
+    max_duration_s: 60.0

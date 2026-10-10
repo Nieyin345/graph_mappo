@@ -79,6 +79,7 @@ class MAPPOPolicy:
         device: torch.device | str = "cpu",
         deterministic_decode: str = "greedy",
         decode_beta: float = 0.0,
+        decode_persist_bonus: float = 0.0,
     ):
         if deterministic_decode not in self.DECODE_MODES:
             raise ValueError(
@@ -89,6 +90,10 @@ class MAPPOPolicy:
         self.deterministic_decode = deterministic_decode
         # max_weight arc weight: 0 = margin s - stop; >0 = expm1(beta*margin)/beta.
         self.decode_beta = float(decode_beta)
+        # decode_persist_bonus（2026-10-03 粘性解码探针，opt-in，仅 deterministic 评测）：
+        # 上一槽已激活的链路，其两条弧的分数加 bonus 再解码。0 = 原行为逐位不变。
+        self.decode_persist_bonus = float(decode_persist_bonus)
+        self._persist_pairs: frozenset = frozenset()
         self.model = model
         self.device = torch.device(device)
         self.model.to(self.device)
@@ -194,6 +199,11 @@ class MAPPOPolicy:
             stop_score = stop_score / temperature
         n_arcs = len(arcs)
         scores_np = raw.detach().cpu().numpy()
+        if deterministic and self.decode_persist_bonus != 0.0 and self._persist_pairs:
+            scores_np = scores_np.copy()
+            for i, (u, v) in enumerate(arcs):
+                if (u, v) in self._persist_pairs or (v, u) in self._persist_pairs:
+                    scores_np[i] += self.decode_persist_bonus
         if deterministic:
             gumbel_np = None
         else:
@@ -460,7 +470,21 @@ class MAPPOPolicy:
             {node_id: mean_entropy for node_id in node_ids},
         )
 
+    @staticmethod
+    def _persist_pairs_of(obs: GraphObservation) -> frozenset:
+        pairs = set()
+        for eid in getattr(obs.state, "last_activated_edges", []) or []:
+            body = eid[2:] if eid.startswith("E_") else eid
+            if "__" in body:
+                pairs.add(tuple(body.split("__", 1)))
+        return frozenset(pairs)
+
+    def _set_persist_pairs(self, obs: GraphObservation) -> None:
+        self._persist_pairs = self._persist_pairs_of(obs)
+
     def act(self, obs: GraphObservation, deterministic: bool = False, build_scores: bool = True) -> PolicyStep:
+        if deterministic and self.decode_persist_bonus != 0.0:
+            self._set_persist_pairs(obs)
         """Sample a global matching action for the current observation.
 
         ``build_scores=False`` skips materializing ``PolicyStep.edge_scores``
@@ -554,6 +578,7 @@ class MAPPOPolicy:
         score_list: list[torch.Tensor],
         node_id_list: list[list[str]],
         deterministic: bool = False,
+        persist_pairs_list: list[frozenset] | None = None,
     ) -> list[tuple[tuple[dict[str, tuple[str, str]], dict[str, dict[str, float]]], list[tuple[str, str]], torch.Tensor, torch.Tensor]]:
         """Vectorized twin of :meth:`_sample_matching` for a batch of graphs.
 
@@ -598,6 +623,16 @@ class MAPPOPolicy:
                 if temperature != 1.0:
                     sc = sc / temperature
                 S[g, :n_g] = sc.detach().to("cpu").numpy()
+                # decode_persist_bonus（粘性解码探针，opt-in，仅 deterministic）
+                if deterministic and self.decode_persist_bonus != 0.0 and persist_pairs_list is not None and persist_pairs_list[g]:
+                    ids = node_id_list[g]
+                    pp = persist_pairs_list[g]
+                    s_i = np.asarray(src_list[g], dtype=np.int64)
+                    d_i = np.asarray(dst_list[g], dtype=np.int64)
+                    for k in range(n_g):
+                        u, v = ids[int(s_i[k])], ids[int(d_i[k])]
+                        if (u, v) in pp or (v, u) in pp:
+                            S[g, k] += self.decode_persist_bonus
         S[:, A] = stop_score
 
         src_code = np.zeros((G, A), dtype=np.int64)
@@ -762,6 +797,10 @@ class MAPPOPolicy:
                 [a[2] for a in arrays],
                 [list(obs.node_ids) for obs in obs_list],
                 deterministic=deterministic,
+                persist_pairs_list=(
+                    [self._persist_pairs_of(obs) for obs in obs_list]
+                    if deterministic and self.decode_persist_bonus != 0.0 else None
+                ),
             )
 
         steps: list[PolicyStep] = []
@@ -789,6 +828,8 @@ class MAPPOPolicy:
             if fast is not None:
                 (actions, action_scores), matched_edges, mean_lp, mean_entropy = fast[gi]
             else:
+                if deterministic and self.decode_persist_bonus != 0.0:
+                    self._set_persist_pairs(obs)
                 (actions, action_scores), matched_edges, mean_lp, mean_entropy = self._sample_matching(
                     edge_scores,
                     deterministic=deterministic,
@@ -999,8 +1040,12 @@ class MAPPOPolicy:
         matched_edges: list[tuple[str, str]],
         *,
         average_log_prob: bool = False,
+        decision_weights: list[float] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Vectorized twin of ``_matching_log_prob_entropy`` (identical math).
+
+        decision_weights（2026-10-03，opt-in，仅 BC 用）：与 matched_edges 对齐的逐决策权重
+        （末尾 STOP 决策权重 1）；average_log_prob 时按权重和归一。None = 原计算逐位不变。
 
         The sequential version issues one small softmax per matching decision;
         with ~50 decisions per graph and dozens of graphs per batch its
@@ -1097,9 +1142,17 @@ class MAPPOPolicy:
         # BC may explicitly average its NLL to preserve the historical
         # per-demonstration weighting. PPO must always use the joint sum.
         selected = logp.gather(-1, choices_t)
-        mean_lp = _finalize_matching_log_prob(
-            selected.sum(), n_decisions=selected.numel(), average=average_log_prob
-        )
+        if decision_weights is None:
+            mean_lp = _finalize_matching_log_prob(
+                selected.sum(), n_decisions=selected.numel(), average=average_log_prob
+            )
+        else:
+            w = [float(x) for x in list(decision_weights)[: len(choices)]]
+            w += [1.0] * (len(choices) - len(w))
+            wt = torch.tensor(w, dtype=selected.dtype, device=self.device).unsqueeze(-1)
+            mean_lp = (selected * wt).sum()
+            if average_log_prob:
+                mean_lp = mean_lp / wt.sum()
         # -inf padding would turn into 0 * -inf = nan, so only finite logits
         # contribute to the entropy.
         safe = torch.where(torch.isfinite(logits), logp, torch.zeros_like(logp))

@@ -1,0 +1,14 @@
+# v7.5 §6.1 traffic-control overlay: Park-style gravity pair weights.
+# It uses the SAME published 45-pair support, the SAME per-slot total arrival
+# intensity, and the SAME integer-uniform request-size law as the main Zipf model.
+# Only the pair weighting law changes.
+requests:
+  distribution_version: park_v7
+  fixed_pairs_csv: configs/request_pairs_v7.csv
+  fixed_pair_count: 45
+  park_mass_csv: configs/park/gs_demand_mass_45.csv
+  park_epoch_utc: "2023-01-01T00:00:00Z"
+  node_registry_path: dataset/global_v7/node_registry.csv
+  arrival_rate_per_second: 0.0026666666666666666
+  amount_min: 50000
+  amount_max: 200000

@@ -1,0 +1,13 @@
+# §6.1 Park-style gravity-demand control for v7.5.
+# Overlay after scenario_v7.yaml. Unlike legacy park_v3, park_v7 renormalizes
+# the pair intensities every slot to the same global bar_lambda * Delta as the
+# fixed-Zipf main traffic, isolating only the pair-distribution assumption.
+requests:
+  distribution_version: park_v7
+  fixed_pairs_csv: configs/request_pairs_v7.csv
+  fixed_pair_count: 45
+  park_mass_csv: configs/park/gs_demand_mass_45.csv
+  park_epoch_utc: "2023-01-01T00:00:00Z"
+  arrival_rate_per_second: 0.0026666666666666666
+  amount_min: 50000
+  amount_max: 200000

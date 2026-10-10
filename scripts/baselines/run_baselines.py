@@ -33,7 +33,7 @@ from qkd_rl.baselines.greedy_relay_diffusion import GreedyRelayDiffusionPolicyV3
 from qkd_rl.baselines.random_policy import RandomPolicy
 from qkd_rl.rl.algos.checkpoint import load_checkpoint
 from qkd_rl.rl.algos.policy import MAPPOPolicy
-from qkd_rl.rl.models.graph_mappo import GraphMAPPOActorCritic
+from qkd_rl.model_zoo import build_model
 from qkd_rl.core.config import load_config
 from qkd_rl.env.factory import build_env_from_config
 from qkd_rl.evaluation.test_protocol import (
@@ -165,7 +165,7 @@ def main() -> None:
         rl_cfg = checkpoint_validation_config(data.config, validation_cfg)
 
         template_env = build_env_from_config(rl_cfg)
-        model = GraphMAPPOActorCritic(template_env.action_resolver.action_space, rl_cfg)
+        model = build_model(template_env.action_resolver.action_space, rl_cfg)
         rl_policy = MAPPOPolicy(model, device)
         model.load_state_dict(data.model_state)
         model.eval()

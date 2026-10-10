@@ -1,3 +1,6 @@
+# 历史数据：global_v2c 的 build_metadata.json 记录 kappa_x_db=1.0。
+# 2026-10-04 主模型已移除附加损耗；本配置仅用于旧结果复现，不代表修订主模型。
+# 新模型须在服务器重建 global_v2d 后显式叠加 configs/dataset_v2d.yaml；勿修改旧 H5 的元数据冒充重建。
 # 正式数据集（2026-10-01）：v2 信道模型 + 有限码长 + 覆盖率云模型（--cloud-model coverage_layers），
 # 由 tools/dataset_v2/build_dataset_v2.py 生成到 dataset/global_v2c（dataset/global、dataset/global_v2 不变）。
 # 低云+中云覆盖率 = 时隙内遮挡时间比例 f，有限码长按 f*N 个脉冲的块计算；高云按薄卷云衰减（tau = 0.3）。

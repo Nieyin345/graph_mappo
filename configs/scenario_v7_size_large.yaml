@@ -1,0 +1,13 @@
+# v7 零样本跨规模泛化对照 —— 扩展拓扑（叠加在 scenario_v7.yaml 之后）。
+#
+# 规划书 §2.4 定义：180 节点 = 90 SAT / 45 HAP / 45 GS。
+# ⚠ 需要 walker 星座扩到 90 颗：当前 walker60 只给 60 颗，60 颗以外要另建
+#   walker90（--constellation 需新增分支）。**本机尚未支持**，先占位。
+#   未扩星座前，sat_count 上限就是 60。
+scenario:
+  active_nodes:
+    mode: first_n
+    gs_count: 45
+    hap_count: 45
+    sat_count: 90
+    exclude: []

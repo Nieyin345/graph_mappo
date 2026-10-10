@@ -1,0 +1,5 @@
+model:
+  actor:
+    usage_forecast:
+      label_mode: self_next
+      horizon: 3

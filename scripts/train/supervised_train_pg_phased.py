@@ -94,6 +94,27 @@ except ModuleNotFoundError:  # numpy < 2.0
     _sys.modules.setdefault("numpy._core", _np_core)
 
 
+def shuffled_passes(files: list, passes: int, seed: int) -> list:
+    """每一轮独立打乱文件顺序（Random(seed+轮号)），拼接 passes 轮。"""
+    import random
+
+    out: list = []
+    for p in range(passes):
+        order = list(files)
+        random.Random(seed + p).shuffle(order)
+        out.extend(order)
+    return out
+
+
+def cosine_lr(lr0: float, lr1: float, i: int, n: int) -> float:
+    """第 i 个回合（0 起，共 n 个）的余弦退火学习率：i=0 → lr0，i=n-1 → lr1。"""
+    import math
+
+    if n <= 1:
+        return lr0
+    return lr1 + 0.5 * (lr0 - lr1) * (1.0 + math.cos(math.pi * i / (n - 1)))
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=str, default="configs/supervised_train.yaml")
@@ -114,6 +135,27 @@ def parse_args() -> argparse.Namespace:
         help="Train from pre-collected PG-Phased trajectories "
         "(collect_pg_phased_trajectories.py output) instead of re-running the heuristic.",
     )
+    # --task-env（2026-10-03，opt-in）：用 --resolved-config 的完整任务配置建 env / 动作空间。
+    # 轨迹采自 run 自己的任务（如 n45，节点集与默认 env 不同）时必须打开，否则模型的
+    # 动作空间节点表对不上（KeyError）。缺省关闭 = 原行为逐位不变。
+    parser.add_argument("--task-env", action="store_true")
+    # --switch-weight λ（2026-10-03，opt-in，仅 --data-dir 模式）：教师「新激活」的弧（上一条示范里
+    # 没有的无向边）在匹配似然里权重 1+λ。诊断显示学生对这类切换决策召回仅 80–85%。0 = 原行为。
+    parser.add_argument("--switch-weight", type=float, default=0.0)
+    parser.add_argument("--passes", type=int, default=1, help="--data-dir 模式下遍历数据的轮数（默认 1 = 原行为）")
+    # --shuffle-seed / --lr-final（2026-10-03，opt-in，仅 --data-dir 模式）：
+    #   原实现按文件名顺序遍历（DAgger 聚合目录里 it0→itK 依次排列），恒定学习率下最后几百个回合主导终点，
+    #   导致加入新一轮数据反而变差。--shuffle-seed N：每一轮用 Random(N+轮号) 打乱文件顺序；
+    #   --lr-final F：学习率按回合余弦退火 lr→F，并在每个回合显式写入优化器（不受断点里旧 lr 覆盖）。
+    #   两者缺省 None = 原行为逐位不变。
+    parser.add_argument("--shuffle-seed", type=int, default=None)
+    # --arc-order score（2026-10-03，opt-in）：示范弧按当前模型打分降序进入顺序 softmax 似然（贪心解码顺序），
+    #   而不是轨迹里存储的顺序。缺省 stored = 原行为。
+    parser.add_argument("--arc-order", choices=("stored", "score"), default="stored")
+    # --step-pool K（2026-10-03，opt-in，需 --shuffle-seed）：把 K 个回合的样本混在一起打乱后再切批，
+    #   打破同一回合内相邻步的相关性。缺省 1 = 原行为（按回合顺序切批）。
+    parser.add_argument("--step-pool", type=int, default=1)
+    parser.add_argument("--lr-final", type=float, default=None)
     return parser.parse_args()
 
 
@@ -231,6 +273,8 @@ def main() -> None:
             if section in resolved:
                 config[section] = deep_merge(config.get(section, {}), resolved[section])
         ConfigValidator().validate(config)
+        if args.task_env:
+            config = resolved
     threads = int(config.get("experiment", {}).get("cpu_threads", torch.get_num_threads()))
     torch.set_num_threads(threads)
     device = torch.device(args.device)
@@ -296,14 +340,23 @@ def main() -> None:
         nonlocal total_bc_loss, total_steps
         outputs = model.batched_forward([item[0] for item in obs_arcs], device)
         losses = []
-        for (_obs, arcs), edge_map in zip(obs_arcs, outputs.edge_score_maps):
+        for item, edge_map in zip(obs_arcs, outputs.edge_score_maps):
+            arcs = item[1]
             if not edge_map:
                 continue
             # Keep only arcs the model actually scored; empty expert
             # matchings stay as-is so the STOP probability is trained.
             arcs = [arc for arc in arcs if arc in edge_map]
+            if args.arc_order == "score":
+                # 按当前模型打分降序排列示范弧（与贪心解码的选取顺序一致）；排序键不回传梯度。
+                arcs = sorted(arcs, key=lambda a: -float(edge_map[a].detach()))
+            extra = {}
+            if len(item) > 2:  # --switch-weight：item[2] = 上一条示范的无向边集合
+                extra["decision_weights"] = [
+                    1.0 + args.switch_weight * (frozenset(a) not in item[2]) for a in arcs
+                ]
             mean_lp, _mean_entropy = policy._matching_log_prob_entropy_fast(
-                edge_map, arcs, average_log_prob=True,
+                edge_map, arcs, average_log_prob=True, **extra,
             )
             losses.append(-mean_lp)
         if not losses:
@@ -336,15 +389,36 @@ def main() -> None:
         return episode_bc_loss, episode_samples
 
     if args.data_dir:
-        files = sorted(Path(args.data_dir).glob("day_*.pkl.gz"))
+        files = sorted(Path(args.data_dir).glob("day_*.pkl.gz")) * max(1, int(args.passes))
         if not files:
             raise SystemExit(f"no day_*.pkl.gz under {args.data_dir}")
+        if args.shuffle_seed is not None:
+            files = shuffled_passes(sorted(Path(args.data_dir).glob("day_*.pkl.gz")), max(1, int(args.passes)), args.shuffle_seed)
         log(f"[data] training from {len(files)} day files in {args.data_dir}")
         obs_cls = _obs_class(str(config.get("experiment", {}).get("model", "v2")))
+        pool: list = []
+        import random
         for episode, path in enumerate(files, start=1):
+            if args.lr_final is not None:
+                lr_now = cosine_lr(args.lr, args.lr_final, episode - 1, len(files))
+                for group in optimizer.param_groups:
+                    group["lr"] = lr_now
             with gzip.open(path, "rb") as fh:
                 records = pickle.load(fh)
             expert_data = [(rebuild_obs(rec, obs_cls), list(rec["arcs"])) for rec in records]
+            if args.switch_weight > 0:
+                prev_set: set = set()
+                weighted = []
+                for o_, arcs_ in expert_data:
+                    weighted.append((o_, arcs_, prev_set))
+                    prev_set = {frozenset(a) for a in arcs_}
+                expert_data = weighted
+            if args.step_pool > 1:
+                pool.extend(expert_data)
+                if episode % args.step_pool and episode != len(files):
+                    continue
+                random.Random((args.shuffle_seed or 0) * 1000003 + episode).shuffle(pool)
+                expert_data, pool = pool, []
             episode_bc_loss, episode_samples = train_episode(expert_data)
             avg_episode_loss = episode_bc_loss / max(1, episode_samples)
             log(

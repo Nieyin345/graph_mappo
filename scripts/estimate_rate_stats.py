@@ -1,4 +1,4 @@
-"""Write ``dataset/global/rate_stats.json``: the p99 reference for rate features.
+"""Write ``dataset/global/rate_stats.json``: the p99 reference for the selected rate-feature surface.
 
 ``RateNormalizer`` normalizes link rates with ``log1p(rate) / log1p(p99)``. It
 reads the p99 from ``rate_stats.json`` and silently falls back to a hardcoded
@@ -15,7 +15,7 @@ reference.
 Usage (from the project root)::
 
     conda run -n pytorch python scripts/estimate_rate_stats.py
-    conda run -n pytorch python scripts/estimate_rate_stats.py --stride 60 --out dataset/global/rate_stats.json
+    conda run -n pytorch python scripts/estimate_rate_stats.py --dataset-dir dataset/global_v7 --stride 60
 """
 
 from __future__ import annotations
@@ -38,7 +38,11 @@ def parse_args() -> argparse.Namespace:
         "--dataset-dir", default="dataset/global",
         help="Directory holding link_data.h5 and the registries (default: dataset/global).",
     )
-    parser.add_argument("--rate-key", default="k_max", help="H5 dataset holding the secure key rate.")
+    parser.add_argument(
+        "--rate-key", default="auto",
+        help=("H5 dataset used as the policy rate surface. 'auto' follows the "
+              "H5 policy_rate_recommended attribute and falls back to k_max for legacy datasets."),
+    )
     parser.add_argument(
         "--stride", type=int, default=60,
         help="Read one row every N slots (default 60 = one row per hour). "
@@ -72,12 +76,23 @@ def main() -> None:
                 types.append(bytes(item["link_type"]).decode("utf-8").strip().upper())
 
     with h5py.File(h5_path, "r") as f:
-        ds = f[args.rate_key]
+        rate_key = args.rate_key
+        if rate_key == "auto":
+            rate_key = f.attrs.get("policy_rate_recommended", "k_max")
+            if isinstance(rate_key, bytes):
+                rate_key = rate_key.decode("utf-8", errors="replace")
+            rate_key = str(rate_key)
+        if rate_key not in f:
+            raise SystemExit(
+                f"rate dataset {rate_key!r} not found in {h5_path}; "
+                f"available datasets: {sorted(f.keys())}"
+            )
+        ds = f[rate_key]
         n_steps, n_links = ds.shape
         if len(types) != n_links:
             raise SystemExit(
                 f"registry has {len(types)} links but the dataset has {n_links} columns; "
-                "regenerate the registry or pass --rate-key."
+                "regenerate the registry or pass --rate-key explicitly."
             )
         rows = np.arange(0, n_steps, max(1, args.stride))
         block = np.asarray(ds[rows, :], dtype=np.float32)
@@ -91,7 +106,7 @@ def main() -> None:
 
     stats = {
         "source": str(h5_path),
-        "rate_key": args.rate_key,
+        "rate_key": rate_key,
         "stride": int(max(1, args.stride)),
         "rows_scanned": int(block.shape[0]),
         "n_links": int(n_links),

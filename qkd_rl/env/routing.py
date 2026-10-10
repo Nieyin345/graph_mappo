@@ -20,6 +20,13 @@ class RoutingPolicy:
     def __init__(self, edges: list[Edge], config: dict):
         self.edges = edges
         self.config = config
+        self.path_selection = str(
+            config.get("path_selection", "shortest_available_path")
+        )
+        if self.path_selection not in ("shortest_available_path", "fixed_shortest_path"):
+            raise ValueError(
+                "routing.path_selection must be 'shortest_available_path' or 'fixed_shortest_path'"
+            )
         self.adj: dict[str, list[tuple[str, str]]] = {}
         for edge in edges:
             self.adj.setdefault(edge.src, []).append((edge.dst, edge.edge_id))
@@ -129,11 +136,17 @@ class RoutingPolicy:
         return None
 
     def can_serve(self, request: KeyRequest, qkp: LinkQKPPool, t: int) -> bool:
-        path = self.find_request_path(request, qkp=qkp, required_level=request.amount)
+        if self.path_selection == "fixed_shortest_path":
+            path = self.shortest_path(request.src_gs, request.dst_gs)
+        else:
+            path = self.find_request_path(request, qkp=qkp, required_level=request.amount)
         return path is not None and qkp.can_consume_path(path, request.amount)
 
     def consume_for_request(self, request: KeyRequest, qkp: LinkQKPPool, t: int) -> bool:
-        path = self.find_request_path(request, qkp=qkp, required_level=request.amount)
+        if self.path_selection == "fixed_shortest_path":
+            path = self.shortest_path(request.src_gs, request.dst_gs)
+        else:
+            path = self.find_request_path(request, qkp=qkp, required_level=request.amount)
         if path is None:
             return False
         return qkp.consume_path(path, request.amount)
@@ -212,23 +225,31 @@ class RoutingPolicy:
     def partial_consume_for_request(
         self, request: KeyRequest, qkp: LinkQKPPool, t: int, attributed: bool = False
     ) -> float | tuple[float, dict[str, float]]:
-        """Serve as much of ``request`` as the bottleneck hop allows.
+        """Serve as much of ``request`` as the selected path bottleneck allows.
 
-        Finds any path whose hops all hold a positive key stock, then consumes
-        ``min(hop levels, remaining demand)`` from every hop (per-hop key
-        relay semantics). Returns the amount actually consumed this step; the
-        caller accumulates it on ``request.served_amount`` and re-queues the
+        ``fixed_shortest_path`` always uses the same static shortest-hop path
+        for a source/destination pair; ``shortest_available_path`` retains the
+        legacy positive-stock rerouting behavior. The selected path consumes
+        ``min(hop levels, remaining demand)`` from every hop. Returns the amount
+        actually consumed this step; the caller accumulates it on
+        ``request.served_amount`` and re-queues the
         remainder. With ``attributed=True`` it also returns the per-edge
         amounts of this-slot new keys consumed (see
         ``LinkQKPPool.consume_path_attributed``), used by the reward function
         to separate the current link choice from history-stock service.
         """
-        path = self._usable_cached_path(request, qkp)
-        if path is None:
-            component = getattr(self, "_pos_component", None)
-            if component is not None and component.get(request.src_gs, -1) != component.get(request.dst_gs, -1):
-                return (0.0, {}) if attributed else 0.0
-            path = self._find_positive_path(request, qkp)
+        if self.path_selection == "fixed_shortest_path":
+            # Spec §6.1: each request uses one fixed simple trusted-relay path
+            # p_r determined by the static topology.  If one hop is empty the
+            # request waits; it is not rerouted through a different stocked path.
+            path = self.shortest_path(request.src_gs, request.dst_gs)
+        else:
+            path = self._usable_cached_path(request, qkp)
+            if path is None:
+                component = getattr(self, "_pos_component", None)
+                if component is not None and component.get(request.src_gs, -1) != component.get(request.dst_gs, -1):
+                    return (0.0, {}) if attributed else 0.0
+                path = self._find_positive_path(request, qkp)
         if path is None:
             return (0.0, {}) if attributed else 0.0
         remaining = max(0.0, request.amount - request.served_amount)

@@ -18,8 +18,25 @@ import pandas as pd
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 OUT = os.path.join(ROOT, ".tmp", "channel_v2", "cloud_layers")
 COLS = ["cloud_cover", "cloud_cover_low", "cloud_cover_mid", "cloud_cover_high"]
+SOURCE_MODEL = "era5"
+
+def has_exact_2023_hourly_axis(df: pd.DataFrame) -> bool:
+    if "time" not in df.columns:
+        return False
+    t = pd.to_datetime(df["time"], utc=True, errors="coerce")
+    expected = pd.date_range(
+        "2023-01-01T00:00:00Z", "2023-12-31T23:00:00Z", freq="h"
+    )
+    return (
+        not t.isna().any()
+        and len(t) == len(expected)
+        and t.astype("int64").to_numpy().tolist()
+        == expected.astype("int64").to_numpy().tolist()
+    )
+
 ARCHIVE = ("https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}"
-           "&start_date=2023-01-01&end_date=2023-12-31&hourly=" + ",".join(COLS) + "&timezone=UTC")
+           "&start_date=2023-01-01&end_date=2023-12-31&hourly=" + ",".join(COLS)
+           + "&timezone=UTC&models=era5&elevation=nan&cell_selection=nearest")
 
 
 def get_json(url: str, tries: int = 5) -> dict:
@@ -43,11 +60,19 @@ def main() -> None:
     gs = pd.read_csv(args.stations)
     for _, row in gs.iterrows():
         path = os.path.join(args.out, f"{row['name']}.csv")
-        if os.path.exists(path) and len(pd.read_csv(path)) == 8760:
-            print("cached", row["name"])
-            continue
+        if os.path.exists(path):
+            cached = pd.read_csv(path)
+            if (
+                has_exact_2023_hourly_axis(cached)
+                and "source_model" in cached.columns
+                and set(cached["source_model"].dropna().astype(str)) == {SOURCE_MODEL}
+            ):
+                print("cached", row["name"])
+                continue
         a = get_json(ARCHIVE.format(lat=row["lat"], lon=row["lon"]))["hourly"]
         df = pd.DataFrame({"time": a["time"], **{c: a[c] for c in COLS}})
+        df["source_model"] = SOURCE_MODEL
+        df["source_api"] = "open-meteo_historical_weather"
         df.to_csv(path, index=False)
         print(f"{row['name']}: rows={len(df)} nan={int(df[COLS].isna().sum().sum())} "
               + " ".join(f"{c[12:] or 'total'}={df[c].mean():.1f}%" for c in COLS), flush=True)

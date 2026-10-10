@@ -48,22 +48,25 @@ CLUSTERS = {
 def box(rows: pd.DataFrame) -> list[float]:
     """[N, W, S, E] on the 0.25 deg grid, containing every station's nearest grid point."""
     q = lambda x: np.round(np.asarray(x, float) * 4) / 4  # noqa: E731
-    d = 0.125
-    return [float(q(rows.lat).max()) + d, float(q(rows.lon).min()) - d,
-            float(q(rows.lat).min()) - d, float(q(rows.lon).max()) + d]
+    return [float(q(rows.lat).max()), float(q(rows.lon).min()),
+            float(q(rows.lat).min()), float(q(rows.lon).max())]
 
 
-def zust_at(path: str, lat: float, lon: float) -> pd.Series:
+def field_at(path: str, short_name: str, lat: float, lon: float) -> pd.Series:
+    """Nearest ERA5 grid-cell time series for one NetCDF short name."""
     import h5py
     with h5py.File(path, "r") as f:
         la, lo = f["latitude"][()], f["longitude"][()]
-        i, j = int(np.argmin(np.abs(la - lat))), int(np.argmin(np.abs(((lo - lon + 180) % 360) - 180)))
+        i = int(np.argmin(np.abs(la - lat)))
+        j = int(np.argmin(np.abs(((lo - lon + 180) % 360) - 180)))
         tname = "valid_time" if "valid_time" in f else "time"
         units = f[tname].attrs.get("units", "seconds since 1970-01-01")
         units = units.decode() if isinstance(units, bytes) else str(units)
         step, _, origin = units.partition(" since ")
-        t = pd.to_datetime(origin.strip()) + pd.to_timedelta(f[tname][()].astype("int64"), unit=step.strip()[0])
-        ds = f["zust"]
+        t = pd.to_datetime(origin.strip()) + pd.to_timedelta(
+            f[tname][()].astype("int64"), unit=step.strip()[0]
+        )
+        ds = f[short_name]
         v = ds[:, i, j].astype("float64")
         fill = ds.attrs.get("_FillValue", None)
         if fill is not None:
@@ -74,9 +77,20 @@ def zust_at(path: str, lat: float, lon: float) -> pd.Series:
 
 
 def run_cluster(client, cname: str, rows: pd.DataFrame) -> str:
-    todo = [r for _, r in rows.iterrows()
-            if not (os.path.exists(os.path.join(F.OUT, f"{r['name']}.csv"))
-                    and len(pd.read_csv(os.path.join(F.OUT, f"{r['name']}.csv"))) == F.N_HOURS)]
+    todo = []
+    for _, r in rows.iterrows():
+        csv_path = os.path.join(F.OUT, f"{r['name']}.csv")
+        ready = False
+        if os.path.exists(csv_path):
+            cached = pd.read_csv(csv_path)
+            required = {"H_up_Wm2", "ustar", "t2m_K", "sp_Pa", "h_ERA5_m"}
+            ready = (
+                F.has_exact_2023_hourly_axis(cached)
+                and required.issubset(cached.columns)
+                and np.isfinite(cached[list(required)].to_numpy(dtype=float)).all()
+            )
+        if not ready:
+            todo.append(r)
     if not todo:
         return f"cached {cname}"
     for r in todo:  # point time series (fast)
@@ -86,15 +100,19 @@ def run_cluster(client, cname: str, rows: pd.DataFrame) -> str:
                                                "location": {"longitude": float(r["lon"]), "latitude": float(r["lat"])},
                                                "date": [f"{F.YEAR}-01-01/{F.YEAR}-12-31"], "data_format": "csv"}, tgt)
     n, w, s, e = box(pd.DataFrame(todo))
-    tgt = os.path.join(F.OUT, "raw", f"box_{cname}_zust.nc")
+    tgt = os.path.join(F.OUT, "raw", f"box_{cname}_grid025_zust_z.nc")
     if not os.path.exists(tgt):
-        req = F._request(0.0, 0.0, list(range(1, 13)), variables=["friction_velocity"])
+        req = F._request(
+            0.0, 0.0, list(range(1, 13)),
+            variables=["friction_velocity", "geopotential"],
+        )
         req["area"] = [n, w, s, e]
         F._retrieve(client, F.DATASET, req, tgt)
     msgs = []
     for r in todo:
         parts = F.read_ts_zip(os.path.join(F.OUT, "raw", f"{r['name']}_ts.zip"))
-        parts["zust"] = zust_at(tgt, float(r["lat"]), float(r["lon"]))
+        parts["zust"] = field_at(tgt, "zust", float(r["lat"]), float(r["lon"]))
+        parts["z"] = field_at(tgt, "z", float(r["lat"]), float(r["lon"]))
         df = F.to_table(parts)
         df.to_csv(os.path.join(F.OUT, f"{r['name']}.csv"), index=False)
         msgs.append(f"{r['name']} (u* p50 {np.nanmedian(df.ustar):.2f}, missing {int(df.isna().any(axis=1).sum())})")

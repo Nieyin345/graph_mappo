@@ -1,0 +1,11 @@
+# Explicit v7 weather/channel oracle overlay.
+# Use only for experiments labelled oracle: these features read realized future H5 rows.
+features:
+  edge:
+    information_mode: oracle
+    prediction_horizon: 6
+    include_rate_future_window: true
+    include_available_future_window: true
+    include_rate_delta: true
+    include_rate_mean: true
+    include_rate_max: true

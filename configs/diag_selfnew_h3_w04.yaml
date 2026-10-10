@@ -1,0 +1,6 @@
+model:
+  actor:
+    usage_forecast:
+      label_mode: self_new
+      horizon: 3
+      bias_weight: 0.4

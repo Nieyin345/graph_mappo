@@ -1,0 +1,25 @@
+# 正式主场景（2026-10-03）：45 GS + 45 HAP + 30 SAT（叠加在 env_full_demand_v2.yaml + dataset_v2c.yaml 之后）。
+# 1) 节点：候选池全部 45 GS / 45 HAP（dataset/global_v2c，node_registry 前 30 个仍是 30 节点对照网络）。
+# 2) 请求：Park et al. (2025, TNSM) 式 (15)–(17) 的重力模型 —— 城市对强度 ∝ 两端数据中心数之积 ×
+#    两端当地时刻日变化因子均值（configs/park/README.md）；单请求量 ×5（均值 5e5、截断 2.5e6），
+#    到达率 /5，平均提供负载与 30 节点场景相同（0.16 × 5e5 = 0.8 × 1e5 bit/槽）。
+#    park_v3 不使用 hourly_weights / pair_hotness（由重力模型和当地时刻替代）。
+# 3) 切换开销：新建链路需完成捕获跟踪（PAT）。LEO 星地捕获实测/建模约 30–60 s（arXiv 2511.16063，
+#    与 NASA TBIRD 一致），与 60 s 时隙同量级，取首槽不出码（rate_decay_factor = 0）。
+# 负载档：叠加 scenario_n45_x20.yaml / scenario_n45_x30.yaml。
+scenario:
+  active_nodes:
+    gs_count: 45
+    hap_count: 45
+    sat_count: 30
+requests:
+  distribution_version: park_v3
+  park_mass_csv: configs/park/gs_demand_mass_45.csv
+  park_epoch_utc: "2023-01-01T00:00:00Z"
+  arrival_rate: 0.16
+  amount_mean: 500000.0
+  amount_max: 2500000.0
+env:
+  switch_cost:
+    enabled: true
+    rate_decay_factor: 0.0

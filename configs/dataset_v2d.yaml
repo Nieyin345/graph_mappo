@@ -1,0 +1,14 @@
+# 修订主模型（2026-10-04）：不含低仰角经验附加损耗，kappa_x_db=0。
+# 尚未生成数据时不要用于训练；先按 docs/归档/过程文档/模型修订_移除低仰角附加损耗_20261004.md 重建。
+# 与 global_v2c 一样使用有限码长 + coverage_layers；不改变硬件、云量或协议参数。
+# 在 dataset_v2c.yaml / scenario_n45.yaml 等旧数据配置之后叠加本文件。
+# 不覆盖 active_nodes；沿用当前实验选择，避免混入节点规模变化。
+rate_provider:
+  normalization:
+    stats_path: null
+    p99: null
+  h5:
+    dataset_dir: dataset/global_v2d
+    link_data_path: null
+    node_registry_path: null
+    link_registry_path: null

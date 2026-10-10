@@ -1,0 +1,5 @@
+# 诊断（难度扫描）：切换时整槽用于捕获跟踪（PAT），首槽不出码
+env:
+  switch_cost:
+    enabled: true
+    rate_decay_factor: 0.0

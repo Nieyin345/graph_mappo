@@ -1,0 +1,37 @@
+# 外部学习基线（期刊实验，2026-09-30）：Seok 等 [JNSM 33(2):30, 2025] 的 GAT + LSTM + PPO 移植到本环境。
+# 仅在显式 --config seok_port.yaml 时生效；默认配置与所有已有 run 不受影响。
+#  - 空间编码：GAT（GATv2 式多头注意力聚合，3 层 × 128 维，与原文表 3 的层数/维度一致）
+#  - 时间编码：共享 LSTM（128 维、3 层，与原文表 3 一致），输入为每条物理链路过去 32 个时隙的
+#    激活记录（= 智能体过去的动作，对应原文"LSTM 参考过去的动作"）与密钥池存量
+#  - 无请求–路径注意力、无预测头、无路径近期特征（与 GNN-PPO 同一动作解码与训练协议：BC 起点 + PPO 20 次更新）
+model:
+  encoder:
+    aggregation: attention
+    attention_heads: 4
+  actor:
+    attention_only: false
+    pair_path_attention:
+      enabled: false
+    usage_forecast:
+      enabled: false
+      bias_weight: 0.0
+features:
+  edge:
+    include_path_recency: false
+  history_encoder:
+    enabled: true
+    type: lstm
+    hidden_dim: 128
+    num_layers: 3
+    seq_len: 32
+    node:
+      include_arrived: false
+      include_served: false
+      include_failed: false
+      include_qkp_total: false
+    physical_edge:
+      include_qkp_level: true
+      include_available: false
+      include_activated: true
+    demand_edge:
+      include_pending_wait_buckets: false

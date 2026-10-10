@@ -292,9 +292,12 @@ class GlobalSatellites(): ## Global Satellites Database
 
     @classmethod
     def get_satellites(cls, constellation="legacy"):
-        """``legacy``: the hand-written list above (dataset/global); ``walker``: Walker-delta 53:30/5/1."""
+        """``legacy``: the hand-written list above (dataset/global); ``walker``: Walker-delta 53:30/5/1;
+        ``walker60`` (2026-10-04, opt-in): Walker-delta 53:60/6/1 (6 planes x 10), not truncated by NUM_SATS."""
         if constellation == "walker":
             return cls.walker_delta()[:SimConfig.NUM_SATS]
+        if constellation == "walker60":
+            return cls.walker_delta(total=60, planes=6, phasing=1)
         if constellation != "legacy":
             raise ValueError(f"unknown constellation {constellation!r}")
         return cls.SATS[:SimConfig.NUM_SATS]

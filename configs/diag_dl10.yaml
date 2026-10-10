@@ -1,0 +1,3 @@
+# 诊断（场景扫描）
+requests:
+  deadline_steps: 10

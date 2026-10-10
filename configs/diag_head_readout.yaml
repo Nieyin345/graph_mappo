@@ -1,0 +1,4 @@
+# 诊断用（v2c 修复筛查）：预测头只训读出层，不更新共享 encoder
+train:
+  ppo:
+    usage_head_train_encoder: false

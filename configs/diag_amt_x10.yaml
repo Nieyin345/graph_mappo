@@ -1,0 +1,4 @@
+# 诊断用（v2c 需求标定扫描，2026-10-01）：请求量 ×10
+requests:
+  amount_mean: 1000000
+  amount_max: 5000000

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import math
 from pathlib import Path
 from typing import Any
 
@@ -188,8 +189,27 @@ class ConfigValidator:
         dims = self.resolve_feature_dims(config)
         if dims["node_dim"] <= 0 or dims["edge_dim"] <= 0:
             raise ValueError(f"Invalid feature dims: {dims}")
-        if config["features"]["edge"]["prediction_horizon"] < 0:
+        edge_features = config["features"]["edge"]
+        if edge_features["prediction_horizon"] < 0:
             raise ValueError("prediction_horizon must be non-negative.")
+        info_mode = str(edge_features.get("information_mode", "legacy"))
+        if info_mode not in ("legacy", "causal", "oracle"):
+            raise ValueError("features.edge.information_mode must be legacy, causal, or oracle.")
+        if info_mode == "causal":
+            future_flags = (
+                "include_rate_future_window",
+                "include_available_future_window",
+                "include_rate_delta",
+                "include_rate_mean",
+                "include_rate_max",
+            )
+            enabled = [name for name in future_flags if bool(edge_features.get(name, False))]
+            if int(edge_features.get("prediction_horizon", 0)) != 0 or enabled:
+                raise ValueError(
+                    "causal edge observations cannot use future H5 truth; set prediction_horizon=0 "
+                    f"and disable future-derived features (enabled={enabled}). "
+                    "Use information_mode='oracle' only for an explicitly labelled oracle experiment."
+                )
         if config["qkp"]["type"] != "link":
             raise ValueError("Current implementation expects qkp.type = link.")
         history_cfg = config["features"].get("history_encoder", {})
@@ -251,10 +271,57 @@ class ConfigValidator:
         routing_cfg = config["routing"]
         if routing_cfg.get("mode", "link_path") != "link_path":
             raise ValueError("routing.mode: only 'link_path' is implemented.")
-        if routing_cfg.get("path_selection", "shortest_available_path") != "shortest_available_path":
-            raise ValueError("routing.path_selection: only 'shortest_available_path' is implemented.")
+        if routing_cfg.get("path_selection", "shortest_available_path") not in (
+            "shortest_available_path",
+            "fixed_shortest_path",
+        ):
+            raise ValueError(
+                "routing.path_selection must be 'shortest_available_path' "
+                "or 'fixed_shortest_path'."
+            )
         if routing_cfg.get("serve_order", "earliest_deadline_first") != "earliest_deadline_first":
             raise ValueError("routing.serve_order: only 'earliest_deadline_first' is implemented.")
+        req_cfg = config.get("requests", {}) or {}
+        req_version = str(req_cfg.get("distribution_version", "legacy_v1"))
+        if req_version in ("zipf_v7", "park_v7"):
+            bar_lambda = float(req_cfg.get("arrival_rate_per_second", -1.0))
+            if not math.isfinite(bar_lambda) or bar_lambda < 0.0:
+                raise ValueError(
+                    f"requests.arrival_rate_per_second must be finite and nonnegative for {req_version}"
+                )
+            amount_min = int(req_cfg.get("amount_min", 0))
+            amount_max = int(req_cfg.get("amount_max", 0))
+            if amount_min <= 0 or amount_max < amount_min:
+                raise ValueError(
+                    f"{req_version} requires 0 < requests.amount_min <= requests.amount_max"
+                )
+        if req_version == "zipf_v7":
+            if not str(req_cfg.get("fixed_pairs_csv", "") or ""):
+                raise ValueError("requests.fixed_pairs_csv is required for distribution_version=zipf_v7")
+            pair_count = int(req_cfg.get("fixed_pair_count", 45))
+            if pair_count <= 0:
+                raise ValueError("requests.fixed_pair_count must be positive for zipf_v7")
+            zipf_s = float(req_cfg.get("pair_zipf_s", 0.0))
+            if not math.isfinite(zipf_s) or zipf_s <= 0.0:
+                raise ValueError("requests.pair_zipf_s must be finite and positive for zipf_v7")
+        if req_version == "park_v7":
+            if not str(req_cfg.get("fixed_pairs_csv", "") or ""):
+                raise ValueError("requests.fixed_pairs_csv is required for distribution_version=park_v7")
+            pair_count = int(req_cfg.get("fixed_pair_count", 45))
+            if pair_count <= 0:
+                raise ValueError("requests.fixed_pair_count must be positive for park_v7")
+            if not str(req_cfg.get("park_mass_csv", "") or ""):
+                raise ValueError("requests.park_mass_csv is required for distribution_version=park_v7")
+        qkd_block = config.get("env", {}).get("qkd_block", {}) or {}
+        if qkd_block.get("enabled", False):
+            mode = str(qkd_block.get("release_mode", "asymptotic_proxy"))
+            if mode not in ("asymptotic_proxy", "finite_key"):
+                raise ValueError("env.qkd_block.release_mode must be asymptotic_proxy or finite_key")
+            max_raw = qkd_block.get("max_duration_s", 0.0)
+            if max_raw is not None:
+                max_s = float(max_raw)
+                if not math.isfinite(max_s) or max_s <= 0.0:
+                    raise ValueError("env.qkd_block.max_duration_s must be null or a finite positive value")
         rate_cfg = config["rate_provider"]["rate"]
         if rate_cfg.get("negative_rate_policy", "clip_to_zero") not in ("clip_to_zero", "raise"):
             raise ValueError("rate_provider.rate.negative_rate_policy: supported values are 'clip_to_zero' and 'raise'.")

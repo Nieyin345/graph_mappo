@@ -107,11 +107,19 @@ class LazyEdgeWindows:
         idx = self._provider.edge_link_ids(edge_ids)
         return self._blocks[0][0][idx]
 
-    def avail_lookahead(self, link_idx: np.ndarray, steps: int) -> np.ndarray:
-        """``(steps, len(link_idx))`` availability for slots ``t+1 .. t+steps``."""
+    def avail_lookahead(
+        self, link_idx: np.ndarray, steps: int, *, geometry_only: bool = False
+    ) -> np.ndarray:
+        """Future contact/availability rows for the requested link columns.
+
+        geometry_only=True is the causal contact-plan path: it may use only
+        deterministic H5 LOS/geometry, never future weather-driven rates.
+        """
         if self._provider is None:
             raise RuntimeError("avail_lookahead needs the live provider (not available after unpickling)")
-        return self._provider.get_avail_lookahead(self._t, steps)[:, link_idx]
+        return self._provider.get_avail_lookahead(
+            self._t, steps, geometry_only=geometry_only
+        )[:, link_idx]
 
 
 class RateProvider(Protocol):
@@ -150,6 +158,7 @@ class RateNormalizer:
         self.p99 = float(config.get("p99") or 10.0)
         self.eps = float(config.get("eps", 1.0e-8))
         self.per_type_p99: dict[str, float] = {}
+        self.stats_rate_key: str | None = None
 
         stats_path = config.get("stats_path")
         if not stats_path:
@@ -161,6 +170,8 @@ class RateNormalizer:
                 with stats_path.open("r", encoding="utf-8") as fh:
                     stats = json.load(fh)
                 self.p99 = float(stats["global"]["p99"])
+                rate_key = stats.get("rate_key")
+                self.stats_rate_key = str(rate_key) if rate_key else None
                 for name, per in stats.get("per_link_type", {}).items():
                     value = _H5_TYPE_TO_VALUE.get(name)
                     if value is not None:
@@ -191,8 +202,10 @@ class H5RateProvider:
     Datasets (all shaped ``(T, L)`` unless noted):
 
     - ``link_registry``: structured array (link_id, node_u, node_v, link_type)
-    - ``k_max``: secure key rate in bits-per-second (float32)
-    - ``los``: line-of-sight flag (int8, 1 = visible)
+    - ``k_max`` / ``k_max_first``: 60 s finite-key control surfaces.
+    - v7.5 ``k_proxy`` / ``k_proxy_first``: block-compatible asymptotic training-observation surfaces. Both rate families are conditional on low/mid cloud being clear; policy windows multiply the selected surface by ``f_g(t)`` while realized ``C_g(t)`` is applied only after action selection.
+    - v7.5 block stats: ``qkd_gain``, ``qkd_y1``, ``qkd_usable_fraction`` and ``*_first`` variants
+    - v7.5 ``los``: pure-geometry contact flag (int8, 1 = LOS and the applicable elevation/grazing/distance gates pass); it contains no cloud or rate threshold.
     - ``distance``: km (float32), ``zenith``: degrees (float32, NaN off-LOS)
 
     Node/link registries come from ``node_registry.csv`` + ``link_registry.csv``
@@ -211,6 +224,12 @@ class H5RateProvider:
         self.node_registry_path = Path(h5_cfg.get("node_registry_path") or dataset_dir / "node_registry.csv")
         self.link_registry_path = Path(h5_cfg.get("link_registry_path") or dataset_dir / "link_registry.csv")
         self.rate_dataset_key = h5_cfg.get("rate_dataset_key", "k_max")
+        self.activation_rate_dataset_key = h5_cfg.get("activation_rate_dataset_key", "k_max_first")
+        self.allow_domain_invalid = bool(h5_cfg.get("allow_domain_invalid", False))
+        self.capture_gamma: float | None = None
+        self._has_activation_rate = False
+        self._has_qkd_stats = False
+        self.qkd_params: dict | None = None
         self.los_dataset_key = h5_cfg.get("los_dataset_key", "los")
         self.distance_dataset_key = h5_cfg.get("distance_dataset_key", "distance")
         self.zenith_dataset_key = h5_cfg.get("zenith_dataset_key", "zenith")
@@ -233,6 +252,8 @@ class H5RateProvider:
         self._blocks_t: int | None = None
         self._blocks: tuple[np.ndarray, np.ndarray, np.ndarray | None] | None = None
         self._has_los = False
+        self._has_activation_rate = False
+        self.capture_gamma = None
         self._los_warned = False
         self._chunk_rows: int | None = None
         self._chunk_caches: dict[str, OrderedDict[int, np.ndarray]] = {}
@@ -283,18 +304,199 @@ class H5RateProvider:
             self._edge_to_link[edge.edge_id] = link_id
             self._edge_link_type[edge.edge_id] = edge.link_type
         self._open()
+        if (
+            self._normalizer is not None
+            and self._normalizer.mode == "log_p99"
+            and self._normalizer.stats_rate_key is not None
+            and self._normalizer.stats_rate_key != self.rate_dataset_key
+        ):
+            stats_key = self._normalizer.stats_rate_key
+            selected_key = self.rate_dataset_key
+            self.close()
+            raise ValueError(
+                f"rate_stats.json was calibrated from {stats_key!r} "
+                f"but H5RateProvider is reading {selected_key!r}; regenerate "
+                "rate_stats.json with scripts/estimate_rate_stats.py --rate-key matching the provider"
+            )
         self._prepare_normalization()
 
     # ---------- RateProvider interface ----------
-    def get_rate(self, edge_id: str, t: int) -> float:
+    def get_generation_rate(self, edge_id: str, t: int) -> float:
+        """Conditional-clear value from the selected H5 rate surface.
+
+        Legacy datasets usually select k_max; v7.5 training selects k_proxy.
+        The realized low/mid-cloud gate is intentionally applied later.
+        """
         link_id = self._edge_to_link[edge_id]
         return self._clean_rate(self._read_scalar(self.rate_dataset_key, t, link_id))
 
+    def get_rate(self, edge_id: str, t: int) -> float:
+        """Policy-visible expected rate; never exposes the realized C_g(t)."""
+        rate = self.get_generation_rate(edge_id, t)
+        return rate * self.get_cloud_clear_probability(edge_id, t)
+
+    def get_activation_rate(self, edge_id: str, t: int) -> float | None:
+        """Rate for a newly activated link, if the H5 contains a capture-adjusted series."""
+        self._open()
+        if not self._has_activation_rate:
+            return None
+        link_id = self._edge_to_link[edge_id]
+        return self._clean_rate(self._read_scalar(self.activation_rate_dataset_key, t, link_id))
+
+    def get_qkd_slot_stats(self, edge_id: str, t: int, *, activation: bool = False):
+        """Return v7.5 conditional-clear sufficient stats for one link/slot.
+
+        The realized low/mid-cloud gate is intentionally NOT applied here; the
+        environment applies it only after action selection. Error gains are
+        reconstructed exactly from Q_mu and the vacuum gain under the fixed
+        baseline misalignment model.
+        """
+        self._open()
+        if not self._has_qkd_stats:
+            return None
+        suffix = "_first" if activation else ""
+        link_id = self._edge_to_link[edge_id]
+        tt = self._resolve_time_index(t)
+        if tt is None:
+            n_mu = len((self.qkd_params or {}).get("mu", (0.62, 0.24, 0.0)))
+            return dict(
+                gains=np.zeros(n_mu, dtype=np.float64),
+                errors=np.zeros(n_mu, dtype=np.float64),
+                y1=0.0,
+                n_pulses=0.0,
+            )
+        gains = np.asarray(self._file[f"qkd_gain{suffix}"][tt, link_id], dtype=np.float64)
+        y1 = float(self._file[f"qkd_y1{suffix}"][tt, link_id])
+        frac = float(self._file[f"qkd_usable_fraction{suffix}"][tt, link_id])
+        if (
+            np.any(~np.isfinite(gains))
+            or not np.isfinite(y1)
+            or not np.isfinite(frac)
+        ):
+            raise ValueError(
+                f"invalid/non-finite QKD sufficient statistics for {edge_id} at t={t}; "
+                "the slot should have been unavailable (e.g. bounded-moment incompatibility)"
+            )
+        params = self.qkd_params or {}
+        e_d = float(params.get("e_d", 0.01))
+        f_rep = float(params.get("f_rep", 100e6))
+        mu = np.asarray(params.get("mu", (0.62, 0.24, 0.0)), dtype=np.float64)
+        if mu.ndim != 1 or len(mu) != len(gains) or np.any(~np.isfinite(mu)):
+            raise ValueError("H5 finite-key intensity metadata is inconsistent with qkd_gain")
+        vac = np.flatnonzero(np.isclose(mu, 0.0, rtol=0.0, atol=1e-15))
+        if len(vac) != 1:
+            raise ValueError(
+                f"v7.5 QKD sufficient statistics require exactly one vacuum intensity; mu={mu.tolist()}"
+            )
+        y0 = float(gains[int(vac[0])])
+        errors = e_d * gains + (0.5 - e_d) * y0
+        n_pulses = max(0.0, frac) * f_rep * float(self.slot_seconds)
+        return dict(gains=gains, errors=errors, y1=y1, n_pulses=n_pulses)
+
+    def get_cloud_gate(self, edge_id: str, t: int) -> float:
+        """Realized low/mid-cloud gate, hidden from policy features."""
+        self._open()
+        if not getattr(self, "_has_station_cloud", False):
+            return 1.0
+        link_id = self._edge_to_link[edge_id]
+        g = int(self._file["link_ground_station"][link_id])
+        if g < 0:
+            return 1.0
+        tt = self._resolve_time_index(t)
+        if tt is None:
+            return 0.0
+        return float(self._file["station_cloud_state"][tt, g])
+
+    def get_cloud_clear_probability(self, edge_id: str, t: int) -> float:
+        """Observable station-scale clear probability f_g(t), if available."""
+        self._open()
+        if not getattr(self, "_has_station_cloud", False):
+            return 1.0
+        link_id = self._edge_to_link[edge_id]
+        g = int(self._file["link_ground_station"][link_id])
+        if g < 0:
+            return 1.0
+        tt = self._resolve_time_index(t)
+        if tt is None:
+            return 0.0
+        return float(self._file["station_cloud_clear_probability"][tt, g])
+
     def is_available(self, edge_id: str, t: int) -> bool:
         link_id = self._edge_to_link[edge_id]
-        rate = self._read_scalar(self.rate_dataset_key, t, link_id)
+        rate = self.get_rate(edge_id, t)
         los = self._read_scalar(self.los_dataset_key, t, link_id) if self._has_los else None
         return self._available_from(rate, los)
+
+    def activation_adjusted_window_blocks(
+        self,
+        t: int,
+        blocks: tuple[np.ndarray, np.ndarray, np.ndarray | None],
+        last_activated_edges: list[str],
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+        """Replace only the current row for links that require acquisition.
+
+        Future rows remain the ordinary full-slot prediction. Links that were
+        active in the previous scheduling slot keep their full current-slot
+        rate; all other links use the precomputed post-acquisition rate surface.
+        """
+        if not self._has_activation_rate:
+            return blocks
+        rates, avail, rates_norm = blocks
+        if rates.shape[0] == 0:
+            return blocks
+
+        src_t = self._resolve_time_index(t)
+
+        if src_t is None:
+            activation_rate = np.zeros(self._L, dtype=np.float64)
+        else:
+            raw = self._read_dataset_rows(
+                self.activation_rate_dataset_key, src_t, src_t + 1
+            )[0]
+            if self.negative_rate_policy == "raise" and np.any(
+                np.nan_to_num(raw, nan=0.0) < 0.0
+            ):
+                raise ValueError(
+                    "Negative activation rate encountered with "
+                    "rate.negative_rate_policy=raise."
+                )
+            activation_rate = np.where(
+                np.isnan(raw), 0.0, np.maximum(raw, 0.0)
+            ).astype(np.float64, copy=False)
+            if getattr(self, "_has_station_cloud", False):
+                g_by_link = np.asarray(
+                    self._file["link_ground_station"][:], dtype=np.int64
+                )
+                ground_cols = np.flatnonzero(g_by_link >= 0)
+                if len(ground_cols):
+                    prob = np.asarray(
+                        self._file["station_cloud_clear_probability"][src_t],
+                        dtype=np.float64,
+                    )
+                    activation_rate = activation_rate.copy()
+                    activation_rate[ground_cols] *= prob[g_by_link[ground_cols]]
+        keep_full = np.zeros(self._L, dtype=bool)
+        for edge_id in last_activated_edges:
+            link_id = self._edge_to_link.get(edge_id)
+            if link_id is not None:
+                keep_full[link_id] = True
+        replace = ~keep_full
+
+        out_rates = rates.copy()
+        # Acquisition changes what a newly selected link can PRODUCE in this
+        # slot, not whether the scheduler is allowed to select the link.  Keep
+        # the original current-slot action availability so t_acq == slot_s is
+        # a legal zero-production acquisition slot that can be held active into
+        # the next slot.  The rate feature itself still uses k_proxy_first.
+        out_avail = avail.copy()
+        out_rates[0, replace] = activation_rate[replace]
+
+        out_norm = None
+        if rates_norm is not None:
+            out_norm = rates_norm.copy()
+            activation_norm = self._normalize_block(activation_rate[None, :])[0]
+            out_norm[0, replace] = activation_norm[replace]
+        return out_rates, out_avail, out_norm
 
     def get_edge_window(self, edge_id: str, t: int) -> EdgeWindow:
         link_id = self._edge_to_link[edge_id]
@@ -302,9 +504,9 @@ class H5RateProvider:
         available: list[bool] = []
         for offset in range(self.horizon + 1):
             tt = t + offset
-            rate = self._read_scalar(self.rate_dataset_key, tt, link_id)
+            rate = self.get_rate(edge_id, tt)
             los = self._read_scalar(self.los_dataset_key, tt, link_id) if self._has_los else None
-            rates.append(self._clean_rate(rate))
+            rates.append(rate)
             available.append(self._available_from(rate, los))
         rates_norm = None
         if self._normalizer is not None:
@@ -362,6 +564,20 @@ class H5RateProvider:
         if self.negative_rate_policy == "raise" and np.any(np.nan_to_num(rates_block, nan=0.0) < 0.0):
             raise ValueError("Negative rate encountered with rate.negative_rate_policy=raise.")
         rates_clean = np.where(np.isnan(rates_block), 0.0, np.maximum(rates_block, 0.0))
+        # v7.5: the selected policy surface (normally k_proxy) is conditional
+        # on low/mid cloud being clear. Policy features use
+        # E[R | current weather] = f_g(t) * R_clear; realized C_g(t) remains
+        # hidden until the environment executes the action. In causal mode the
+        # provider horizon is zero, so no future H5 weather truth is read here.
+        if getattr(self, "_has_station_cloud", False) and rates_clean.size:
+            g_by_link = np.asarray(self._file["link_ground_station"][:], dtype=np.int64)
+            ground_cols = np.flatnonzero(g_by_link >= 0)
+            if len(ground_cols):
+                prob = np.asarray(
+                    self._file["station_cloud_clear_probability"][t0:t1],
+                    dtype=np.float64,
+                )
+                rates_clean[:, ground_cols] *= prob[:, g_by_link[ground_cols]]
         source = self.availability_source
         avail = self._availability_block(rates_clean, t0, t1)
         rates_norm = self._normalize_block(rates_clean)
@@ -386,6 +602,15 @@ class H5RateProvider:
                 ):
                     raise ValueError("Negative rate encountered with rate.negative_rate_policy=raise.")
                 last_rate = np.where(np.isnan(last_rate_block), 0.0, np.maximum(last_rate_block, 0.0))
+                if getattr(self, "_has_station_cloud", False):
+                    g_by_link = np.asarray(self._file["link_ground_station"][:], dtype=np.int64)
+                    ground_cols = np.flatnonzero(g_by_link >= 0)
+                    if len(ground_cols):
+                        prob = np.asarray(
+                            self._file["station_cloud_clear_probability"][self._T - 1:self._T],
+                            dtype=np.float64,
+                        )
+                        last_rate[:, ground_cols] *= prob[:, g_by_link[ground_cols]]
                 last_rate_ok = last_rate >= self.min_link_rate
                 if self._has_los:
                     last_los = self._read_dataset_rows(self.los_dataset_key, self._T - 1, self._T)
@@ -437,27 +662,57 @@ class H5RateProvider:
             return los_ok & rate_ok
         raise ValueError(f"Unknown availability_source: {source!r}")
 
-    def get_avail_lookahead(self, t: int, steps: int) -> np.ndarray:
-        """``(steps, L)`` availability for slots ``t+1 .. t+steps`` (contact plan).
+    def get_avail_lookahead(
+        self, t: int, steps: int, *, geometry_only: bool = False
+    ) -> np.ndarray:
+        """Future contact/availability rows.
 
-        2026-09-27: long-horizon lookahead for ``features.edge.contact_lookahead``,
-        independent of ``prediction_horizon`` so the existing window block (and
-        every feature/mask derived from it) is unchanged. Slots beyond the
-        dataset end are unavailable. Cached for the last ``(t, steps)``.
+        Causal contact-plan features must set geometry_only=True. That path
+        reads only the deterministic los geometry surface and never future
+        rate, cloud probability, or weather-derived availability.
         """
-        key = (int(t), int(steps))
+        self._open()
+        key = (int(t), int(steps), bool(geometry_only))
         if getattr(self, "_lookahead_key", None) == key:
             return self._lookahead
         r0 = min(max(t + 1, 0), self._T)
         r1 = min(max(t + 1 + steps, 0), self._T)
         if r1 > r0:
-            rates = self._read_dataset_rows(self.rate_dataset_key, r0, r1)
-            rates_clean = np.where(np.isnan(rates), 0.0, np.maximum(rates, 0.0))
-            avail = self._availability_block(rates_clean, r0, r1)
+            if geometry_only:
+                if not self._has_los:
+                    raise ValueError(
+                        "causal contact_lookahead requires a pure-geometry 'los' dataset; "
+                        "regenerate the v7.5 H5 instead of falling back to future rates"
+                    )
+                los = self._read_dataset_rows(self.los_dataset_key, r0, r1)
+                avail = np.asarray(los == 1, dtype=bool)
+            else:
+                rates = self._read_dataset_rows(self.rate_dataset_key, r0, r1)
+                rates_clean = np.where(np.isnan(rates), 0.0, np.maximum(rates, 0.0))
+                # Match get_window_blocks(): v7.5 H5 rates are conditional on
+                # low/mid cloud being clear, so non-causal/oracle availability
+                # must apply the corresponding future clear probability before
+                # the rate threshold.  The geometry_only causal path above
+                # deliberately avoids all future weather information.
+                if getattr(self, "_has_station_cloud", False) and rates_clean.size:
+                    g_by_link = np.asarray(
+                        self._file["link_ground_station"][:], dtype=np.int64
+                    )
+                    ground_cols = np.flatnonzero(g_by_link >= 0)
+                    if len(ground_cols):
+                        prob = np.asarray(
+                            self._file["station_cloud_clear_probability"][r0:r1],
+                            dtype=np.float64,
+                        )
+                        rates_clean[:, ground_cols] *= prob[:, g_by_link[ground_cols]]
+                avail = self._availability_block(rates_clean, r0, r1)
         else:
             avail = np.zeros((0, self._L), dtype=bool)
         if avail.shape[0] < steps:
-            avail = np.concatenate([avail, np.zeros((steps - avail.shape[0], self._L), dtype=bool)], axis=0)
+            avail = np.concatenate(
+                [avail, np.zeros((steps - avail.shape[0], self._L), dtype=bool)],
+                axis=0,
+            )
         self._lookahead_key, self._lookahead = key, avail
         return avail
 
@@ -532,10 +787,146 @@ class H5RateProvider:
             import h5py
 
             self._file = h5py.File(self.link_data_path, "r")
-            ds = self._file[self.rate_dataset_key]
-            self._T, self._L = ds.shape
-            self.slot_seconds = int(self._file.attrs.get("theta_sec", 60))
-            self._has_los = self.los_dataset_key in self._file
+            self._has_activation_rate = False
+            self._has_qkd_stats = False
+            self.qkd_params = None
+            self.capture_time_s = None
+            self.capture_gamma = None
+            try:
+                domain_policy = self._file.attrs.get("domain_policy", "error")
+                if isinstance(domain_policy, bytes):
+                    domain_policy = domain_policy.decode("utf-8", errors="replace")
+                if domain_policy == "mark" and not self.allow_domain_invalid:
+                    raise ValueError("diagnostic v7 dataset has domain_policy=mark; refusing to use it as a training rate source")
+                ds = self._file[self.rate_dataset_key]
+                self._T, self._L = ds.shape
+                self.slot_seconds = int(self._file.attrs.get("theta_sec", 60))
+                self._has_activation_rate = self.activation_rate_dataset_key in self._file
+                if self._has_activation_rate:
+                    first = self._file[self.activation_rate_dataset_key]
+                    if first.shape != ds.shape:
+                        raise ValueError("activation-rate dataset shape must match the main rate dataset")
+                    t_attr = self._file.attrs.get("capture_time_s")
+                    if t_attr is not None:
+                        try:
+                            t_acq = float(t_attr)
+                        except (TypeError, ValueError, OverflowError):
+                            t_acq = float("nan")
+                        if not np.isfinite(t_acq) or not 0.0 <= t_acq <= self.slot_seconds:
+                            raise ValueError(
+                                "k_max_first requires capture_time_s in [0, theta_sec]"
+                            )
+                        self.capture_time_s = t_acq
+                        self.capture_gamma = 1.0 - t_acq / self.slot_seconds
+                    else:
+                        # Backward compatibility for pre-v7.5 datasets.
+                        gamma_attr = self._file.attrs.get("capture_gamma")
+                        try:
+                            gamma = float(gamma_attr)
+                        except (TypeError, ValueError, OverflowError):
+                            gamma = float("nan")
+                        if not np.isfinite(gamma) or not 0.0 <= gamma <= 1.0:
+                            raise ValueError(
+                                "k_max_first requires capture_time_s or legacy "
+                                "capture_gamma in [0, 1]"
+                            )
+                        self.capture_gamma = gamma
+                        self.capture_time_s = self.slot_seconds * (1.0 - gamma)
+                self._has_los = self.los_dataset_key in self._file
+                if self._has_los and self._file[self.los_dataset_key].shape != ds.shape:
+                    raise ValueError(
+                        f"{self.los_dataset_key} dataset shape must match selected rate surface "
+                        f"{self.rate_dataset_key}: {self._file[self.los_dataset_key].shape} != {ds.shape}"
+                    )
+                qkd_keys = (
+                    "qkd_gain", "qkd_y1", "qkd_usable_fraction",
+                    "qkd_gain_first", "qkd_y1_first", "qkd_usable_fraction_first",
+                )
+                qkd_present = [key in self._file for key in qkd_keys]
+                if any(qkd_present) and not all(qkd_present):
+                    missing = [key for key, present in zip(qkd_keys, qkd_present) if not present]
+                    raise ValueError(
+                        "partial v7.5 QKD sufficient-statistic schema; missing "
+                        + ", ".join(missing)
+                    )
+                self._has_qkd_stats = all(qkd_present)
+                if self._has_qkd_stats:
+                    q_gain = self._file["qkd_gain"]
+                    q_gain_first = self._file["qkd_gain_first"]
+                    q_y1 = self._file["qkd_y1"]
+                    q_y1_first = self._file["qkd_y1_first"]
+                    q_frac = self._file["qkd_usable_fraction"]
+                    q_frac_first = self._file["qkd_usable_fraction_first"]
+                    if q_gain.ndim != 3 or q_gain.shape[:2] != ds.shape:
+                        raise ValueError("qkd_gain must have shape (T, L, n_intensity)")
+                    if q_gain_first.shape != q_gain.shape:
+                        raise ValueError("qkd_gain_first shape must match qkd_gain")
+                    for name, qds in (
+                        ("qkd_y1", q_y1),
+                        ("qkd_y1_first", q_y1_first),
+                        ("qkd_usable_fraction", q_frac),
+                        ("qkd_usable_fraction_first", q_frac_first),
+                    ):
+                        if qds.shape != ds.shape:
+                            raise ValueError(f"{name} shape must match selected rate surface")
+                    raw_params = self._file.attrs.get("finite_key_params_json", "{}")
+                    if isinstance(raw_params, bytes):
+                        raw_params = raw_params.decode("utf-8", errors="replace")
+                    try:
+                        self.qkd_params = json.loads(str(raw_params))
+                    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                        raise ValueError("invalid finite_key_params_json HDF5 attribute") from exc
+                    mu = self.qkd_params.get("mu")
+                    if not isinstance(mu, (list, tuple)) or len(mu) != q_gain.shape[2]:
+                        raise ValueError(
+                            "finite_key_params_json.mu must match qkd_gain intensity dimension"
+                        )
+                    mu_arr = np.asarray(mu, dtype=np.float64)
+                    if mu_arr.shape != (3,) or np.any(~np.isfinite(mu_arr)):
+                        raise ValueError("finite_key_params_json.mu must contain three finite intensities")
+                    if not (
+                        mu_arr[0] > mu_arr[1] > mu_arr[2]
+                        and np.isclose(mu_arr[2], 0.0, rtol=0.0, atol=1e-15)
+                    ):
+                        raise ValueError("finite-key H5 metadata requires signal, decoy, vacuum ordering")
+                    p_mu = np.asarray(self.qkd_params.get("p_mu", ()), dtype=np.float64)
+                    if p_mu.shape != (3,) or np.any(~np.isfinite(p_mu)) or np.any(p_mu <= 0.0):
+                        raise ValueError("finite_key_params_json.p_mu must contain three positive values")
+                    if not np.isclose(p_mu.sum(), 1.0, rtol=0.0, atol=1e-12):
+                        raise ValueError("finite_key_params_json.p_mu must sum to one")
+                    meta_slot_s = float(self.qkd_params.get("slot_s", self.slot_seconds))
+                    if not np.isclose(meta_slot_s, self.slot_seconds, rtol=0.0, atol=1e-9):
+                        raise ValueError("finite-key slot_s metadata must match H5 theta_sec")
+                cloud_keys = (
+                    "station_cloud_state",
+                    "station_cloud_clear_probability",
+                    "link_ground_station",
+                )
+                cloud_present = [key in self._file for key in cloud_keys]
+                if any(cloud_present) and not all(cloud_present):
+                    missing = [
+                        key for key, present in zip(cloud_keys, cloud_present) if not present
+                    ]
+                    raise ValueError(
+                        "partial v7.5 station-cloud schema; missing " + ", ".join(missing)
+                    )
+                self._has_station_cloud = all(cloud_present)
+                if self._has_station_cloud:
+                    if self._file["station_cloud_state"].shape[0] != self._T:
+                        raise ValueError("station_cloud_state time axis must match k_max")
+                    if self._file["station_cloud_clear_probability"].shape != self._file["station_cloud_state"].shape:
+                        raise ValueError("cloud state/probability datasets must have identical shape")
+                    if self._file["link_ground_station"].shape != (self._L,):
+                        raise ValueError("link_ground_station must have one entry per H5 link")
+            except Exception:
+                self._file.close()
+                self._file = None
+                self._has_activation_rate = False
+                self._has_qkd_stats = False
+                self.qkd_params = None
+                self.capture_time_s = None
+                self.capture_gamma = None
+                raise
             self._chunk_rows = None if ds.chunks is None else int(ds.chunks[0])
             self._chunk_caches = {}
             if not self._has_los and not self._los_warned:
@@ -600,14 +991,22 @@ class H5RateProvider:
             return None
         return np.log1p(rates_clean) * self._inv_log1p_p99[None, :]
 
+    def _resolve_time_index(self, t: int) -> int | None:
+        """Resolve one logical slot under the same policy used by rate reads."""
+        tt = int(t)
+        if 0 <= tt < self._T:
+            return tt
+        if self.out_of_range_policy == "raise":
+            raise IndexError(f"t={t} outside dataset range [0, {self._T})")
+        if self.out_of_range_policy == "pad_last":
+            return self._T - 1
+        return None
+
     def _read_scalar(self, dataset_key: str, t: int, link_id: int) -> float:
-        if t < 0 or t >= self._T:
-            if self.out_of_range_policy == "raise":
-                raise IndexError(f"t={t} outside dataset range [0, {self._T})")
-            if self.out_of_range_policy == "pad_last":
-                return float(self._read_dataset_rows(dataset_key, self._T - 1, self._T)[0, link_id])
+        tt = self._resolve_time_index(t)
+        if tt is None:
             return 0.0
-        return float(self._read_dataset_rows(dataset_key, t, t + 1)[0, link_id])
+        return float(self._read_dataset_rows(dataset_key, tt, tt + 1)[0, link_id])
 
     def _clean_rate(self, value: float) -> float:
         value = float(value)

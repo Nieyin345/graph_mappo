@@ -19,9 +19,27 @@ import pandas as pd
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 OUT = os.path.join(ROOT, ".tmp", "channel_v2", "weather")
 
+WEATHER_SOURCE_MODEL = "era5"
+AOD_SOURCE_MODEL = "cams_global"
+
+def has_exact_2023_hourly_axis(df: pd.DataFrame) -> bool:
+    if "time" not in df.columns:
+        return False
+    t = pd.to_datetime(df["time"], utc=True, errors="coerce")
+    expected = pd.date_range(
+        "2023-01-01T00:00:00Z", "2023-12-31T23:00:00Z", freq="h"
+    )
+    return (
+        not t.isna().any()
+        and len(t) == len(expected)
+        and t.astype("int64").to_numpy().tolist()
+        == expected.astype("int64").to_numpy().tolist()
+    )
+
 ARCHIVE = ("https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}"
            "&start_date=2023-01-01&end_date=2023-12-31"
-           "&hourly=cloud_cover,temperature_2m,surface_pressure&timezone=UTC")
+           "&hourly=cloud_cover,temperature_2m,surface_pressure&timezone=UTC"
+           "&models=era5&elevation=nan&cell_selection=nearest")
 AQ = ("https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}"
       "&start_date=2023-01-01&end_date=2023-12-31&hourly=aerosol_optical_depth"
       "&domains=cams_global&timezone=UTC")
@@ -41,19 +59,23 @@ def get_json(url: str, tries: int = 5) -> dict:
 def main() -> None:
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--stations", default="", help="station CSV (default: GS rows of dataset/global/node_registry.csv)")
+    ap.add_argument("--stations", default=os.path.join(ROOT, "tools", "channel_v2", "stations_45.csv"), help="station CSV (default: tools/channel_v2/stations_45.csv)")
     args = ap.parse_args()
     os.makedirs(OUT, exist_ok=True)
-    if args.stations:
-        gs = pd.read_csv(args.stations)
-    else:
-        nodes = pd.read_csv(os.path.join(ROOT, "dataset", "global", "node_registry.csv"))
-        gs = nodes[nodes["type"] == "GS"]
+    gs = pd.read_csv(args.stations)
     for _, row in gs.iterrows():
         path = os.path.join(OUT, f"{row['name']}.csv")
-        if os.path.exists(path) and len(pd.read_csv(path)) == 8760:
-            print("cached", row["name"])
-            continue
+        if os.path.exists(path):
+            cached = pd.read_csv(path)
+            if (
+                has_exact_2023_hourly_axis(cached)
+                and "weather_source_model" in cached.columns
+                and "aod_source_model" in cached.columns
+                and set(cached["weather_source_model"].dropna().astype(str)) == {WEATHER_SOURCE_MODEL}
+                and set(cached["aod_source_model"].dropna().astype(str)) == {AOD_SOURCE_MODEL}
+            ):
+                print("cached", row["name"])
+                continue
         a = get_json(ARCHIVE.format(lat=row["lat"], lon=row["lon"]))["hourly"]
         q = get_json(AQ.format(lat=row["lat"], lon=row["lon"]))["hourly"]
         df = pd.DataFrame({
@@ -64,6 +86,9 @@ def main() -> None:
         })
         aod = pd.Series(q["aerosol_optical_depth"], index=q["time"])
         df["aod550"] = df["time"].map(aod)
+        df["weather_source_model"] = WEATHER_SOURCE_MODEL
+        df["aod_source_model"] = AOD_SOURCE_MODEL
+        df["source_api"] = "open-meteo"
         n_nan = int(df["aod550"].isna().sum())
         df.to_csv(path, index=False)
         print(f"{row['name']}: rows={len(df)} aod_nan={n_nan} "

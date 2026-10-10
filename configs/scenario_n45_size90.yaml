@@ -1,0 +1,5 @@
+scenario:
+  active_nodes:
+    gs_count: 30
+    hap_count: 30
+    sat_count: 30

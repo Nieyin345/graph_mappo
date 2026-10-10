@@ -1,0 +1,8 @@
+# DEPRECATED compatibility overlay.
+# Canonical name: configs/qkd_block_eval_60s.yaml
+# Kept only so old manual commands do not break. Do not edit independently.
+env:
+  qkd_block:
+    enabled: true
+    release_mode: finite_key
+    max_duration_s: 60.0

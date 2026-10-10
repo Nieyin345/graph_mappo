@@ -1,9 +1,16 @@
-# 接触计划前瞻特征（2026-09-27，实验日志 §11.12 失败解剖的"信息是否有用"检验）
+# Deterministic contact-plan lookahead.
 #
-# 失败解剖：可控损失最大块 = 没提前囤货（请求到达前 30–120 步那些边可见过但没存货），
-# 而模型只看当前可见边未来 6 步（prediction_horizon: 6）。卫星接触计划确定、可预知。
-# 本叠加给每条物理边加 buckets+2 维：未来 steps 步分桶可见比例、当前接触剩余、之后的间隙
-# （qkd_rl/env/contact_features.py）。列追加在物理边特征最末；输入维度变化 ⟹ 需重跑 BC。
+# In causal v7 experiments this feature MUST use only the pure-geometry H5
+# 'los' surface (LOS + elevation/grazing/distance gates), never future
+# weather-driven k_proxy or realized cloud state.  The provider enforces this
+# when features.edge.information_mode: causal.
+#
+# The feature adds buckets+2 columns per physical edge:
+#   - visible fraction in each future geometry bucket;
+#   - remaining duration of the current/next geometric contact;
+#   - gap to the following geometric contact.
+# Enabling it changes the physical-edge input dimension and therefore requires
+# a model/checkpoint built for that dimension.
 features:
   edge:
     contact_lookahead:

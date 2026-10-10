@@ -1,0 +1,4 @@
+# 诊断用（v2c 方法修复）：截止紧迫度加权积压惩罚 w=0.5
+reward:
+  urgency_wait_enabled: true
+  urgency_wait_weight: 0.5

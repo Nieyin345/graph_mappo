@@ -3,6 +3,8 @@ from __future__ import annotations
 import random
 from collections import deque
 
+import numpy as np
+
 from qkd_rl.data.scenario_builder import Scenario
 from qkd_rl.env.action_resolver import ActionResolver
 from qkd_rl.env.graph_builder import GraphBuilder, GraphObservation
@@ -59,6 +61,11 @@ class QKDEnv:
         # (t, observation, masks) cache: the observation built at the end of a
         # step (t+1) is exactly what the next step would rebuild at its start.
         self._obs_cache: tuple[int, GraphObservation, dict[str, list[bool]]] | None = None
+        # v7.5 logical QKD blocks: per-edge expected sufficient statistics are
+        # accumulated across consecutive active scheduling slots and released
+        # only when the protocol block closes.
+        self._qkd_blocks: dict[str, object] = {}
+        self._qkd_fk = None
 
     def reset(self, seed: int | None = None, start_seed: int | None = None) -> GraphObservation:
         if seed is not None:
@@ -149,6 +156,8 @@ class QKDEnv:
         self._prev_activated_edges = []
         self._obs_cache = None
         self._prev_waiting_keys = 0.0
+        self._qkd_blocks = {}
+        self._qkd_fk = None
         return self._build_observation()
 
     def step(
@@ -185,8 +194,19 @@ class QKDEnv:
                 "Use action_resolver.mode=mutual_choice for the global matching policy."
             )
 
-        generated = self._generate_keys(resolved.activated_edges, state_before.edge_windows)
-        allocation = self.routing.allocate_generated_keys(resolved.activated_edges, generated, self.qkp, self.t)
+        episode_steps = int(self.config["env"]["episode_steps"])
+        terminate_on_year_end = bool(self.config["env"].get("terminate_on_year_end", True))
+        force_block_close = (
+            ((not self.continuous) and self.steps + 1 >= episode_steps)
+            or (terminate_on_year_end and self.t + 1 >= self.scenario.end_t)
+        )
+        generated = self._generate_keys(
+            resolved.activated_edges, state_before.edge_windows, force_block_close=force_block_close
+        )
+        # A QKD block may close after its link is deactivated, so released keys
+        # are allocated by the edges that actually released them, not only by
+        # the currently activated set.
+        allocation = self.routing.allocate_generated_keys(list(generated), generated, self.qkp, self.t)
         # Mark this slot's new keys so the serve phase can attribute each
         # request's consumption between history stock and current activation.
         self.qkp.set_slot_new(allocation.added_by_edge)
@@ -240,7 +260,9 @@ class QKDEnv:
             baseline_reward=baseline_reward,
             serve_events=serve_result.serve_events,
             from_new_by_edge=serve_result.from_new_by_edge,
-            storage_pathness=self._compute_storage_pathness(resolved.activated_edges, self.qkp),
+            storage_pathness=self._compute_storage_pathness(
+                list(dict.fromkeys(resolved.activated_edges + list(generated))), self.qkp
+            ),
         )
         self.metrics.update(resolved, generated, serve_result, reward_detail, self.qkp, expired_requests)
 
@@ -261,9 +283,7 @@ class QKDEnv:
         self.t += 1
         self.steps += 1
         obs = self._build_observation()
-        episode_steps = int(self.config["env"]["episode_steps"])
         terminated = (not self.continuous) and self.steps >= episode_steps
-        terminate_on_year_end = bool(self.config["env"].get("terminate_on_year_end", True))
         truncated = self.t >= self.scenario.end_t if terminate_on_year_end else False
         return obs, reward_detail.total, terminated, truncated, self.metrics.last_info(reward_detail)
 
@@ -294,12 +314,28 @@ class QKDEnv:
             return {}
         activated_set = set(activated_edges)
         usable = activated_set | set(qkp.positive)
+        pathness: dict[str, float] = {}
+
+        if getattr(self.routing, "path_selection", "shortest_available_path") == "fixed_shortest_path":
+            # Main v7.5 service path is fixed. Reward storage only on that same
+            # canonical path, and only when activated+stocked edges together
+            # already form the complete path that can later serve the request.
+            for req in pending:
+                path = self.routing.shortest_path(req.src_gs, req.dst_gs)
+                if not path or not all(edge_id in usable for edge_id in path):
+                    continue
+                for edge_id in path:
+                    if edge_id in activated_set:
+                        pathness[edge_id] = 1.0
+            return pathness
+
+        # Legacy shortest_available_path mode: reconstruct a usable stocked
+        # path dynamically, preserving historical reward behavior.
         adj: dict[str, list[tuple[str, str]]] = {}
         for edge in self.routing.edges:
             if edge.edge_id in usable:
                 adj.setdefault(edge.src, []).append((edge.dst, edge.edge_id))
                 adj.setdefault(edge.dst, []).append((edge.src, edge.edge_id))
-        pathness: dict[str, float] = {}
         for req in pending:
             if req.src_gs not in adj or req.dst_gs not in adj:
                 continue
@@ -349,25 +385,166 @@ class QKDEnv:
             for edge_id in active_edge_ids
         }
 
+    def _close_qkd_block(self, edge_id: str) -> float:
+        acc = self._qkd_blocks.pop(edge_id, None)
+        if acc is None or not acc.is_open:
+            return 0.0
+        mode = str(
+            self.config.get("env", {}).get("qkd_block", {}).get(
+                "release_mode", "asymptotic_proxy"
+            )
+        )
+        if mode == "asymptotic_proxy":
+            return float(acc.close_asymptotic())
+        if mode == "finite_key":
+            return float(acc.close_finite_key())
+        raise ValueError(f"unsupported env.qkd_block.release_mode={mode!r}")
+
     def _generate_keys(
-        self, activated_edges: list[str], edge_windows: dict[str, EdgeWindow]
+        self,
+        activated_edges: list[str],
+        edge_windows: dict[str, EdgeWindow],
+        *,
+        force_block_close: bool = False,
     ) -> dict[str, float]:
-        # Use the already-built window cache instead of a per-edge scalar read.
-        # Switch cost: a link activated this step but not in the previous step
-        # (a "switch") generates at a reduced rate for this slot only; links
-        # kept active generate at full rate.
+        block_cfg = self.config.get("env", {}).get("qkd_block", {}) or {}
+        if bool(block_cfg.get("enabled", False)):
+            from tools.dataset_v2.finite_key import FiniteKeyParams, QKDBlockAccumulator
+
+            slot_stats = getattr(self.rate_provider, "get_qkd_slot_stats", None)
+            if not callable(slot_stats):
+                raise ValueError(
+                    "env.qkd_block.enabled requires a rate provider with v7.5 QKD sufficient statistics"
+                )
+            current = set(activated_edges)
+            previous = set(self.last_activated_edges)
+            generated: dict[str, float] = {}
+
+            # Physical deactivation closes the logical QKD block before the
+            # current slot is served. The released key may therefore belong to
+            # an edge that is no longer in the current matching.
+            for edge_id in previous - current:
+                released = self._close_qkd_block(edge_id)
+                if released > 0.0:
+                    generated[edge_id] = generated.get(edge_id, 0.0) + released
+
+            max_raw = block_cfg.get("max_duration_s", 5.0 * self.scenario.slot_seconds)
+            max_duration_s = None if max_raw is None else float(max_raw)
+            if max_duration_s is not None and not max_duration_s > 0.0:
+                raise ValueError("env.qkd_block.max_duration_s must be null or positive")
+
+            for edge_id in activated_edges:
+                # v7.5 acquisition/PAT is a physical channel effect encoded in
+                # qkd_*_first. It is independent of any legacy switch-cost
+                # reward/decay ablation.
+                is_activation = edge_id not in previous
+                stat = slot_stats(edge_id, self.t, activation=is_activation)
+                if stat is None:
+                    raise ValueError(
+                        "env.qkd_block.enabled but H5 lacks qkd_gain/qkd_y1/"
+                        "qkd_usable_fraction sufficient-statistic datasets"
+                    )
+                if self._qkd_fk is None:
+                    params = dict(getattr(self.rate_provider, "qkd_params", None) or {})
+                    allowed = FiniteKeyParams.__dataclass_fields__
+                    params = {k: v for k, v in params.items() if k in allowed}
+                    if "mu" in params:
+                        params["mu"] = tuple(params["mu"])
+                    if "p_mu" in params:
+                        params["p_mu"] = tuple(params["p_mu"])
+                    self._qkd_fk = FiniteKeyParams(**params)
+                acc = self._qkd_blocks.get(edge_id)
+                if acc is None:
+                    acc = QKDBlockAccumulator(self._qkd_fk)
+                    self._qkd_blocks[edge_id] = acc
+
+                cloud_gate = getattr(self.rate_provider, "get_cloud_gate", None)
+                gate = float(cloud_gate(edge_id, self.t)) if callable(cloud_gate) else 1.0
+                if not 0.0 <= gate <= 1.0:
+                    raise ValueError("realized cloud gate must lie in [0, 1]")
+                cloud_mode = str(block_cfg.get("cloud_blocking_mode", "gate"))
+                if cloud_mode not in ("gate", "background_only"):
+                    raise ValueError(
+                        "env.qkd_block.cloud_blocking_mode must be 'gate' or 'background_only'"
+                    )
+
+                gains = stat["gains"]
+                errors = stat["errors"]
+                y1 = stat["y1"]
+                if cloud_mode == "gate":
+                    # Main v7.5 beacon/LOS-gating baseline: a blocked slot
+                    # contributes zero effective pulses, but it still advances
+                    # the logical block elapsed time through slot_count.
+                    n_pulses = float(stat["n_pulses"]) * gate
+                else:
+                    # §5.1 robustness comparator without LOS time-tag gating.
+                    # Geometry-visible pulses are still attempted.  When low/mid
+                    # cloud blocks the optical signal, keep background/dark
+                    # clicks only: Q_mu=Y0, T_mu=Y0/2, Y1=Y0.
+                    n_pulses = float(stat["n_pulses"])
+                    if gate < 0.5:
+                        mu = np.asarray(self._qkd_fk.mu, dtype=float)
+                        vac = np.flatnonzero(
+                            np.isclose(mu, 0.0, rtol=0.0, atol=1e-15)
+                        )
+                        if len(vac) != 1:
+                            raise ValueError(
+                                "background_only cloud comparator requires one vacuum intensity"
+                            )
+                        y0 = float(np.asarray(gains, dtype=float)[int(vac[0])])
+                        gains = np.full_like(np.asarray(gains, dtype=float), y0)
+                        errors = np.full_like(np.asarray(errors, dtype=float), 0.5 * y0)
+                        y1 = y0
+
+                acc.add_slot(
+                    gains,
+                    errors,
+                    n_pulses,
+                    y1=y1,
+                )
+                if (
+                    max_duration_s is not None
+                    and acc.slot_count * self.scenario.slot_seconds >= max_duration_s
+                ):
+                    released = self._close_qkd_block(edge_id)
+                    if released > 0.0:
+                        generated[edge_id] = generated.get(edge_id, 0.0) + released
+
+            if force_block_close:
+                for edge_id in list(self._qkd_blocks):
+                    released = self._close_qkd_block(edge_id)
+                    if released > 0.0:
+                        generated[edge_id] = generated.get(edge_id, 0.0) + released
+            return generated
+
+        # Legacy/pre-v7.5 behavior: per-slot rate is immediately consumable.
         switch_cfg = self.config.get("env", {}).get("switch_cost", {})
         decay = float(switch_cfg.get("rate_decay_factor", 0.5)) if switch_cfg.get("enabled", True) else 1.0
         generated: dict[str, float] = {}
         for edge_id in activated_edges:
-            rate = edge_windows[edge_id].rates[0]
-            if edge_id not in self.last_activated_edges:
-                rate *= decay
+            generation_rate = getattr(self.rate_provider, "get_generation_rate", None)
+            if callable(generation_rate):
+                rate = float(generation_rate(edge_id, self.t))
+            else:
+                rate = edge_windows[edge_id].rates[0]
+            if switch_cfg.get("enabled", True) and edge_id not in self.last_activated_edges:
+                activation_rate = getattr(self.rate_provider, "get_activation_rate", None)
+                adjusted = activation_rate(edge_id, self.t) if callable(activation_rate) else None
+                rate = adjusted if adjusted is not None else rate * decay
+            cloud_gate = getattr(self.rate_provider, "get_cloud_gate", None)
+            if callable(cloud_gate):
+                rate *= float(cloud_gate(edge_id, self.t))
             generated[edge_id] = rate * self.scenario.slot_seconds
         return generated
 
     def _build_state(self) -> EnvState:
         blocks = self.rate_provider.get_window_blocks(self.t)
+        activation_adjust = getattr(self.rate_provider, "activation_adjusted_window_blocks", None)
+        # A provider with a capture-adjusted *_first surface owns the physical
+        # acquisition semantics. Do not disable it when legacy switch_cost is
+        # turned off for an algorithmic ablation.
+        if callable(activation_adjust):
+            blocks = activation_adjust(self.t, blocks, self.last_activated_edges)
         return EnvState(
             t=self.t,
             qkp_snapshot=self.qkp.snapshot(),

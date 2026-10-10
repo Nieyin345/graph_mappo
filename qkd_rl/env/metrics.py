@@ -14,6 +14,8 @@ class MetricsTracker:
         self.failed_keys = 0.0
         self.arrived_requests = 0
         self.completed_requests = 0
+        self.request_fulfillment_sum = 0.0
+        self.completed_wait_steps_sum = 0.0
         self.conflict_count = 0
         self._last_arrived_keys = 0.0
         # 2026-09-19 新增：逐局累计生成量与平均等待量。
@@ -48,6 +50,8 @@ class MetricsTracker:
         self.served_keys += serve_result.served_keys
         self.failed_keys += serve_result.failed_keys + expired_keys
         self.completed_requests += len(serve_result.served_requests)
+        self.request_fulfillment_sum += float(serve_result.served_fraction_increment)
+        self.completed_wait_steps_sum += float(serve_result.completed_wait_steps_sum)
         self.conflict_count += resolved_action.conflict_count
         # 生成量是**每步流量**，直接累加即为整局总量。
         # 等待量是**存量**，累加得到"等待密钥·步"（除以步数才是均值）。
@@ -77,6 +81,16 @@ class MetricsTracker:
             "completed_requests": self.completed_requests,
             "request_completion_rate": (
                 self.completed_requests / self.arrived_requests if self.arrived_requests > 0 else 0.0
+            ),
+            # Paper §6.1 primary objective: unweighted mean of S_r(T)/K_r.
+            # Unlike success_rate above, large requests do not receive extra weight.
+            "mean_request_fulfillment": (
+                self.request_fulfillment_sum / self.arrived_requests
+                if self.arrived_requests > 0 else 0.0
+            ),
+            "completed_wait_steps_mean": (
+                self.completed_wait_steps_sum / self.completed_requests
+                if self.completed_requests > 0 else 0.0
             ),
             "conflict_count": self.conflict_count,
             # 2026-09-19 新增：与 success_rate 并列的**密钥效率**维度。

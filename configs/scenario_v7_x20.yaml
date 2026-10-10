@@ -1,0 +1,3 @@
+# v7 主场景 2x 负载（叠加在 scenario_v7.yaml 之后）：到达率 0.16 → 0.32。
+requests:
+  arrival_rate: 0.32

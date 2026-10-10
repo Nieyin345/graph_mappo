@@ -1,0 +1,9 @@
+# v7.5 finite-key evaluation overlay: continuous logical QKD session.
+# max_duration_s: null disables the time cap; the block still closes on
+# link deactivation, protocol/environment reset, or simulation/overpass boundary.
+# Overlay after dataset_v7.yaml + scenario_v7.yaml.
+env:
+  qkd_block:
+    enabled: true
+    release_mode: finite_key
+    max_duration_s: null

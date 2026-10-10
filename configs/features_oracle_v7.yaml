@@ -1,0 +1,11 @@
+# Explicit non-causal oracle overlay for upper-bound experiments only.
+# Never use this file for the causal v7.5 main result.
+features:
+  edge:
+    information_mode: oracle
+    prediction_horizon: 6
+    include_rate_future_window: true
+    include_available_future_window: true
+    include_rate_delta: true
+    include_rate_mean: true
+    include_rate_max: true

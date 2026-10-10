@@ -103,11 +103,20 @@ def rollout_collect(env, obs, use_expert: bool) -> tuple[list, float | None, int
 
 def solve_bound(env, obs0_t: int, T: int, arrivals: list, bucket: int, threads: int = 1,
                 integer_activation: bool = False, time_limit: float = 3600.0,
-                mip_rel_gap: float = 1e-4) -> dict:
+                mip_rel_gap: float = 1e-4, switch_decay: float | None = None,
+                return_activation: bool = False, init_stock: dict | None = None,
+                prev_active: set | None = None, rate_override=None) -> dict:
     """integer_activation=True（改进项 5，2026-09-28）：激活 a[e,t] ∈ {0,1}。
     度 ≤2 的整数子图（路径/环）总能定向成每点 ≤1 发 ≤1 收 ⟹ 端口约束变为精确，
     其余松弛不变 ⟹ 仍是严格上界且 ≤ LP 上界。未在 time_limit 内证最优时取
     MILP 对偶界（HiGHS mip_dual_bound，仍是上界）。默认 False = 原 LP，逐位不变。"""
+    # switch_decay=d（2026-10-03，可选；None = 原 LP 逐位不变）：建模 env 的切换开销
+    # （新激活的链路本槽只按 d 倍速率生成，env.switch_cost.rate_decay_factor）。
+    # 加 s[e,τ] ≥ a[e,τ] − a[e,τ−1]、s ≥ 0，生成改为 G·a − G·(1−d)·s。对任何 env 整数策略，
+    # 取 a = 激活指示、s = 新激活指示即与 env 生成量完全一致 ⟹ 仍是松弛 ⟹ 仍是严格上界。
+    # 为保证这一点，激活变量覆盖 env 掩码允许的全部 (e,τ)（available，含速率为 0 者），
+    # 回合起点 a[e,−1] = 0（env.reset 时 last_activated_edges = []）。
+    sw = switch_decay is not None and float(switch_decay) < 1.0
     t0 = obs0_t
     # ---- 边：env 注册的全部边（= QKP 池 = 路由图），不是 t0 快照
     edges = list(env.routing.edges)
@@ -116,12 +125,25 @@ def solve_bound(env, obs0_t: int, T: int, arrivals: list, bucket: int, threads: 
     idx = provider.edge_link_ids(eids)
     slot = float(env.scenario.slot_seconds)
     G = np.zeros((T, len(eids)))
+    AV = np.zeros((T, len(eids)), dtype=bool)
     for tau in range(T):
         blocks = provider.get_window_blocks(t0 + tau)
         rate = np.asarray(blocks[0][0][idx], dtype=float)
         av = np.asarray(blocks[1][0][idx], dtype=float) >= 0.5
+        AV[tau] = av
         G[tau] = np.where(av, rate, 0.0) * slot / SCALE
+    # rate_override（2026-10-03，opt-in；None = 原 LP 逐位不变）：与 eids 对齐的速率预报向量，
+    # 可见性仍按真实接触计划（轨道确定），速率不再用真实未来值 —— 供「现实预报 MPC」使用。
+    if rate_override is not None:
+        ro = np.asarray(rate_override, dtype=float)
+        G = np.where(AV, ro[None, :], 0.0) * slot / SCALE
     keep = G.max(axis=0) > 0  # 窗口内从不可生成的边不可能有密钥 → 删掉不影响最优值
+    # init_stock / prev_active（2026-10-03，opt-in，供在线 MPC 用；None = 原 LP 逐位不变）：
+    # 从当前状态出发规划 —— 各边现有库存作为 D[e,−1]，上一槽已激活的边 a[e,−1] = 1。
+    init = np.zeros(len(eids))
+    if init_stock:
+        init = np.array([float(init_stock.get(e, 0.0)) / SCALE for e in eids])
+        keep = keep | (init > 0)
     E = [i for i in range(len(eids)) if keep[i]]
     ecol = {i: j for j, i in enumerate(E)}
     src = [edges[i].src for i in E]
@@ -143,14 +165,21 @@ def solve_bound(env, obs0_t: int, T: int, arrivals: list, bucket: int, threads: 
     R = len(reqs)
 
     # ---- 变量布局
-    at = [(j, tau) for j, i in enumerate(E) for tau in range(T) if G[tau, i] > 0]
+    if sw:
+        at = [(j, tau) for j, i in enumerate(E) for tau in range(T) if AV[tau, i]]
+    else:
+        at = [(j, tau) for j, i in enumerate(E) for tau in range(T) if G[tau, i] > 0]
     nA = len(at)
     off_x, off_a = 0, R
     off_f = off_a + nA
     nF = R * nE * 2
     off_d = off_f + nF
     nD = nE * K
-    nvar = off_d + nD
+    off_s = off_d + nD
+    # 切换变量只给 G>0 的 (e,τ)：G=0 时 s 不进入任何生成项
+    s_of = [c for c, (j, tau) in enumerate(at) if G[tau, E[j]] > 0] if sw else []
+    nS = len(s_of)
+    nvar = off_s + nS
 
     def fcol(r, j, d):
         return off_f + (r * nE + j) * 2 + d
@@ -182,6 +211,11 @@ def solve_bound(env, obs0_t: int, T: int, arrivals: list, bucket: int, threads: 
         rows_eq.append(stock_row0 + j * K + tau // bucket)
         cols_eq.append(off_a + c)
         vals_eq.append(-G[tau, E[j]])
+    for q, c in enumerate(s_of):
+        j, tau = at[c]
+        rows_eq.append(stock_row0 + j * K + tau // bucket)
+        cols_eq.append(off_s + q)
+        vals_eq.append(G[tau, E[j]] * (1.0 - float(switch_decay)))
     for r, (_s, _t, _amt, k) in enumerate(reqs):
         for j in range(nE):
             rr = stock_row0 + j * K + k
@@ -191,14 +225,38 @@ def solve_bound(env, obs0_t: int, T: int, arrivals: list, bucket: int, threads: 
     row = stock_row0 + nE * K
     A_eq = sp.csr_matrix((vals_eq, (rows_eq, cols_eq)), shape=(row, nvar))
     b_eq = np.zeros(row)
+    if init_stock:
+        for j, i in enumerate(E):
+            b_eq[stock_row0 + j * K] = init[i]
 
     # 端口：每节点每时隙 Σ a ≤ 2
     rows_ub, cols_ub = [], []
     for c, (j, tau) in enumerate(at):
         for v in (nid[src[j]], nid[dst[j]]):
             rows_ub.append(v * T + tau); cols_ub.append(off_a + c)
-    A_ub = sp.csr_matrix((np.ones(len(rows_ub)), (rows_ub, cols_ub)), shape=(nV * T, nvar))
-    b_ub = np.full(nV * T, 2.0)
+    if not sw:
+        A_ub = sp.csr_matrix((np.ones(len(rows_ub)), (rows_ub, cols_ub)), shape=(nV * T, nvar))
+        b_ub = np.full(nV * T, 2.0)
+    else:
+        # a[e,τ] − a[e,τ−1] − s[e,τ] ≤ 0
+        vals_ub = [1.0] * len(rows_ub)
+        pos = {jt: c for c, jt in enumerate(at)}
+        r0 = nV * T
+        for q, c in enumerate(s_of):
+            j, tau = at[c]
+            rows_ub += [r0 + q, r0 + q]
+            cols_ub += [off_a + c, off_s + q]
+            vals_ub += [1.0, -1.0]
+            p = pos.get((j, tau - 1))
+            if p is not None:
+                rows_ub.append(r0 + q); cols_ub.append(off_a + p); vals_ub.append(-1.0)
+        A_ub = sp.csr_matrix((vals_ub, (rows_ub, cols_ub)), shape=(r0 + nS, nvar))
+        b_ub = np.concatenate([np.full(r0, 2.0), np.zeros(nS)])
+        if prev_active:
+            for q, c in enumerate(s_of):
+                j, tau = at[c]
+                if tau == 0 and eids[E[j]] in prev_active:
+                    b_ub[r0 + q] = 1.0
 
     lb = np.zeros(nvar)
     ub = np.full(nvar, np.inf)
@@ -258,6 +316,12 @@ def solve_bound(env, obs0_t: int, T: int, arrivals: list, bucket: int, threads: 
         "n_rows": int(A_eq.shape[0] + A_ub.shape[0]), "bucket": bucket,
         "req_saturated": int(sum(1 for q, xv in zip(reqs, x) if xv >= q[2] - 1e-6)) if x is not None else None,
         "integer": bool(integer_activation), **mip_info,
+        **({"switch_decay": float(switch_decay), "n_switch_vars": nS} if sw else {}),
+        # return_activation（2026-10-03，可选）：附带激活解 [(edge_id, τ, a)]，供 oracle_exec.py 执行；
+        # 缺省不返回，输出逐位不变。
+        **({"activation": [(eids[E[j]], int(tau), float(res.x[off_a + c]))
+                           for c, (j, tau) in enumerate(at) if res.x[off_a + c] > 1e-6]}
+           if return_activation and getattr(res, "x", None) is not None else {}),
     }
 
 
@@ -273,6 +337,8 @@ def main() -> None:
                     help="整数激活（精确端口约束）；未证最优时报 MILP 对偶界")
     ap.add_argument("--time-limit", type=float, default=3600.0, help="--integer 的 HiGHS 时间限制（秒）")
     ap.add_argument("--mip-rel-gap", type=float, default=1e-4)
+    ap.add_argument("--switch-decay", default=None,
+                    help="建模切换开销：浮点 d，或 cfg = 取任务配置的 env.switch_cost；缺省 = 忽略（原 LP）")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     out = Path(a.out)
@@ -281,6 +347,14 @@ def main() -> None:
     config, vcfg = task_config(a.run, a.overlay)
     fp = tp.task_fingerprint(config)
     T = int(config["env"]["episode_steps"])
+    sd = None
+    if a.switch_decay is not None:
+        if str(a.switch_decay) == "cfg":
+            scfg = config.get("env", {}).get("switch_cost", {})
+            sd = float(scfg.get("rate_decay_factor", 0.5)) if scfg.get("enabled", True) else 1.0
+        else:
+            sd = float(a.switch_decay)
+        print(f"switch_decay = {sd}", flush=True)
     base = int(vcfg.get("start_seed", 0) or 0)
     print(f"task fingerprint {fp}; T={T}; bucket={a.bucket}", flush=True)
     rows = []
@@ -290,7 +364,7 @@ def main() -> None:
         arrivals, expert_sr, t0 = rollout_collect(env, obs, not a.no_expert)
         r = solve_bound(env, t0, T, arrivals, a.bucket, a.threads,
                         integer_activation=a.integer, time_limit=a.time_limit,
-                        mip_rel_gap=a.mip_rel_gap)
+                        mip_rel_gap=a.mip_rel_gap, switch_decay=sd)
         r.update(seed=seed, expert_success=expert_sr)
         rows.append(r)
         print(json.dumps(r), flush=True)
@@ -299,6 +373,7 @@ def main() -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"task_fingerprint": fp, "run": a.run, "overlays": a.overlay,
                                "bucket": a.bucket, "integer": a.integer,
+                               **({"switch_decay": sd} if sd is not None else {}),
                                "time_limit": a.time_limit, "rows": rows}, indent=2), encoding="utf-8")
     ok = [r for r in rows if r["lp_status"] == 0]
     if ok:

@@ -1,0 +1,85 @@
+# v7.5 论文主场景：60 SAT / 45 HAP / 45 GS。
+#
+# 叠加顺序：env_full.yaml → env_full_demand_v2.yaml → dataset_v7.yaml → 本文件。
+# 数据集生成时使用 v7.5 默认 t_acq=5 s；若硬件值不同，通过
+# --capture-time-s 显式修改并在 build_metadata.json/H5 属性中记录。
+#
+# 节点：
+#   - SAT 60 = Walker-delta 53:60/6/1，550 km；
+#   - HAP 45，静止 20 km，与 home GS 一一对应；
+#   - GS 45。
+#
+# §6.1 main traffic model: 45 fixed directed city pairs with Zipf weights.
+# The pair list/ranks are published in configs/request_pairs_v7.csv. Source-local
+# hour modulation is renormalized every slot so the total Poisson mean remains
+# bar_lambda * Delta. Park gravity demand remains available only as a control.
+scenario:
+  active_nodes:
+    mode: first_n
+    gs_count: 45
+    hap_count: 45
+    sat_count: 60
+    exclude: []
+requests:
+  distribution_version: zipf_v7
+  fixed_pairs_csv: configs/request_pairs_v7.csv
+  fixed_pair_count: 45
+  pair_zipf_s: 1.0
+  node_registry_path: dataset/global_v7/node_registry.csv
+  # Preserve the previous 0.16 requests/minute offered-count scale, but express
+  # the §6.1 parameter in requests/second: 0.16 / 60.
+  arrival_rate_per_second: 0.0026666666666666666
+  amount_min: 50000
+  amount_max: 200000
+  deadline_steps: 30
+  priority_mode: uniform
+  steps_per_hour: 60
+
+# §6.1 main service semantics: every request keeps one fixed simple shortest-hop
+# trusted-relay path p_r. It may be served partially as key stock accumulates,
+# but it is not dynamically rerouted around an empty hop.
+routing:
+  mode: link_path
+  path_selection: fixed_shortest_path
+  serve_order: earliest_deadline_first
+
+# Main v7 experiments are causal: future realized H5 rows are not observable.
+# Use configs/features_weather_oracle_v7.yaml only for explicitly labelled oracle runs.
+features:
+  edge:
+    information_mode: causal
+    prediction_horizon: 0
+    include_rate_future_window: false
+    include_available_future_window: false
+    include_rate_delta: false
+    include_rate_mean: false
+    include_rate_max: false
+  action:
+    # Legality uses the provider's full-slot los_and_rate availability.  Do not
+    # re-mask a newly activated link by k_proxy_first: t_acq == Delta is a legal
+    # zero-production acquisition slot that may be kept active next slot.
+    mask_below_min_rate: false
+
+# No paper-level 1 bps cutoff is defined. Keep only a numerical positive-rate
+# gate so zero-proxy links are unavailable without discarding weak positive links.
+rate_provider:
+  rate:
+    min_link_rate: 1.0e-12
+
+env:
+  # v7.5 training inventory: aggregate sufficient statistics across a logical
+  # QKD block and release only when the block closes. 300 s is the explicit
+  # engineering baseline used by this scenario; final finite-key evaluation
+  # can override release_mode to finite_key and max_duration_s to 60 s / 300 s / null (continuous session).
+  qkd_block:
+    enabled: true
+    release_mode: asymptotic_proxy
+    max_duration_s: 300.0
+    # Main §5.1 assumption: beacon/LOS time-tag gating removes fully blocked
+    # low/mid-cloud intervals from QKD statistics after the action is chosen.
+    cloud_blocking_mode: gate
+  switch_cost:
+    enabled: true
+    # v7.5 策略面使用捕获后真实时间窗计算得到的 k_proxy_first；
+    # k_max_first 仅保留为 60 s finite-key 对照。旧数据集缺少首激活面时才回退到该乘性近似。
+    rate_decay_factor: 0.0

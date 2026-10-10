@@ -1,0 +1,4 @@
+# 诊断用（v2c 筛查）：PPO 4 个 epoch
+train:
+  ppo:
+    epochs: 4

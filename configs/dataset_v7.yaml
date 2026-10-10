@@ -1,0 +1,48 @@
+# v7.5 论文基准数据集覆盖层（2026-10-08）。
+#
+# 指向 tools/dataset_v2/build_dataset_v2.py 生成的 dataset/global_v7。
+# v7.5 主基线：
+#   - MOST→HV + 下行球面波 B2 工程基线；B2→B5 当前实现接口 beta0^2 := V_R，
+#     物理转换仍按规范 §7 做原式核对；
+#   - 有界 Beta 两矩收集效率；物理上界使用端点 Bernoulli；
+#   - 站点级 Gaussian-Markov 低/中云状态，每 GS 每调度槽只生成一个 C_g(t)，
+#     几何子步不会重新抽云；策略看到的是 f_g(t) 驱动的期望速率，真实 C_g(t)
+#     仅在动作后门控生成；
+#   - HAP 静止 20 km、仰角门限 15°、ISL 掠射 >=85 km；
+#   - capture 用 t_acq（默认 5 s）定义；k_proxy_first/k_max_first 都在捕获后的真实时间窗重采样几何；
+#   - 策略观测使用 k_proxy，k_max 仅保留为 60 s finite-key 对照，避免单槽 finite-key 阈值泄漏进训练可用性。
+#
+# 加载顺序：在 scenario_v7.yaml 之前叠加。
+# Main v7.5 policy is causal. Future H5 truth remains available to the
+# provider for explicitly labelled oracle experiments, but is not part of the
+# default observation. Disable every derived feature that would summarize the
+# same future window, not only the raw window tensors.
+features:
+  edge:
+    information_mode: causal
+    prediction_horizon: 0
+    include_rate_future_window: false
+    include_available_future_window: false
+    include_rate_delta: false
+    include_rate_mean: false
+    include_rate_max: false
+
+rate_provider:
+  normalization:
+    stats_path: dataset/global_v7/rate_stats.json
+    p99: null
+  h5:
+    dataset_dir: dataset/global_v7
+    # Policy observation/availability use the block-compatible asymptotic proxy.
+    # k_max/k_max_first remain in H5 only as the 60 s finite-key control surface.
+    # Generate rate_stats.json with scripts/estimate_rate_stats.py --dataset-dir dataset/global_v7;
+    # --rate-key auto will follow the H5 recommendation and select k_proxy.
+    rate_dataset_key: k_proxy
+    activation_rate_dataset_key: k_proxy_first
+    # v7.5 H5 "los" is pure deterministic geometry/contact visibility only.
+    # Causal contact_lookahead is required to read this surface, never future k_proxy.
+    los_dataset_key: los
+    availability_source: los_and_rate
+    link_data_path: null
+    node_registry_path: null
+    link_registry_path: null

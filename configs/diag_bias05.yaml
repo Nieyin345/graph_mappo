@@ -1,0 +1,5 @@
+# 诊断用（v2c 修复筛查）：bias_weight 0.5
+model:
+  actor:
+    usage_forecast:
+      bias_weight: 0.5

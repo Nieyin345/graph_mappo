@@ -1,0 +1,4 @@
+# 诊断（难度扫描）：同负载、请求量 x5（到达率 /5）
+requests:
+  amount_mean: 500000.0
+  amount_max: 2500000.0

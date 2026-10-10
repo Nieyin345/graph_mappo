@@ -138,3 +138,45 @@ def test_default_is_lp_and_marks_integer_false():
     env, reqs = _star_one_slot()
     out = solve_bound(env, 0, 1, reqs, bucket=1)
     assert out["integer"] is False
+
+
+# ---- 切换开销（2026-10-03）：switch_decay=d，新激活链路本槽只按 d 倍生成（env.switch_cost）。
+# 每条都对应 env 整数策略可达的值，确认既是松弛又确实收紧。
+
+
+def test_switch_decay_zero_loses_first_slot_on_line():
+    env = _env([("A", "X"), ("X", "B")], np.full((T, 2), R))
+    r = [_req("A", "B", 100 * R, 0, 9)]
+    assert solve_bound(env, 0, T, r, bucket=1)["ub_served"] == pytest.approx(10 * R, rel=1e-6)
+    out = solve_bound(env, 0, T, r, bucket=1, switch_decay=0.0)
+    assert out["ub_served"] == pytest.approx(9 * R, rel=1e-6)
+    assert out["switch_decay"] == 0.0
+    half = solve_bound(env, 0, T, r, bucket=1, switch_decay=0.5)
+    assert half["ub_served"] == pytest.approx(9.5 * R, rel=1e-6)
+
+
+def test_switch_decay_penalises_rotation_at_hub():
+    # 端口每槽 2；任何方案 Σ_e max_τ a_e ≥ 2 ⟹ 生成 ≤ 20R − 2R ⟹ 服务 ≤ 9R（无切换时 10R）
+    env = _env([("A", "X"), ("B", "X"), ("C", "X"), ("D", "X")], np.full((T, 4), R))
+    reqs = [_req("A", "B", 100 * R, 0, 9), _req("C", "D", 100 * R, 0, 9)]
+    out = solve_bound(env, 0, T, reqs, bucket=1, switch_decay=0.0)
+    assert out["ub_served"] == pytest.approx(9 * R, rel=1e-6)
+
+
+def test_switch_can_be_prepaid_on_available_zero_rate_slot():
+    # τ=0 速率 0 但可用：env（min_link_rate=0 时）可在 τ=0 先激活，τ≥1 不再算切换。
+    # 上界必须覆盖这种策略 ⟹ 服务 9R，而不是 8R。
+    rates = np.full((T, 2), R)
+    rates[0] = 0.0
+    env = _env([("A", "X"), ("X", "B")], rates)
+    out = solve_bound(env, 0, T, [_req("A", "B", 100 * R, 0, 9)], bucket=1, switch_decay=0.0)
+    assert out["ub_served"] == pytest.approx(9 * R, rel=1e-6)
+
+
+def test_switch_decay_one_equals_default():
+    env = _env([("A", "X"), ("B", "X"), ("C", "X"), ("D", "X")], np.full((T, 4), R))
+    reqs = [_req("A", "B", 100 * R, 0, 9), _req("C", "D", 7 * R, 0, 5)]
+    base = solve_bound(env, 0, T, reqs, bucket=1)
+    one = solve_bound(env, 0, T, reqs, bucket=1, switch_decay=1.0)
+    assert one["ub_served"] == pytest.approx(base["ub_served"], rel=1e-9)
+    assert "switch_decay" not in base and "switch_decay" not in one

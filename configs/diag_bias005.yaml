@@ -1,0 +1,5 @@
+# 诊断用（v2c 筛查 2026-10-01）：偏置权重 0.05
+model:
+  actor:
+    usage_forecast:
+      bias_weight: 0.05

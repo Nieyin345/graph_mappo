@@ -1108,7 +1108,12 @@ class GraphBuilder:
         if lookahead_cfg.get("enabled", False):
             la_steps = int(lookahead_cfg.get("steps", 120))
             la_buckets = int(lookahead_cfg.get("buckets", 8))
-            future = env_state.edge_windows.avail_lookahead(link_idx, la_steps)
+            information_mode = str(edge_cfg.get("information_mode", "legacy"))
+            future = env_state.edge_windows.avail_lookahead(
+                link_idx,
+                la_steps,
+                geometry_only=(information_mode == "causal"),
+            )
             cols.append(contact_lookahead_features(future, la_buckets))
         dyn = np.column_stack(cols) if cols else np.zeros((len(active_ids), 0), dtype=np.float32)
         static_rows = self._edge_static_arr[active_pos]

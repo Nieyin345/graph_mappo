@@ -204,14 +204,16 @@ def evaluate_one(run_dir: Path, checkpoint: Path | None = None, seeds: list[int]
     # validation.decode（改进 1a，opt-in）：greedy（默认，逐位不变）| max_weight
     decode = str((config.get("validation", {}) or {}).get("decode", "greedy"))
     decode_beta = float((config.get("validation", {}) or {}).get("decode_beta", 0.0) or 0.0)
-    policy = MAPPOPolicy(model, device, deterministic_decode=decode, decode_beta=decode_beta)
+    decode_persist = float((config.get("validation", {}) or {}).get("decode_persist_bonus", 0.0) or 0.0)
+    policy = MAPPOPolicy(model, device, deterministic_decode=decode, decode_beta=decode_beta,
+                         decode_persist_bonus=decode_persist)
     trainer = MAPPOTrainer(env, policy, config, run_dir, device=device)
     result = trainer.evaluate_validation(
         num_episodes=int(config.get("validation", {}).get("episodes", 1))
     )
     result.update({"checkpoint": str(checkpoint), "model": config["experiment"]["model"],
                    "overlays": list(overlays or []), "tag": tag, "decode": decode,
-                   "decode_beta": decode_beta})
+                   "decode_beta": decode_beta, "decode_persist_bonus": decode_persist})
     path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return result
 

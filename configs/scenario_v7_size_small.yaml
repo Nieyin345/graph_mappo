@@ -1,0 +1,17 @@
+# v7 零样本跨规模泛化对照 —— 轻量拓扑（叠加在 scenario_v7.yaml 之后）。
+#
+# ⚠ 本机尚未生成该规模的数据集。零样本跨规模需要一个**同时含多规模节点**的
+#   数据集（同一 link_data.h5 里 registry 覆盖到最大规模），训练/评估时用
+#   active_nodes 选子集即可，无需为每个规模重建数据。评估脚本见
+#   docs/训练与实验规划及论文展示设计_20261006.md §2.4。
+#
+# 规划书 §2.4 定义：60 节点 = 30 SAT / 15 HAP / 15 GS。
+# 用 first_n 取 registry 前 N 个（registry 顺序：45 GS → 45 HAP → 60 SAT；
+# node_registry 的 base 列 = 1 标基础网络，排在最前）。
+scenario:
+  active_nodes:
+    mode: first_n
+    gs_count: 15
+    hap_count: 15
+    sat_count: 30
+    exclude: []

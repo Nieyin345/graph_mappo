@@ -177,7 +177,11 @@ def state_free_obs(obs: GraphObservation | None) -> GraphObservation | None:
 # "deficit" (improvement 2, 2026-09-28) = "new" AND the edge's stock at step t
 # is below usage_forecast.deficit_threshold -- "needed soon but not prepared".
 # The threshold test lives in the v8 GraphBuilder (obs.physical_edge_low_stock).
-USAGE_LABEL_MODES = ("used", "new", "persist", "shuffle", "deficit")
+USAGE_LABEL_MODES = ("used", "new", "persist", "shuffle", "deficit", "self_next", "self_new", "self_shuffle")
+# "self_next"/"self_new"（2026-10-04，opt-in 自洽承诺标签）：标签来自策略**自己**在同一回合里的后续激活
+# （step.matched_edges），不来自请求流：self_next = e 在 (t, t+K] 内被激活；self_new = 同上且 e 在 t 未被激活
+# （= 即将发生的切换）。目的：让头学「我接下来会开哪些链路」，偏置把当前激活推向将被延续/即将需要的链路，
+# 对应 MPC 地平线 1→3 的那部分前瞻。默认 label_mode 不变，其余臂逐位不受影响。
 
 
 class RolloutBuffer:
@@ -323,6 +327,40 @@ class RolloutBuffer:
         present: list[set[str]] | None = (
             [set(ids) for ids in ids_all] if mode == "persist" else None
         )
+        if mode in ("self_next", "self_new", "self_shuffle"):  # self_shuffle = self_new 标签在步内随机置换（对照）
+            def _pair(eid: str) -> frozenset:
+                body = eid[2:] if eid.startswith("E_") else eid
+                return frozenset(body.split("__", 1)) if "__" in body else frozenset([eid])
+            act_pairs: list[set] = []
+            for step in episode:
+                arcs = getattr(step, "matched_edges", None) or []
+                if arcs:
+                    act_pairs.append({frozenset((u, v)) for u, v in arcs})
+                else:  # 回退：从 (tx, rx) 动作重建无向对
+                    pairs = set()
+                    for u, (tx, rx) in (step.actions or {}).items():
+                        for v in (tx, rx):
+                            if isinstance(v, str) and v not in ("IDLE", "idle", u):
+                                pairs.add(frozenset((u, v)))
+                    act_pairs.append(pairs)
+            for t, step in enumerate(episode):
+                ids_t = ids_all[t]
+                if not ids_t:
+                    step.usage_label = torch.zeros((0,), dtype=torch.float32)
+                    continue
+                fut: set = set()
+                for u in range(t + 1, min(n, t + horizon + 1)):
+                    fut |= act_pairs[u]
+                now = act_pairs[t] if mode in ("self_new", "self_shuffle") else set()
+                lab = torch.tensor(
+                    [1.0 if (_pair(eid) in fut and _pair(eid) not in now) else 0.0 for eid in ids_t],
+                    dtype=torch.float32,
+                )
+                if mode == "self_shuffle":
+                    gen = torch.Generator(); gen.manual_seed(1_000_003 * t + 7_919 * len(ids_t) + int(lab.sum().item()))
+                    lab = lab[torch.randperm(len(ids_t), generator=gen)]
+                step.usage_label = lab
+            return
         for t, step in enumerate(episode):
             ids_t = ids_all[t]
             size_t = len(ids_t)

@@ -1,0 +1,5 @@
+# 诊断（难度扫描）：45 GS + 45 HAP
+scenario:
+  active_nodes:
+    gs_count: 45
+    hap_count: 45

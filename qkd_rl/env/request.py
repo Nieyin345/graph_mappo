@@ -21,9 +21,9 @@ class ServeResult:
     served_keys: float
     waiting_keys: float
     failed_keys: float
-    # Per-request service events ``(req_id, served, from_new)``: how much of a
-    # request was served this step and how much of it came from this slot's
-    # newly generated keys (history-stock portion is ``served - from_new``).
+    # Per-request service events ``(req_id, served, from_new)``. ``from_new``
+    # is the end-to-end amount whose service depended on this slot's new key
+    # stock, not a sum over hops; therefore 0 <= from_new <= served.
     serve_events: list[tuple[str, float, float]] = field(default_factory=list)
     # Total this-slot new keys consumed, per edge (for the storage reward).
     from_new_by_edge: dict[str, float] = field(default_factory=dict)
@@ -36,6 +36,10 @@ class ServeResult:
     urgency_weighted_keys: float = 0.0
     # Flat count of the same set, for diagnostics.
     urgency_weighted_count: float = 0.0
+    # Increment of sum_r S_r/K_r contributed by service in this slot.
+    served_fraction_increment: float = 0.0
+    # Sum of completion delays, in scheduling slots, for requests completed now.
+    completed_wait_steps_sum: float = 0.0
 
 
 @dataclass
@@ -190,6 +194,8 @@ class RequestQueue:
         waiting: list[KeyRequest] = []
         next_pending: list[KeyRequest] = []
         served_keys = 0.0
+        served_fraction_increment = 0.0
+        completed_wait_steps_sum = 0.0
         serve_events: list[tuple[str, float, float]] = []
         from_new_by_edge: dict[str, float] = {}
 
@@ -213,11 +219,14 @@ class RequestQueue:
             served_now, from_new_map = routing.partial_consume_for_request(req, qkp, t, attributed=True)
             served_keys += served_now
             if served_now > 0:
-                serve_events.append((req.request_id, served_now, sum(from_new_map.values())))
+                from_new_e2e = max(from_new_map.values(), default=0.0)
+                serve_events.append((req.request_id, served_now, from_new_e2e))
                 for edge_id, amount in from_new_map.items():
                     from_new_by_edge[edge_id] = from_new_by_edge.get(edge_id, 0.0) + amount
+                served_fraction_increment += served_now / max(req.amount, 1.0e-12)
                 updated = replace(req, served_amount=req.served_amount + served_now)
                 if updated.served_amount >= req.amount - 1.0e-9:
+                    completed_wait_steps_sum += max(0.0, float(t - req.arrival_t))
                     served.append(updated)
                     continue
                 req = updated
@@ -256,15 +265,25 @@ class RequestQueue:
             from_new_by_edge=from_new_by_edge,
             urgency_weighted_keys=urgency_weighted_keys,
             urgency_weighted_count=float(len(waiting)),
+            served_fraction_increment=served_fraction_increment,
+            completed_wait_steps_sum=completed_wait_steps_sum,
         )
 
 
 class RequestGenerator:
     """Generate GS-GS key requests with realistic, learnable patterns.
 
-    ``arrival_rate`` is the mean requests per slot (Poisson arrivals), so the
-    offered load is ``arrival_rate * amount_mean`` key-bits per slot, calibrated
-    against the actual generated key rate of the selected links.
+    Legacy distributions use ``arrival_rate`` as mean requests per slot.
+    The v7.5 paper distributions instead use ``arrival_rate_per_second`` =
+    bar_lambda from specification §6.1 and convert it to each scheduling slot
+    via ``bar_lambda * Delta``.
+
+    ``zipf_v7`` uses an explicit fixed-pair CSV, fixed Zipf weights, source-local
+    diurnal modulation and per-slot total-rate renormalization; request sizes
+    are integer-uniform on [amount_min, amount_max]. ``park_v7`` changes only
+    the pair weights to the Park-style gravity construction while keeping the
+    same per-slot total arrival rate and request-size law. Legacy ``park_v3``
+    is intentionally unchanged for reproducibility.
 
     Optional realism patterns (stable across the whole run so the agent can
     learn them; both feed the node time features and GS-GS demand features):
@@ -288,7 +307,7 @@ class RequestGenerator:
         self.distribution_version = str(
             self.config.get("distribution_version", "legacy_v1")
         )
-        if self.distribution_version not in {"legacy_v1", "pairhot_v2"}:
+        if self.distribution_version not in {"legacy_v1", "pairhot_v2", "park_v3", "park_v7", "zipf_v7"}:
             raise ValueError(
                 "Unknown request distribution_version: "
                 f"{self.distribution_version!r}"
@@ -297,29 +316,180 @@ class RequestGenerator:
         self._tz_offsets: dict[str, int] = {}
         self._load_tz_offsets()
         if len(gs_ids) >= 2:
-            from itertools import combinations
+            if self.distribution_version == "zipf_v7":
+                self._zipf_v7_init()
+            else:
+                from itertools import combinations
 
-            self._pairs = list(combinations(sorted(gs_ids), 2))
-            mode = self.config.get("pair_hotness", "uniform")
-            if mode == "zipf":
-                s = float(self.config.get("pair_zipf_s", 1.0))
-                ranks = np.arange(1, len(self._pairs) + 1, dtype=float)
-                weights = 1.0 / np.power(ranks, s)
-                hot_rng = np.random.RandomState(int(self.config.get("pair_seed", 0)))
-                hot_rng.shuffle(weights)  # assign hotness to random pairs
-                self._pair_weights = weights / weights.sum()
-            elif mode != "uniform":
-                raise ValueError(f"Unknown pair_hotness: {mode!r}")
+                self._pairs = list(combinations(sorted(gs_ids), 2))
+                mode = self.config.get("pair_hotness", "uniform")
+                if mode == "zipf":
+                    s = float(self.config.get("pair_zipf_s", 1.0))
+                    ranks = np.arange(1, len(self._pairs) + 1, dtype=float)
+                    weights = 1.0 / np.power(ranks, s)
+                    hot_rng = np.random.RandomState(int(self.config.get("pair_seed", 0)))
+                    hot_rng.shuffle(weights)  # assign hotness to random pairs
+                    self._pair_weights = weights / weights.sum()
+                elif mode != "uniform":
+                    raise ValueError(f"Unknown pair_hotness: {mode!r}")
+        # Park-style gravity demand. park_v3 is legacy/bit-compatible;
+        # park_v7 reuses the same raw gravity weights but generate() renormalizes
+        # their total every slot to bar_lambda * Delta (§6.1 control).
+        self._park_base: np.ndarray | None = None
+        if self.distribution_version in {"park_v3", "park_v7"} and len(gs_ids) >= 2:
+            self._park_init()
+
+    def _read_fixed_pairs_v7(self) -> tuple[list[tuple[str, str]], np.ndarray]:
+        """Read the published fixed pair support shared by v7 traffic models."""
+        import csv
+        from pathlib import Path
+
+        raw = str(self.config.get("fixed_pairs_csv", "") or "")
+        if not raw:
+            raise ValueError(f"{self.distribution_version} requires requests.fixed_pairs_csv")
+        path = Path(raw)
+        if not path.is_absolute() and not path.exists():
+            path = Path(__file__).resolve().parents[2] / raw
+
+        allowed = set(self.gs_ids)
+        pairs: list[tuple[str, str]] = []
+        ranks = []
+        seen = set()
+        with open(path, encoding="utf-8", newline="") as f:
+            for i, row in enumerate(csv.DictReader(f), start=1):
+                src = row["src"].strip()
+                dst = row["dst"].strip()
+                if src not in allowed or dst not in allowed:
+                    raise ValueError(f"fixed pair {src!r}-{dst!r} is outside active GS set")
+                if src == dst:
+                    raise ValueError("fixed request pair cannot use the same GS twice")
+                key = tuple(sorted((src, dst)))
+                if key in seen:
+                    raise ValueError(f"duplicate fixed request pair {key}")
+                seen.add(key)
+                pairs.append((src, dst))
+                ranks.append(float(row.get("rank", i) or i))
+        expected = int(self.config.get("fixed_pair_count", 45))
+        if len(pairs) != expected:
+            raise ValueError(
+                f"{self.distribution_version} requires exactly {expected} fixed pairs, got {len(pairs)}"
+            )
+        ranks_arr = np.asarray(ranks, dtype=np.float64)
+        if np.any(~np.isfinite(ranks_arr)) or np.any(ranks_arr <= 0):
+            raise ValueError("fixed-pair ranks must be finite and positive")
+        return pairs, ranks_arr
+
+    def _zipf_v7_init(self) -> None:
+        """Load the fixed city-pair support and assign Zipf rank weights."""
+        pairs, ranks = self._read_fixed_pairs_v7()
+        s = float(self.config.get("pair_zipf_s", 1.0))
+        if not np.isfinite(s) or s <= 0.0:
+            raise ValueError("pair_zipf_s must be finite and positive")
+        w = 1.0 / np.power(ranks, s)
+        self._pairs = pairs
+        self._pair_weights = w / w.sum()
+
+    def _zipf_v7_pair_rates(self, t: int) -> np.ndarray:
+        """§6.1: fixed Zipf weights times source-local diurnal factor, renormalized per slot."""
+        if not self._pairs or self._pair_weights is None:
+            return np.zeros(0, dtype=np.float64)
+        steps_per_hour = float(self.config.get("steps_per_hour", 60))
+        if not np.isfinite(steps_per_hour) or steps_per_hour <= 0:
+            raise ValueError("steps_per_hour must be positive for zipf_v7")
+        scores = np.empty(len(self._pairs), dtype=np.float64)
+        utc_hour = float(t) / steps_per_hour
+        for i, (src, _dst) in enumerate(self._pairs):
+            local_hour = (utc_hour + self._tz_offsets.get(src, 0)) % 24.0
+            diurnal = 1.0 + 0.5 * np.cos(np.pi / 12.0 * (local_hour - 14.0))
+            scores[i] = self._pair_weights[i] * diurnal
+        total = float(scores.sum())
+        if not total > 0.0:
+            raise ValueError("zipf_v7 pair weights produced zero total intensity")
+        bar_lambda = float(self.config.get("arrival_rate_per_second", -1.0))
+        if not np.isfinite(bar_lambda) or bar_lambda < 0.0:
+            raise ValueError("zipf_v7 requires nonnegative requests.arrival_rate_per_second")
+        slot_s = 3600.0 / steps_per_hour
+        return (bar_lambda * slot_s) * scores / total
+
+    def _park_init(self) -> None:
+        """Gravity demand after Park et al. (2025), eqs. (15)-(17).
+
+        Pair intensity ``Gamma_AB(t) ~ [s(m_A) + s(m_B)] / 2 * N_A * N_B`` with
+        the diurnal factor ``s(m) = 1 + 0.5 cos(pi/12 (m - 14))``, ``m`` the
+        local clock hour of the GS city (IANA zone in ``park_mass_csv``) and
+        ``N`` the city's data-centre count. Park's constant ``0.02 * theta`` is
+        replaced by the calibration that makes the 24-h mean of the total
+        Poisson rate equal ``arrival_rate`` (the daily mean of ``s`` is 1), so
+        the offered load ``arrival_rate * amount_mean`` keeps its meaning.
+        """
+        import csv
+        from datetime import datetime
+        from pathlib import Path
+        from zoneinfo import ZoneInfo
+
+        if self.distribution_version == "park_v7":
+            self._pairs, _ = self._read_fixed_pairs_v7()
+        raw = str(self.config.get("park_mass_csv", "") or "")
+        if not raw:
+            raise ValueError(f"{self.distribution_version} requires requests.park_mass_csv")
+        path = Path(raw)
+        if not path.is_absolute() and not path.exists():
+            path = Path(__file__).resolve().parents[2] / raw
+        mass: dict[str, float] = {}
+        zones: dict[str, str] = {}
+        with open(path, encoding="utf-8", newline="") as f:
+            for row in csv.DictReader(f):
+                name = row["name"].strip()
+                mass[name] = float(row["dc_count"])
+                zones[name] = row["tz"].strip()
+        missing = [g for g in self.gs_ids if g not in mass]
+        if missing:
+            raise ValueError(f"park_mass_csv has no entry for GS {missing}")
+        nodes = sorted(self.gs_ids)
+        index = {g: i for i, g in enumerate(nodes)}
+        self._park_zones = [ZoneInfo(zones[g]) for g in nodes]
+        self._park_a = np.array([index[a] for a, _ in self._pairs], dtype=np.int64)
+        self._park_b = np.array([index[b] for _, b in self._pairs], dtype=np.int64)
+        n = np.array([mass[g] for g in nodes], dtype=np.float64)
+        prod = n[self._park_a] * n[self._park_b]
+        base = (
+            1.0 if self.distribution_version == "park_v7"
+            else float(self.config.get("arrival_rate", 0.0))
+        )
+        self._park_base = base * prod / prod.sum()
+        epoch = str(self.config.get("park_epoch_utc", "2023-01-01T00:00:00+00:00"))
+        self._park_epoch = datetime.fromisoformat(epoch.replace("Z", "+00:00"))
+        self._park_slot_s = 3600.0 / float(self.config.get("steps_per_hour", 60))
+
+    def _park_pair_rates(self, t: int) -> np.ndarray:
+        from datetime import timedelta
+
+        now = self._park_epoch + timedelta(seconds=float(t) * self._park_slot_s)
+        hours = np.empty(len(self._park_zones), dtype=np.float64)
+        for i, zone in enumerate(self._park_zones):
+            loc = now.astimezone(zone)
+            hours[i] = loc.hour + loc.minute / 60.0 + loc.second / 3600.0
+        s = 1.0 + 0.5 * np.cos(np.pi / 12.0 * (hours - 14.0))
+        return self._park_base * 0.5 * (s[self._park_a] + s[self._park_b])
 
     def _load_tz_offsets(self) -> None:
         """Load timezone offsets from node registry (longitude -> UTC offset)."""
         import csv
         from pathlib import Path
-        # Try dataset/global/node_registry.csv relative to the project root
-        for candidate in (
+        # Prefer an explicitly configured registry (v7 uses dataset/global_v7);
+        # keep the historical dataset/global fallback for legacy experiments.
+        configured = str(self.config.get("node_registry_path", "") or "")
+        candidates = []
+        if configured:
+            p = Path(configured)
+            if not p.is_absolute():
+                p = Path(__file__).resolve().parents[2] / p
+            candidates.append(p)
+        candidates.extend((
             Path(__file__).resolve().parents[2] / "dataset" / "global" / "node_registry.csv",
             Path("dataset/global/node_registry.csv"),
-        ):
+        ))
+        for candidate in candidates:
             if candidate.exists():
                 with open(candidate, encoding="utf-8", newline="") as f:
                     for row in csv.DictReader(f):
@@ -382,60 +552,102 @@ class RequestGenerator:
         if len(self.gs_ids) < 2:
             return []
         weights = self.config.get("hourly_weights")
-        use_tz = bool(self._tz_offsets and weights and len(self._pairs) > 0)
+        park = self._park_base is not None
+        zipf_v7 = self.distribution_version == "zipf_v7"
+        use_tz = bool(
+            (not park)
+            and (not zipf_v7)
+            and self._tz_offsets
+            and weights
+            and len(self._pairs) > 0
+        )
 
-        if use_tz:
-            # Timezone-aware: compute per-pair rates based on each source
-            # node's local hour, then sample pairs proportionally.
-            steps_per_hour = int(self.config.get("steps_per_hour", 60))
-            mean_w = sum(float(x) for x in weights) / len(weights)
-            base = float(self.config.get("arrival_rate", 0.0))
-            if mean_w <= 0:
-                use_tz = False
-
-        if use_tz:
-            pair_rates = np.zeros(len(self._pairs), dtype=np.float64)
-            for i, (src, _dst) in enumerate(self._pairs):
-                tz_off = self._tz_offsets.get(src, 0)
-                local_hour = ((t // steps_per_hour) + tz_off) % 24
-                w = float(weights[local_hour % len(weights)])
-                pair_rates[i] = base * w / mean_w / len(self._pairs)
-            if (
-                self.distribution_version == "pairhot_v2"
-                and self._pair_weights is not None
-            ):
-                # ``_pair_weights`` sums to one. Multiplying by N keeps the
-                # uniform case at factor 1, so Zipf changes only which pairs
-                # receive the offered load, not the configured global rate.
-                pair_rates *= len(self._pairs) * self._pair_weights
+        if zipf_v7:
+            pair_rates = self._zipf_v7_pair_rates(t)
             total_rate = float(pair_rates.sum())
             n_requests = int(self.rng.poisson(total_rate))
             if n_requests <= 0:
                 return []
             pair_probs = pair_rates / total_rate if total_rate > 0 else None
+        elif park:
+            pair_rates = self._park_pair_rates(t)
+            if self.distribution_version == "park_v7":
+                steps_per_hour = float(self.config.get("steps_per_hour", 60))
+                if not np.isfinite(steps_per_hour) or steps_per_hour <= 0.0:
+                    raise ValueError("steps_per_hour must be positive for park_v7")
+                bar_lambda = float(self.config.get("arrival_rate_per_second", -1.0))
+                if not np.isfinite(bar_lambda) or bar_lambda < 0.0:
+                    raise ValueError("park_v7 requires nonnegative requests.arrival_rate_per_second")
+                target = bar_lambda * (3600.0 / steps_per_hour)
+                raw_total = float(pair_rates.sum())
+                pair_rates = (
+                    pair_rates * (target / raw_total)
+                    if raw_total > 0.0 else np.zeros_like(pair_rates)
+                )
+            total_rate = float(pair_rates.sum())
+            n_requests = int(self.rng.poisson(total_rate))
+            if n_requests <= 0:
+                return []
+            pair_probs = pair_rates / total_rate if total_rate > 0 else None
+        elif use_tz:
+            # Legacy/pairhot branch: timezone-aware hourly profile.
+            steps_per_hour = int(self.config.get("steps_per_hour", 60))
+            mean_w = sum(float(x) for x in weights) / len(weights)
+            base = float(self.config.get("arrival_rate", 0.0))
+            if mean_w <= 0:
+                n_requests = int(self.rng.poisson(base))
+                if n_requests <= 0:
+                    return []
+                pair_probs = None
+            else:
+                pair_rates = np.zeros(len(self._pairs), dtype=np.float64)
+                for i, (src, _dst) in enumerate(self._pairs):
+                    tz_off = self._tz_offsets.get(src, 0)
+                    local_hour = ((t // steps_per_hour) + tz_off) % 24
+                    w = float(weights[local_hour % len(weights)])
+                    pair_rates[i] = base * w / mean_w / len(self._pairs)
+                if (
+                    self.distribution_version == "pairhot_v2"
+                    and self._pair_weights is not None
+                ):
+                    pair_rates *= len(self._pairs) * self._pair_weights
+                total_rate = float(pair_rates.sum())
+                n_requests = int(self.rng.poisson(total_rate))
+                if n_requests <= 0:
+                    return []
+                pair_probs = pair_rates / total_rate if total_rate > 0 else None
         else:
-            # Fallback: original behavior (global hour, uniform pair sampling)
+            # Fallback: original behavior (global hour, uniform/pairhot sampler).
             n_requests = int(self.rng.poisson(self._lambda_at(t)))
             if n_requests <= 0:
                 return []
-            pair_probs = None  # use _sample_pair (Zipf or uniform)
+            pair_probs = None
 
         amount_mean = float(self.config.get("amount_mean", 100.0))
         amount_max = float(self.config.get("amount_max", 0.0) or 0.0)
         deadline = t + int(self.config.get("deadline_steps", 12))
         out: list[KeyRequest] = []
         for _ in range(n_requests):
-            if use_tz and pair_probs is not None:
+            if (use_tz or park or zipf_v7) and pair_probs is not None:
                 idx = int(self.rng.choice(len(self._pairs), p=pair_probs))
                 src, dst = self._pairs[idx]
             else:
                 src, dst = self._sample_pair()
             self.counter += 1
-            amount = float(self.rng.exponential(amount_mean))
-            if amount_max > 0.0:
-                while amount >= amount_max:
-                    amount = float(self.rng.exponential(amount_mean))
-            amount = max(1.0, amount)
+            if self.distribution_version in {"zipf_v7", "park_v7"}:
+                amount_min = int(self.config.get("amount_min", 50000))
+                amount_hi = int(self.config.get("amount_max", 200000))
+                if amount_min <= 0 or amount_hi < amount_min:
+                    raise ValueError(
+                        f"{self.distribution_version} requires 0 < amount_min <= amount_max"
+                    )
+                amount = float(self.rng.randint(amount_min, amount_hi + 1))
+            else:
+                amount = float(self.rng.exponential(amount_mean))
+                if amount_max > 0.0:
+                    while amount >= amount_max:
+                        amount = float(self.rng.exponential(amount_mean))
+                amount = max(1.0, amount)
             out.append(KeyRequest(f"REQ_{self.counter:08d}", src, dst, amount, t, deadline, self._sample_priority()))
         return out
 

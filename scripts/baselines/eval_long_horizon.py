@@ -27,8 +27,8 @@ sys.path.insert(0, str(ROOT))
 from qkd_rl.rl.algos.checkpoint import load_checkpoint
 from qkd_rl.rl.algos.policy import MAPPOPolicy
 from qkd_rl.env.factory import build_env_from_config
-from qkd_rl.evaluation.test_protocol import build_validation_env_config, checkpoint_validation_config
-from qkd_rl.rl.models.graph_mappo import GraphMAPPOActorCritic
+from qkd_rl.evaluation.test_protocol import build_validation_env_config, checkpoint_validation_config, load_validation_profile
+from qkd_rl.model_zoo import build_model
 
 
 def parse_args() -> argparse.Namespace:
@@ -64,34 +64,30 @@ def load_settings(args: argparse.Namespace) -> dict:
         "device": None,
     }
     config_path = Path(ROOT) / args.config
-    if config_path.exists():
-        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        ev = raw.get("global", {}).get("validation", {}) or {}
-        window = ev.get("window", {}) or {}
-        episode = ev.get("episode", {}) or {}
-        settings.update(
-            {
-                "checkpoints": list(ev.get("checkpoints", []) or []),
-                "window_start_day": int(window.get("start_day", settings["window_start_day"])),
-                "window_end_day": int(window.get("end_day", settings["window_end_day"])),
-                "episode_days": int(
-                    episode.get("days", ev.get("episode_days", settings["episode_days"]))
-                ),
-                "episode_steps": int(
-                    episode.get("steps", ev.get("episode_steps", settings["episode_steps"])) or 0
-                ),
-                "episodes": int(ev.get("episodes", settings["episodes"])),
-                "seed_start": int(ev.get("seed_start", settings["seed_start"])),
-                "seeds": [
-                    int(s)
-                    for s in (ev.get("seeds", []) or ev.get("request_seeds", []) or [])
-                ],
-                "start_seed": int(ev.get("start_seed", settings["start_seed"])),
-                "start_mode": str(ev.get("start_mode", settings["start_mode"])),
-                "out": str(ev.get("out", settings["out"])),
-                "device": ev.get("device", settings["device"]),
-            }
-        )
+    if not config_path.exists():
+        raise FileNotFoundError(f"validation config not found: {config_path}")
+    profile = load_validation_profile(config_path)
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    ev = (raw.get("global", {}) or {}).get("validation")
+    if ev is None:
+        ev = raw.get("validation")
+    ev = ev or {}
+    settings.update(
+        {
+            "checkpoints": list(ev.get("checkpoints", []) or []),
+            "window_start_day": int(profile["window_start_day"]),
+            "window_end_day": int(profile["window_end_day"]),
+            "episode_days": int(profile["episode_days"]),
+            "episode_steps": int(profile["episode_steps"]),
+            "episodes": int(profile["episodes"]),
+            "seed_start": int(profile["seed_start"]),
+            "seeds": [int(s) for s in profile["seeds"]],
+            "start_seed": int(profile["start_seed"]),
+            "start_mode": str(profile["start_mode"]),
+            "out": str(ev.get("out", settings["out"])),
+            "device": ev.get("device", settings["device"]),
+        }
+    )
 
     if args.checkpoints:
         settings["checkpoints"] = args.checkpoints
@@ -169,7 +165,7 @@ def main() -> None:
         data = load_checkpoint(ckpt, device)
         config = checkpoint_validation_config(data.config, validation_config)
         env = build_env_from_config(config)
-        model = GraphMAPPOActorCritic(env.action_resolver.action_space, config)
+        model = build_model(env.action_resolver.action_space, config)
         policy = MAPPOPolicy(model, device)
         model.load_state_dict(data.model_state)
         model.eval()
@@ -206,7 +202,10 @@ def main() -> None:
                     "served_keys": summary["served_keys"],
                     "failed_keys": summary["failed_keys"],
                     "success_rate": summary["success_rate"],
+                    "mean_request_fulfillment": summary["mean_request_fulfillment"],
                     "request_completion_rate": summary["request_completion_rate"],
+                    "completed_wait_steps_mean": summary["completed_wait_steps_mean"],
+                    "generated_keys": summary["generated_keys"],
                     "arrived_requests": summary["arrived_requests"],
                     "completed_requests": summary["completed_requests"],
                     "total_reward": round(float(total_reward), 3),
@@ -220,9 +219,16 @@ def main() -> None:
             "checkpoint": str(ckpt),
             "update": data.update,
             "mean_success_rate": round(statistics.mean(r["success_rate"] for r in rows), 6),
+            "mean_request_fulfillment": round(
+                statistics.mean(r["mean_request_fulfillment"] for r in rows), 6
+            ),
             "mean_request_completion_rate": round(
                 statistics.mean(r["request_completion_rate"] for r in rows), 6
             ),
+            "mean_completed_wait_steps": round(
+                statistics.mean(r["completed_wait_steps_mean"] for r in rows), 3
+            ),
+            "mean_generated_keys": round(statistics.mean(r["generated_keys"] for r in rows), 3),
             "mean_served_keys": round(statistics.mean(r["served_keys"] for r in rows), 3),
             "mean_arrived_keys": round(statistics.mean(r["arrived_keys"] for r in rows), 3),
             "min_success_rate": round(min(r["success_rate"] for r in rows), 6),
