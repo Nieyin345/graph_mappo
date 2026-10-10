@@ -1636,7 +1636,7 @@ def main(argv=None) -> int:
         input_sources=(
             {
                 "cloud_layers": "ERA5 via Open-Meteo Historical Weather API (models=era5, elevation=nan)",
-                "visibility": "ERA5 via Open-Meteo Historical Weather API (models=era5); drives the v7.5 Koschmieder-Kim weather extinction",
+                "visibility": "UKMO deterministic model (ukmo_seamless) via Open-Meteo historical-forecast API; drives the v7.5 Koschmieder-Kim weather extinction",
                 "surface_most": "ERA5 single-levels via CDS",
             }
             if cfg.channel_model == "v7" else {}

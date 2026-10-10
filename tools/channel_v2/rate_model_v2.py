@@ -99,7 +99,14 @@ class ParamsV2:
     # tau_wx = 3.91 * (1/V - 1/V_max) * (lam/550)^-q * H_w : the increment over the clear-sky
     # reference V_max, so it never double-counts the fixed molecular background in eta_mol.
     weather_layer_km: float = 2.0   # H_w: near-ground fog/haze layer thickness (StratoQ _LAYER_KM fog=2)
-    clear_visibility_km: float = 50.0  # V_max: visibility treated as extreme-clear (tau_wx -> 0)
+    # V_max: the clear-sky reference of the weather-extinction increment. tau_wx -> 0 as
+    # V -> V_max, so it must sit at the "clean" end of the source data, NOT at a generic
+    # literature clean-air threshold (Kim's 50 km is a q-branch boundary, not a subtraction
+    # zero point; using it would impose spurious clear-sky attenuation, since no station is
+    # ever near 50 km). The v7.5 visibility source (UKMO via Open-Meteo) tops out near
+    # 28-29 km in clear conditions, so V_max is set to its clear-sky ceiling. Sensitivity is
+    # only ~3-6% between V_max=28 and 50 (spec §7), so this is a detail, not a driver.
+    clear_visibility_km: float = 28.0
     hv_wind: float = 21.0           # HV-5/7 (Andrews 2005 ch. 12; Liorni 2019 text after eq. (E.1))
     a_day: float = 2.75e-14         # fallback near-ground Cn2 (Liorni 2019 App. E, after eq. (E.1)) when no ERA5 flux
     a_night: float = 1.10e-14
@@ -449,7 +456,10 @@ class RateModelV2:
         p = self.p
         v = np.asarray(vis_km, dtype=float)
         v_eff = np.maximum(v, 1e-6)
-        q = np.where(v_eff > 50.0, 1.6,
+        # Kim wavelength exponent q (Kim 2001). The upper branch is keyed to the
+        # configured clear-sky reference V_max so that no sample below V_max falls
+        # into the >50 km branch when V_max is set to a different value.
+        q = np.where(v_eff > p.clear_visibility_km, 1.6,
                      np.where(v_eff > 6.0, 1.3, 0.585 * np.power(v_eff, 1.0 / 3.0)))
         k_lam = (p.lam * 1e9 / 550.0) ** (-q)
         tau_wx = 3.91 * (1.0 / v_eff - 1.0 / p.clear_visibility_km) * k_lam * p.weather_layer_km
@@ -547,6 +557,10 @@ class RateModelV2:
         p = self.p
         parts = {}
         if ltype in ("SAT-GS", "HAP-GS"):
+            if vis_km is None and aod550 is None:
+                raise ValueError(
+                    f"{ltype} requires vis_km (v7.5 Koschmieder-Kim, km) or the legacy aod550"
+                )
             tx = "SAT" if ltype == "SAT-GS" else "HAP"
             hv = self.hv_sat if tx == "SAT" else self.hv_hap
             # 分子消光气柱上端取发射端实际高度 H（SAT-GS=550 km、HAP-GS=20 km，见规范 §2.3.2），

@@ -1,15 +1,24 @@
 """Fetch the 2023 weather inputs needed by the v7.5 rate model.
 
-For every ground station in the station CSV:
-  * Open-Meteo historical weather (ERA5): total cloud cover, 2 m temperature,
-    surface pressure, and hourly **visibility** (the v7.5 weather-extinction driver)
-Hourly, UTC, 2023-01-01 .. 2023-12-31.  Cached to .tmp/channel_v2/weather/<name>.csv.
-Does not touch weather/2023/ or dataset/global/.
+For every ground station in the station CSV, hourly UTC, 2023-01-01 .. 2023-12-31:
+  * Open-Meteo historical-forecast API, model ``ukmo_seamless``: hourly **visibility**
+    (the single v7.5 weather-extinction driver, spec §3.3). ERA5 does not expose a
+    continuous visibility field (Open-Meteo returns null) and the METAR-derived
+    observations are binned at the clear-sky ceiling, so the UKMO diagnostic
+    visibility is used instead; it is continuous and covers all extinction sources
+    (molecular, aerosol, haze, fog, precipitation).
+  * Open-Meteo archive API, model ``era5``: total cloud cover, 2 m temperature,
+    surface pressure (kept for the legacy v2 cloud column and provenance).
+
+Cached to .tmp/channel_v2/weather/<name>.csv.  Does not touch weather/2023/ or dataset/.
 
 The legacy CAMS aerosol optical depth column is no longer required: the v7.5 baseline
-derives tropospheric weather extinction (aerosol, haze, fog, precipitation) from a single
-Koschmieder-Kim visibility term (spec §3.3). ``--with-aod`` can still fetch the AOD column
-for legacy-v2 reproducibility.
+derives tropospheric weather extinction from a single Koschmieder-Kim visibility term
+(spec §3.3). ``--with-aod`` can still fetch the AOD column for legacy-v2 reproducibility.
+
+The METAR-observation ISD/IEM visibility source is deliberately NOT used: its clear-sky
+values are binned at the station ceiling (e.g. 10 km or 16 km), and feeding those bins
+into Koschmieder-Kim would impose a spurious clear-sky attenuation.
 """
 from __future__ import annotations
 
@@ -24,7 +33,10 @@ import pandas as pd
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 OUT = os.path.join(ROOT, ".tmp", "channel_v2", "weather")
 
-WEATHER_SOURCE_MODEL = "era5"
+# Visibility source: UKMO deterministic model via the historical-forecast API.
+VIS_SOURCE_MODEL = "ukmo_seamless"
+# Cloud / T / P source: ERA5 reanalysis via the archive API (legacy v2 cloud column).
+ERA5_SOURCE_MODEL = "era5"
 AOD_SOURCE_MODEL = "cams_global"
 
 def has_exact_2023_hourly_axis(df: pd.DataFrame) -> bool:
@@ -41,9 +53,13 @@ def has_exact_2023_hourly_axis(df: pd.DataFrame) -> bool:
         == expected.astype("int64").to_numpy().tolist()
     )
 
+VIS = ("https://historical-forecast-api.open-meteo.com/v1/forecast"
+       "?latitude={lat}&longitude={lon}"
+       "&start_date=2023-01-01&end_date=2023-12-31"
+       "&hourly=visibility&timezone=UTC&models=" + VIS_SOURCE_MODEL)
 ARCHIVE = ("https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}"
            "&start_date=2023-01-01&end_date=2023-12-31"
-           "&hourly=cloud_cover,temperature_2m,surface_pressure,visibility&timezone=UTC"
+           "&hourly=cloud_cover,temperature_2m,surface_pressure&timezone=UTC"
            "&models=era5&elevation=nan&cell_selection=nearest")
 AQ = ("https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}"
       "&start_date=2023-01-01&end_date=2023-12-31&hourly=aerosol_optical_depth"
@@ -53,7 +69,7 @@ AQ = ("https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&long
 def get_json(url: str, tries: int = 5) -> dict:
     for i in range(tries):
         try:
-            with urllib.request.urlopen(url, timeout=90) as r:
+            with urllib.request.urlopen(url, timeout=120) as r:
                 return json.load(r)
         except Exception as exc:  # noqa: BLE001
             print(f"  retry {i + 1}/{tries}: {exc}", flush=True)
@@ -79,8 +95,10 @@ def main() -> None:
             cached = pd.read_csv(path, nrows=16)
             has_cols = all(c in cached.columns for c in needed)
             tags_ok = (
-                "weather_source_model" in cached.columns
-                and set(pd.read_csv(path, usecols=["weather_source_model"])["weather_source_model"].dropna().astype(str)) == {WEATHER_SOURCE_MODEL}
+                "vis_source_model" in cached.columns
+                and "weather_source_model" in cached.columns
+                and set(pd.read_csv(path, usecols=["vis_source_model"])["vis_source_model"].dropna().astype(str)) == {VIS_SOURCE_MODEL}
+                and set(pd.read_csv(path, usecols=["weather_source_model"])["weather_source_model"].dropna().astype(str)) == {ERA5_SOURCE_MODEL}
                 and has_exact_2023_hourly_axis(pd.read_csv(path))
             )
             aod_ok = (not args.with_aod) or (
@@ -90,26 +108,31 @@ def main() -> None:
             if has_cols and tags_ok and aod_ok:
                 print("cached", row["name"])
                 continue
+        vis = get_json(VIS.format(lat=row["lat"], lon=row["lon"]))["hourly"]["visibility"]
+        if not vis or len(vis) != 8760 or any(v is None for v in vis):
+            raise RuntimeError(f"{row['name']}: ukmo visibility incomplete "
+                               f"({0 if not vis else sum(v is not None for v in vis)}/8760)")
         a = get_json(ARCHIVE.format(lat=row["lat"], lon=row["lon"]))["hourly"]
         df = pd.DataFrame({
             "time": a["time"],
             "cloud_cover": a["cloud_cover"],
             "temperature_2m": a["temperature_2m"],
             "surface_pressure": a["surface_pressure"],
-            "visibility": a["visibility"],
+            "visibility": vis,
         })
         if args.with_aod:
             q = get_json(AQ.format(lat=row["lat"], lon=row["lon"]))["hourly"]
             aod = pd.Series(q["aerosol_optical_depth"], index=q["time"])
             df["aod550"] = df["time"].map(aod)
             df["aod_source_model"] = AOD_SOURCE_MODEL
-        df["weather_source_model"] = WEATHER_SOURCE_MODEL
+        df["vis_source_model"] = VIS_SOURCE_MODEL
+        df["weather_source_model"] = ERA5_SOURCE_MODEL
         df["source_api"] = "open-meteo"
-        n_nan = int(df["visibility"].isna().sum())
         df.to_csv(path, index=False)
-        print(f"{row['name']}: rows={len(df)} vis_nan={n_nan} "
-              f"cloud_mean={df['cloud_cover'].mean():.1f}% vis_median_km={df['visibility'].median()/1000.0:.1f}",
-              flush=True)
+        print(f"{row['name']}: rows={len(df)} "
+              f"vis_median_km={df['visibility'].median()/1000.0:.1f} "
+              f"vis_min_km={df['visibility'].min()/1000.0:.2f} "
+              f"cloud_mean={df['cloud_cover'].mean():.1f}%", flush=True)
         time.sleep(1.0)
     print("done")
 
