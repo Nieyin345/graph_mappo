@@ -268,18 +268,25 @@ class RateModelV7(RateModelV2):
         wd2 = self.p.w0[tx]**2 + (self.p.lam*L/(np.pi*self.p.w0[tx]))**2
         vr = self.scint_var(elev_deg, A, hv) if rx == "GS" else 0.0
         extra = 3.26*L/self.p.k*np.asarray(vr)**(6/5)
+        # 指向抖动**只含发射端**机械残差 sigma_theta[tx]（规范 §3.2）。
+        # ★ SAT-HAP / SAT-SAT 两端都在动，接收端指向抖动**未叠加**，是本模型的
+        #   明确工程简化，非物理正确：这两类链路的绝对速率被系统性高估，误差随
+        #   接收端机械残差量级可取 ~1.4x。规范 §3.2 已列此限；仅当结论依赖这两类
+        #   链路的绝对率时，才补 (sigma_rx*L)**2 一项重测。不得声称其为精确值。
         width = wd2 + extra + 4*(self.p.sigma_theta[tx]*L)**2
         return -np.expm1(-2*(self.p.d_rx[rx]/2)**2/width), extra/wd2
 
     def y0(self, rx, lb):
         return -np.expm1(-super().y0(rx, lb))
 
-    def optical_states(self, ltype, L, elev, *, A=None, vis_km=0.0, sun=0.0,
+    def optical_states(self, ltype, L, elev, *, A=None, vis_km=None, sun=0.0,
                        high_cloud=0.0, tau_cirrus=0.3, h_gs_km=0.0):
         """Caller applies LOS/elevation. Returns state statistics and domain diagnostics.
 
         ``vis_km`` is the station-hour visibility (km) driving the v7.5 Koschmieder-Kim
-        weather extinction via ``eta_wx`` (replaces the earlier AOD column)."""
+        weather extinction via ``eta_wx`` (replaces the earlier AOD column). It is
+        required (non-None) for ground links and ignored for space links; ``None``
+        means "not supplied", never a physical value."""
         from tools.channel_v2.rate_model_v2 import airmass_kasten_young
         if not np.isfinite(tau_cirrus) or tau_cirrus < 0:
             raise ValueError("tau_cirrus must be finite and nonnegative")
@@ -295,6 +302,11 @@ class RateModelV7(RateModelV2):
         if ground:
             if A is None or sun is None:
                 raise ValueError("ground links require matched HV coefficient A and solar elevation")
+            if vis_km is None:
+                raise ValueError(
+                    "ground links require vis_km (station-hour visibility in km); "
+                    "pass the dataset visibility, not the default"
+                )
             A, vis_km = np.asarray(A, float), np.asarray(vis_km, float)
             if np.any(~np.isfinite(A)) or np.any(A < 0):
                 raise ValueError("matched HV coefficient A must be finite and nonnegative")
